@@ -53,13 +53,9 @@ packages:
   - packages/logging
   - packages/steering-control
   - packages/mcoded
-  - packages/remote-env
-  - packages/speculation
   - packages/prompt-cache
-  - packages/extension-dispatcher
   - packages/codemode-host
   - packages/durable-orchestration
-  - packages/chord-host
   - third_party/pi-durable
   - third_party/chord
 overrides:

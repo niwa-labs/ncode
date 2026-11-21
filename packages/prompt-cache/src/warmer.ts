@@ -1,15 +1,8 @@
 // The ONE CacheWarmer controller (W06 part B) — port of the pin's
 // `coding-agent/src/core/cache-warmer.ts` (48c8f32, read line-by-line).
 //
-// Fate per the map (§4 row `speculation prewarm`, port-plan.md:501): «Два
-// источника намерения, ОДИН cost/TTL/budget controller и in-flight warm job.
-// Спекуляция не становится вторым CacheWarmer». The pin's standalone warmer
-// wiring (coding-agent `sdk.ts` streamFn → `cacheWarmer.start`) is absorbed
-// HERE: this class is the single warm-intention point for the product —
-// `source: 'agent'` marks a real session request, `source: 'speculation'`
-// marks a speculation-side prewarm intention (the `@mavis/speculation`
-// package keeps classifier/budget/execution and DELEGATES warming to this
-// controller; it never spawns its own warmer — pinned by test).
+// A session's main requests and speculative prewarm intentions share this
+// controller and its single in-flight job. The source label is diagnostic.
 //
 // Adaptations over the donor (the rest is a faithful port):
 //   - `models.streamSimple` is our composed stream path (`StreamFn` from

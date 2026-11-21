@@ -313,9 +313,6 @@
       "@mavis/cas/store-errors": [
         "./packages/cas/src/store-errors.ts"
       ],
-      "@mavis/chord-host": [
-        "./packages/chord-host/src/index.ts"
-      ],
       "@mavis/codemode-host": [
         "./packages/codemode-host/src/index.ts"
       ],
@@ -372,9 +369,6 @@
       ],
       "@mavis/durable-seam": [
         "./packages/durable-seam/src/index.ts"
-      ],
-      "@mavis/extension-dispatcher": [
-        "./packages/extension-dispatcher/src/index.ts"
       ],
       "@mavis/goal": [
         "./packages/agent-modules/goal/src/index.ts"
@@ -459,15 +453,6 @@
       ],
       "@mavis/protocol/local": [
         "./packages/protocol/src/local.ts"
-      ],
-      "@mavis/remote-env": [
-        "./packages/remote-env/src/index.ts"
-      ],
-      "@mavis/remote-env/gateway-adapter": [
-        "./packages/remote-env/src/gateway-adapter.ts"
-      ],
-      "@mavis/remote-env/mcoded": [
-        "./packages/remote-env/src/mcoded-env-adapter.ts"
       ],
       "@mavis/runaway-guard": [
         "./packages/agent-modules/runaway-guard/src/index.ts"
@@ -628,9 +613,6 @@
       "@mavis/skills": [
         "./packages/agent-modules/skills/src/index.ts"
       ],
-      "@mavis/speculation": [
-        "./packages/speculation/src/index.ts"
-      ],
       "@mavis/steering-control": [
         "./packages/steering-control/src/index.ts"
       ],
@@ -675,8 +657,6 @@
     "packages/tui/src/index.ts",
     "packages/durable-core/src/index.ts",
     "packages/codemode-host/src/index.ts",
-    "packages/chord-host/src/index.ts",
-    "packages/extension-dispatcher/src/index.ts",
     "packages/durable-backend-sqlite-zstd/src/index.ts",
     "packages/storage-worker/src/index.ts",
     "packages/cas/src/index.ts",
