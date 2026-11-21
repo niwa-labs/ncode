@@ -1,24 +1,29 @@
 # Source boundaries
 
-`TUI / exec / ACP → CliService → local Applications → Session / Turn / Agent services → Pi / model providers / local tools`.
+By default, the terminal, `mcode exec`, and ACP connect to the same daemon for
+the selected profile and data directory. The CLI starts the daemon on demand.
+It runs the local runtime and owns the shared orchestration log. Set
+`MCODE_SERVER_MODE=off` to run the runtime in the client process.
 
-- `packages/tui` owns terminal interaction and the headless and ACP adapters.
-- `packages/local-runtime-v2/src/local` is the in-process product entry point. Session query views and queue contracts derive from local service types and converters.
-- `packages/local-runtime-v2/src/application` handles sessions, queues, and interactions. It does not instantiate DesktopService, an HTTP front door, or cloud handoff services.
-- `packages/protocol/src/local.ts` contains CLI data structures; `runtime.ts` contains agent configuration and events. Neither includes RPC envelopes, service routing, authentication headers, or an IDL generation chain. Some numeric enums preserve compatibility with existing saved sessions.
-- `packages/local-runtime` supplies reused host facilities such as databases, file tools, permissions, and storage. Historical readers only read old session files; they do not proxy to a daemon or fall back to a legacy executor.
-- `third_party/pi-mono` supplies agent, model-protocol, and terminal infrastructure. `third_party/sandbox-runtime` retains the actual sandbox fork, native helpers, and corresponding source.
+- `packages/tui` owns the three CLI surfaces and their runtime adapters.
+- `packages/mcoded` owns the daemon and its local socket. It carries turn
+  events, permission decisions, queue receipts, and reconnect cursors.
+- The [local runtime](../packages/local-runtime-v2) owns sessions, turns, tool execution, and
+  orchestration. Each session gets its own durable SQLite/Zstd history store.
+  The runtime can read the older shared store and supports JSONL through
+  `MCODE_HISTORY_PROVIDER=jsonl`.
+- The context packages project canonical history, bound media residency,
+  compact history into checkpoints, and assemble provider requests.
+- Pi v1.5.2 runs the provider and tool loop. Pi Durable and Chord supply
+  persistence and orchestration primitives. Their licenses and pins are in
+  [Third-party notices](../THIRD_PARTY_NOTICES.md).
+- `packages/local-runtime` supplies shared host facilities such as permissions,
+  filesystem tools, databases, and sandboxing. OAuth Core manages MiniMax
+  credentials. The tool launcher obtains short-lived leases from the host.
 
-`@mavis/*` names identify private workspace packages in this repository. The build resolves their source directly rather than downloading them from an internal registry. These packages are not independently published npm APIs.
+The private `@mavis/*` packages resolve to workspace sources.
+`release/public-source.json` lists the exported files. `pnpm check:source`
+checks the inventory and `pnpm check:standalone` checks the build graph.
 
-The unused `@mavis/team` cycle engine is excluded from this projection. TUI delegation uses the current runtime task services. Legacy queue, lock-owner and run-location files retain only the types consumed by shared adapters; V2 owns their execution and persistence.
-
-`release/public-source.json` explicitly lists delivered files. `check:source` checks that inventory, canonical root license text, internal addresses, retired modules, obvious credentials, and workspace exports. `check:standalone` separately checks the actual build dependency graph. New files require explicit inventory updates; absence from the bundle alone does not make source suitable for publication.
-
-## Managed capabilities and tool integration
-
-The TUI continues to use the same runtime through local applications and services. MiniMax OAuth Core manages profile credentials, refresh, and logout. mcode-tools-host provides short-lived access tokens to tool subprocesses through a local lease broker. Official plugins, connectors, accounts, and search use their public service clients without restoring DesktopService or an HTTP front door.
-
-Headless model overrides are passed to a read-only account-state check so authentication requirements follow the model selected for that run. The check does not change global configuration or the session model; execution still uses the existing model resolver, permissions, and tools.
-
-The public distribution configures production regional services only. Non-production environments retained in shared types use reserved `.example.invalid` placeholders. The public CLI rejects internal environment switches and provides no default connection to internal services.
+See [Installation](installation.md#local-daemon) for daemon commands and
+[Verification](verification.md) for the scenarios exercised by local tests.

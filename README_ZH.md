@@ -140,6 +140,8 @@ mcode exec --mode lightweight "概述 CAP 定理。"
 
 ### 继续之前的工作
 
+终端、Headless CLI 和 ACP 共用所选 profile 的本地守护进程。参见[守护进程命令](docs/installation.md#local-daemon)。
+
 ```bash
 # 恢复当前工作区最近的会话
 mcode --continue
@@ -243,12 +245,12 @@ pnpm mcode
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-本仓库目标为 **0.6.3 源码预览**。安装已发布的包与构建本仓库是两条独立路径，版本一致不代表构建来源完全相同，详见[版本与证据基线](docs/open-source-status.md#version-and-evidence-baseline)。
+本仓库构建 **Niwa Labs MCode 0.7.2**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
 
 ## 文档与贡献
 
 - [安装与账号配置档](docs/installation.md)
-- [架构](docs/architecture.md)与[组件文档](docs/components)
+- [架构](docs/architecture.md)
 - [贡献指南](CONTRIBUTING.md)、[安全报告](SECURITY.md)和[第三方声明](THIRD_PARTY_NOTICES.md)
 
 如需反馈分支问题，请使用 Niwa Labs 分支的 Issues。MiniMax 账号、官方安装器和桌面应用请参阅

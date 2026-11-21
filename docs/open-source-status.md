@@ -1,34 +1,31 @@
-# Upstream public source status
+# Source status
 
-This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
-
-The current source target is **TUI 0.7.2**. This repository contains the terminal TUI, headless CLI, ACP implementation, and the public distribution tooling around them.
+Niwa Labs distributes this fork as source. MiniMax publishes the official
+installers and registry packages.
 
 ## Version and evidence baseline
 
-| Concern | Current value | Source of truth |
-| --- | --- | --- |
-| TUI capability version | 0.7.2 | `packages/tui/package.json` |
-| Root workspace version | 0.7.2, aligned with the TUI | Root `package.json` |
-| Published npm observation | `@minimax-ai/code@0.6.9`; npm `latest` was 0.6.9 on 2026-10-13 | Public npm registry |
-| Shared-source baseline | `9b9885e42a3cf1a3df1cfa52a46e4fdb034cfcee` | `release/extraction.json` |
-| Embedded mcode-tools | 0.0.4, extracted from public `@minimax-ai/code@0.3.11` | `scripts/lib/mcode-tools-artifact.mjs` |
-| Historical live-service acceptance and demo | TUI 0.3.11, recorded 2026-09-11 | `docs/verification.md`, `docs/release-audit.md`, `docs/demo.md` |
+| Concern | Version or revision |
+| --- | --- |
+| CLI and workspace | 0.7.2 in the root and TUI manifests |
+| Git fork base | `3c21163c85a9684030cb147bfef48c6284fa3c46` |
+| Earlier upstream source extraction | `9b9885e42a3cf1a3df1cfa52a46e4fdb034cfcee` in `release/extraction.json` |
+| Pi, Pi Durable and Chord | Pi v1.5.2, with fork changes noted under `third_party/` |
+| Embedded mcode-tools | 0.0.4, extracted from the pinned public npm archive |
 
-The product, TUI, and root workspace use the same 0.7.2 version. The embedded tool has its own version. Workspace and local-build manifests remain `private: true` to prevent accidental npm publication, except `@minimax-ai/code-sdk`, the TypeScript SDK. It is published separately, only from a tarball checked by `release:check`, and `prepublishOnly` rejects `npm publish` in that package directory (see `packages/code-sdk/RELEASING.md`). Matching version strings do not prove that this source tree reproduces the published npm tarball.
+The product version identifies the CLI interface. The build receipt records the
+source revision. See [Verification](verification.md) for the tested scope and
+the [historical release audit](release-audit.md) for upstream evidence.
 
 ## Source boundary
 
-- MiniMax OAuth and Token Plan, BYOK, accounts, quota views, the official plugin marketplace, managed connectors, search, mcode-tools, updates, feedback, and bounded diagnostic clients are included.
-- The in-process runtime, public workspace dependencies, tools, and sandbox are included. Internal generated IDL, the Desktop HTTP front door, and cloud-executor-only implementations are excluded.
-- mcode-tools is extracted from a pinned public npm package with archive and file-hash verification. Only the host holds refresh tokens.
-- Source checks permit reviewed public service API paths while rejecting internal addresses, generated protocols, and obvious credentials.
-- Internal Git history stays outside this repository. Shared-source updates use the reviewed process in [Source synchronization](source-sync.md).
-
-See [TUI capability coverage](tui-capabilities.md) for individual features, [Verification records](verification.md) for evidence, and [Publication scope](publication-authorization.md) for the repository boundary.
+The source tree includes terminal, headless and ACP clients, the local daemon,
+durable session history and context, and compatible BYOK and MiniMax account
+clients. Some capabilities require accounts, quota, or external services.
+[Architecture](architecture.md) describes how they connect.
 
 ## Repository baseline
 
-The initial CLI source snapshot was imported into `MiniMax-AI/minimax-code` on 2026-09-18 at commit `c59cf5377045aa1a3e699c242d089b73b7cdc2ad`. Commit `4e2e7bb5f771e9c42b2edefb1046483819b9032f` restored the Desktop image above the download links. The import preserved the repository's Desktop issue history and support workflow while adding the CLI source without internal Git history.
-
-Open dependency upgrades remain separate changes and require their own review and validation. Current test results and untested service boundaries are recorded in [Verification records](verification.md).
+The checked-in [source inventory](../release/public-source.json) lists the files
+included in the source export. See [license status](../LICENSE-STATUS.md) and
+[third-party notices](../THIRD_PARTY_NOTICES.md) for their terms.

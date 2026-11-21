@@ -77,7 +77,7 @@ terminal-tab indicator, not a guarantee of a desktop notification. See the
 Inside tmux, OSC notifications require passthrough and support from the outer
 terminal; use `method: bel` for a bell fallback.
 
-The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. It does not claim fresh TUI 0.6.3 live-service acceptance. Use [current verification status](verification.md#current-source-verification-status) for checks run against the updated source and explicit NOT RUN boundaries.
+The evidence column summarizes the historical TUI 0.3.11 restoration record from 2026-09-11. [Current verification](verification.md#current-source-verification-status) lists the offline checks for this fork.
 
 | Capability | Implementation | Evidence |
 | --- | --- | --- |

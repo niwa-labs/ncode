@@ -4,9 +4,9 @@
 
 ## Get started
 
-- [Official CLI quick start](https://agent.minimax.io/docs/cli/quick-start): installation, account regions, first tasks, and sessions.
 - [Install from source](installation.md): prerequisites, build, project usage, updates, and removal.
 - [Examples](examples.md): code fixes, model selection, search, and image input.
+- [Run the built fork from an ACP editor](../packages/code-acp/README.md).
 - [Real TUI demo](demo.md): a 20-second replay, still image, and reproduction steps.
 - [Status line configuration](../packages/tui/docs/status-line-config.md): the default status line and optional machine-readable mode.
 - [Capabilities and service boundaries](tui-capabilities.md): accounts, tools, plugins, sandboxing, and network behavior.
@@ -15,7 +15,7 @@
 ## Contribute
 
 - [Contributing](../CONTRIBUTING.md) · [Maintainers and review](maintainers.md) · [Security reporting](../SECURITY.md)
-- [Architecture](architecture.md) · [Verification records](verification.md)
+- [Architecture](architecture.md) · [Verification](verification.md)
 
 ## Maintain and release
 

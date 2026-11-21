@@ -168,7 +168,9 @@ mcode --continue
 mcode --session
 ```
 
-Inside the TUI, use `/sessions` to find previous sessions and `/help` to see all commands and shortcuts.
+The terminal, headless CLI, and ACP share a local daemon for the selected
+profile. See [daemon commands](docs/installation.md#local-daemon). Inside the
+TUI, use `/sessions` to find previous sessions and `/help` for commands and shortcuts.
 
 | Action | Shortcut |
 | --- | --- |
@@ -263,12 +265,12 @@ From the source directory, use `pnpm mcode` in place of `mcode` in the examples 
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-This repository targets the **0.6.3 source preview**. Installing the published package and building this checkout are separate paths. Matching versions do not prove identical build provenance; see the [version and evidence baseline](docs/open-source-status.md#version-and-evidence-baseline).
+This checkout builds the **Niwa Labs MCode 0.7.2** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
 
 ## Documentation and contributing
 
 - [Installation and account profiles](docs/installation.md)
-- [Architecture](docs/architecture.md) and [component documentation](docs/components)
+- [Architecture](docs/architecture.md)
 - [Contributing](CONTRIBUTING.md), [security reporting](SECURITY.md) and [third-party notices](THIRD_PARTY_NOTICES.md)
 
 Use the Niwa Labs fork’s issues for fork behavior. For MiniMax accounts,

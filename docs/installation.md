@@ -5,8 +5,8 @@
 Open your checkout of the Niwa Labs fork and build it below. For MiniMax’s
 installers, npm packages and GitHub release archives, see the
 [upstream installation guide](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/installation.md).
-The built-in update channel belongs to the official npm distribution. Update
-this source build by rebuilding a newer fork revision.
+Update this build by checking out a newer fork revision and rebuilding it.
+`mcode update` shows the same instruction.
 
 For a source build, you need Git, Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26, and pnpm 9.12.0. Regular CI uses Node.js 24 across Linux and macOS. The weekly and manual compatibility matrix covers Node.js 22.19.0, 24.2.0, 25, and 26 on both platforms. Windows CI and source-candidate validation are temporarily paused while their checks are made reliable. Initial installation and build require access to public npm.
 
@@ -35,6 +35,19 @@ node /absolute/path/to/your-checkout/dist/cli.js
 ```
 
 On Windows, also use `node` with the appropriate local absolute path. Do not overwrite another globally installed command with this source build.
+
+## Local daemon
+
+Terminal, headless, and ACP sessions start or reuse a local daemon for the
+selected data directory. The daemon keeps running after the client exits.
+Inspect it with `mcode daemon status`, or stop it with `mcode daemon stop`.
+Use the same `--profile` as the client. A normal stop refuses to interrupt
+active work.
+
+Use `MCODE_SERVER_MODE=off` for an in-process session. For JSONL compatibility,
+set `MCODE_HISTORY_PROVIDER=jsonl` in the runtime environment. Stop a running
+daemon before changing its history backend.
+[Architecture](architecture.md) describes the storage and routing choices.
 
 ## Accounts and data
 

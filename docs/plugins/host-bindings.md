@@ -2,7 +2,7 @@
 
 Host Binding 是 manifest V1 的可选属性，不需要另起一版包格式。V1 的路径、archive、digest、App、
 MCP、Skill 和 Hook 契约保持不变；未声明该属性的普通插件行为不变。
-这里的 V1 指插件包格式，与 Desktop 使用的 Local Runtime V2 不是同一个版本概念。
+这里的 V1 指插件包格式。
 国内外 Marketplace 使用同一扩展契约；某个区域支持此格式，不代表其 catalog 已上架 Browser Use。
 
 ## 1. 适用范围
