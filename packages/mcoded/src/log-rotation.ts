@@ -1,7 +1,7 @@
 /**
  * Rotation of the daemon log (`logs/mcoded.log`) the spawners point the
  * child's stdio at (design 15, ДИЗАЙН 2): bound a file that was growing
- * unboundedly (132 МБ default / 84 МБ cedar at design time).
+ * unboundedly.
  *
  * Two cooperating halves:
  * - `rotateBeforeSpawn` (М3) — the SPAWNER-side rename rotation, run before
