@@ -50,7 +50,7 @@
     "packages/steering-control",
     "packages/storage-worker",
     "packages/tui",
-    "packages/v2-adapter",
+    "packages/legacy-history",
     "packages/wire-compiler",
     "third_party/chord",
     "third_party/pi-durable",

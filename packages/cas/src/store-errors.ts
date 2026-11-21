@@ -18,7 +18,7 @@
  *
  * - `@mavis/agent-tools` (`src/truncation/cas-spill.ts`) — tool-output and
  *   inline-image spill on the pre-commit hot path;
- * - `@mavis/v2-adapter` (`src/cas-image-hook.ts`) — image externalization
+ * - `@mavis/legacy-history` (`src/cas-image-hook.ts`) — image externalization
  *   during the v2 import.
  *
  * @module

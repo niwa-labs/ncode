@@ -5,7 +5,7 @@
  * into one EXPLICITLY given durable root:
  *
  *   fingerprint → receipt (pending) → CAS externalization (hooks on the same
- *   root) → streaming v2-adapter read → canonical decode → chunked seed
+ *   root) → streaming legacy-history read → canonical decode → chunked seed
  *   (begin/chunk/commit of `seed-protocol.ts`, flushed per chunk) → receipt
  *   complete.
  *
@@ -213,7 +213,7 @@ export interface RunHistoryImportOptions {
   readonly receipt?: string;
   /** Keep image blocks inline (`cas: null`) instead of CAS at the root. */
   readonly keepImagesInline?: boolean;
-  /** Records per target delivery batch (the v2-adapter default applies when unset). */
+  /** Records per target delivery batch (the legacy-history default applies when unset). */
   readonly batchRecords?: number;
   /** Chunk budget override (protocol default ~6 MiB; small values are for tests). */
   readonly chunkTargetBytes?: number;

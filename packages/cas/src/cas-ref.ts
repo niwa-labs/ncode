@@ -9,7 +9,7 @@
  *
  * - `@mavis/agent-tools` (`src/truncation/cas-spill.ts`) re-exports both
  *   helpers and builds spill references with the builder;
- * - `@mavis/v2-adapter` (`src/cas-image-hook.ts`) re-exports them and builds
+ * - `@mavis/legacy-history` (`src/cas-image-hook.ts`) re-exports them and builds
  *   `image_ref` blob descriptors with the same builder.
  *
  * Both packages previously carried byte-identical hand-synced copies ("if

@@ -83,7 +83,7 @@ export interface OpenPiDurableCompositionRootOptions {
   /** Directory holding `sessions.gN.db`; the sidecar is written here. */
   readonly directory: string;
   /**
-   * Pre-commit validator for pi writes (W02 `v2-adapter` CAS hook in the
+   * Pre-commit validator for pi writes (W02 `legacy-history` CAS hook in the
    * full composition); omitted validators skip the hook. A rejection fails
    * the offending commit only.
    */

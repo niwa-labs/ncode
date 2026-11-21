@@ -19,7 +19,7 @@ import {
   type CasImageOption,
 } from './cas-image-hook.js';
 
-/** Spec §4 registry: `mcode:adapter` is the v2-adapter namespace. */
+/** Spec §4 registry: `mcode:adapter` is the legacy-history namespace. */
 const log = createLogger('mcode:adapter');
 
 /** Name of the canonical history file inside a v2 session directory. */

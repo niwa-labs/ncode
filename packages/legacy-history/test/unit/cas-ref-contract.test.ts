@@ -16,7 +16,7 @@ import { parseCasSpillRef as v2ParseCasSpillRef } from '../../src/index.js';
 // package that drops the re-export or restates the format locally fails here.
 
 describe('cas:// reference contract is shared across the wave packages', () => {
-  it('a reference built by agent-tools parses in v2-adapter', () => {
+  it('a reference built by agent-tools parses in legacy-history', () => {
     const reference = agentToolsCasSpillRef('a'.repeat(64), 1234);
     expect(reference).toBe(`cas://sha256/${'a'.repeat(64)}#1234`);
 
@@ -24,13 +24,13 @@ describe('cas:// reference contract is shared across the wave packages', () => {
     expect(parsed).toEqual({ sha256: 'a'.repeat(64), size: 1234 });
   });
 
-  it('a reference built by v2-adapter parses in agent-tools', () => {
+  it('a reference built by legacy-history parses in agent-tools', () => {
     const imageHookRef = `cas://sha256/${'b'.repeat(64)}#5`;
     const parsed = agentToolsParseCasSpillRef(imageHookRef);
     expect(parsed).toEqual({ sha256: 'b'.repeat(64), size: 5 });
   });
 
-  it('a cas:// link built by the wire-compiler dialect parses in v2-adapter', () => {
+  it('a cas:// link built by the wire-compiler dialect parses in legacy-history', () => {
     // The wire body never carries image bytes: the minimax-m3 dialect reduces
     // an inline base64 block to a deterministic `cas://` placeholder link.
     // That link is part of the compiled wire bytes, so it must be canonical.

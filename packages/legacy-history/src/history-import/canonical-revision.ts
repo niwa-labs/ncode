@@ -10,7 +10,7 @@
  * records the decoder rejects). Both symbols are re-exported unchanged — the
  * module graph of `local-runtime-v2/src/infra/file/*` reaches nothing from
  * this adapter, so the import adds no cycle. The package-level dependency is
- * declared in `packages/v2-adapter/package.json` devDependencies.
+ * declared in `packages/legacy-history/package.json` devDependencies.
  *
  * @module
  */

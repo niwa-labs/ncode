@@ -29,7 +29,7 @@ export async function resolveBuiltinPromptAssetsDir(): Promise<string> {
   for (const candidate of candidates) {
     if (await hasRoster(candidate)) return candidate;
   }
-  throw new Error('Local Runtime V2 built-in Agent assets are missing.');
+  throw new Error('Built-in agent assets are missing.');
 }
 
 /** Loads the package-owned registry shared by Runtime and the Electron package gate. */

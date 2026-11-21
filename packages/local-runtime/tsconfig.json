@@ -191,7 +191,7 @@
       "@mavis/steering-control": ["../../packages/steering-control/src/index.ts"],
       "@mavis/storage-worker": ["../../packages/storage-worker/src/index.ts"],
       "@mavis/system-reminder": ["../../packages/agent-modules/system-reminder/src/index.ts"],
-      "@mavis/v2-adapter": ["../../packages/v2-adapter/src/index.ts"],
+      "@mavis/legacy-history": ["../../packages/legacy-history/src/index.ts"],
       "@mavis/wire-compiler": ["../../packages/wire-compiler/src/index.ts"],
       "@minimax/code/package.json": ["../../packages/tui/package.json"],
       "@minimax/mcode-sandbox-runtime": ["../../third_party/sandbox-runtime/src/index.ts"],

@@ -24,7 +24,7 @@ export function userEnvelope(messageId: string, text: string): Record<string, un
 export async function writeTempSession(
   lines: readonly string[],
 ): Promise<{ dir: string; messagesPath: string; dispose: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), 'v2-adapter-test-'));
+  const dir = await mkdtemp(join(tmpdir(), 'legacy-history-test-'));
   const messagesPath = join(dir, 'messages.jsonl');
   await writeFile(messagesPath, `${lines.join('\n')}\n`, 'utf8');
   return { dir, messagesPath, dispose: () => rm(dir, { recursive: true, force: true }) };

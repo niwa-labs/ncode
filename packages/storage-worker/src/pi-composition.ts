@@ -209,7 +209,7 @@ export interface PiStorageWriterOptions {
    * enforce publish-before-reference invariants — e.g. that every CAS ref
    * the batch references was already published (`CasStore.hasAsync`), or
    * that a `history.v2.seed.commit` entry may only travel in a commit whose
-   * chunks verify (the seed publication gate of `@mavis/v2-adapter`).
+   * chunks verify (the seed publication gate of `@mavis/legacy-history`).
    *
    * A rejection FAILS THIS COMMIT ONLY: nothing durable happened, the gate
    * stays usable, and the rejection propagates to the commit's caller. A

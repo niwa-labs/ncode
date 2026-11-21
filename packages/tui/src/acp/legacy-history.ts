@@ -11,7 +11,7 @@ import type { TuiMessage, TuiToolCall } from '../runtime/stream-events.js';
  * `<dataDir>/v2/sessions/YYYY/MM/DD/HH-mm-ss-SSS-session_<base64id>/messages.jsonl`
  * (canonical envelope lines `{message_id, turn_id, message: {role, content?,
  * timestamp?, ...}}` — the same wire format the durable JSONL publisher
- * replicates; compare `@mavis/v2-adapter`). This module never writes and
+ * replicates; compare `@mavis/legacy-history`). This module never writes and
  * refuses a symlinked sessions tree, so one profile's client can never read
  * another profile's history through the fallback.
  */

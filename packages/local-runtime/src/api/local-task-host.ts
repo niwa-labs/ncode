@@ -70,7 +70,7 @@ export interface LocalTaskRunnerHostWithSessionLookup extends LocalTaskRunnerHos
 
 export function requireTaskConversation(host: LocalTaskRunnerHost): RuntimeConversation {
   if (!host.runtimeConversation) {
-    throw new Error('Local task execution requires the Session V2 RuntimeConversation');
+    throw new Error('Local task execution requires a local session conversation');
   }
   return host.runtimeConversation;
 }

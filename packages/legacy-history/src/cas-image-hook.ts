@@ -43,7 +43,7 @@ import type { V2ImageHook } from './session-reader.js';
 
 export { casSpillRef, parseCasSpillRef };
 
-/** Spec §4 registry: `mcode:adapter` is the v2-adapter namespace. */
+/** Spec §4 registry: `mcode:adapter` is the legacy-history namespace. */
 const log = createLogger('mcode:adapter');
 
 /**

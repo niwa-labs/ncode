@@ -6,7 +6,7 @@ import { createLogger } from '@mavis/logging';
 // Ш6 (integration plan): the streaming reader of the legacy mcode v2 session
 // directory — `messages.jsonl` canonical history — used to read the target
 // file without materializing it whole.
-import { openV2Session } from '@mavis/v2-adapter';
+import { openV2Session } from '@mavis/legacy-history';
 
 import {
   canonicalActiveHistoryRevision,
@@ -109,7 +109,7 @@ interface CanonicalHistoryMaterializerOptions {
   readonly legacyHistory?: CanonicalHistoryLegacyMigration;
   /**
    * Ш6: read the target `messages.jsonl` (the legacy mcode v2 canonical
-   * history) through `@mavis/v2-adapter` — streaming, line-bounded, with the
+   * history) through `@mavis/legacy-history` — streaming, line-bounded, with the
    * adapter's format validation — instead of the whole-file parse. Every
    * decoded record still passes the canonical envelope decoder, so the
    * accepted-record set and the produced values are exactly the legacy
@@ -219,7 +219,7 @@ async function targetExists(options: CanonicalHistoryMaterializerOptions): Promi
 }
 
 /**
- * Ш6: the target observation read through `@mavis/v2-adapter`. The adapter
+ * Ш6: the target observation read through `@mavis/legacy-history`. The adapter
  * contributes the streaming, line-bounded file read and its envelope format
  * validation; the canonical envelope decoder remains the single validation
  * and value authority, so an accepted file decodes to exactly the records the

@@ -379,6 +379,9 @@
       "@mavis/input-delivery": [
         "./packages/input-delivery/src/index.ts"
       ],
+      "@mavis/legacy-history": [
+        "./packages/legacy-history/src/index.ts"
+      ],
       "@mavis/local-runtime": [
         "./packages/local-runtime/src/index.ts"
       ],
@@ -634,9 +637,6 @@
       "@mavis/system-reminder": [
         "./packages/agent-modules/system-reminder/src/index.ts"
       ],
-      "@mavis/v2-adapter": [
-        "./packages/v2-adapter/src/index.ts"
-      ],
       "@mavis/wire-compiler": [
         "./packages/wire-compiler/src/index.ts"
       ],
@@ -677,7 +677,7 @@
     "packages/durable-backend-sqlite-zstd/src/index.ts",
     "packages/storage-worker/src/index.ts",
     "packages/cas/src/index.ts",
-    "packages/v2-adapter/src/index.ts",
+    "packages/legacy-history/src/index.ts",
     "packages/local-runtime/src/types/*.d.ts",
     "third_party/pi-mono/packages/coding-agent/src/utils/*.d.ts"
   ]

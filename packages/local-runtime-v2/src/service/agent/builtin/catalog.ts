@@ -616,7 +616,7 @@ export class BuiltinAgentCatalog {
       const roster = await this.readOptionalFile(join(candidate, BUILTIN_ROSTER_FILE));
       if (roster !== undefined) return candidate;
     }
-    throw new Error('Local Runtime V2 built-in Agent assets are missing.');
+    throw new Error('Built-in agent assets are missing.');
   }
 }
 

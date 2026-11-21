@@ -117,7 +117,7 @@
     "@mavis/steering-control": "workspace:^",
     "@mavis/storage-worker": "workspace:*",
     "@mavis/system-reminder": "workspace:^",
-    "@mavis/v2-adapter": "workspace:*",
+    "@mavis/legacy-history": "workspace:*",
     "@mavis/wire-compiler": "workspace:*",
     "@minimax/mcode-sandbox-runtime": "workspace:*",
     "@mavis/codemode-host": "workspace:*",

@@ -40,7 +40,7 @@ import {
   type SeedCommitPayload,
   type SeedEnvelope,
   type SeedImportScan,
-} from '@mavis/v2-adapter';
+} from '@mavis/legacy-history';
 
 import type { SessionRepository } from '../../sessions/repo/contract.js';
 import {
@@ -1235,7 +1235,7 @@ export function createDurableSessionSystemCanonicalHistoryProvider(
       files,
       ...(options.legacyHistory ? { legacyHistory: options.legacyHistory } : {}),
       // Ш6: the durable provider reads the target v2 `messages.jsonl` through
-      // the streaming v2-adapter; the JSONL (legacy default) provider keeps
+      // the streaming legacy-history; the JSONL (legacy default) provider keeps
       // the legacy whole-file read.
       readTargetViaV2Adapter: true,
       ...(options.onProgress ? { onProgress: options.onProgress } : {}),

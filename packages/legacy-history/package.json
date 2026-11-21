@@ -1,5 +1,5 @@
 {
-  "name": "@mavis/v2-adapter",
+  "name": "@mavis/legacy-history",
   "version": "0.1.0",
   "private": true,
   "type": "module",

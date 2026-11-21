@@ -215,7 +215,7 @@ describe('readEnvelopes validation', () => {
 });
 
 async function mkdtempSession(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'v2-adapter-fifo-'));
+  return mkdtemp(join(tmpdir(), 'legacy-history-fifo-'));
 }
 
 async function rmForce(dir: string): Promise<void> {

@@ -80,7 +80,7 @@ export async function resolveImConnectionId(
     return connectionError(
       503,
       'CHANNEL_CONNECTIONS_UNAVAILABLE',
-      'Channel Connections require the Local Runtime V2 Conversation composition.',
+      'Channel connections require a local conversation runtime.',
     );
   }
   const connection = await store.getConnection(connectionId);

@@ -4,7 +4,7 @@
  * This module is TYPE-ONLY like the rest of `@mavis/durable-core`. It fixes
  * the W02-D contract pieces that live at the INTEGRATION boundary between a
  * full pi `Storage` implementation (the wave's new adapter) and our existing
- * durable stack (worker / seam / v2-adapter):
+ * durable stack (worker / seam / legacy-history):
  *
  * 1. branded mirrors of the pi numeric id family (`Id<Kind>`/`Seq`,
  *    `third_party/pi-durable/src/types.ts:18-40`) so every conversion between

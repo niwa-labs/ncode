@@ -134,7 +134,7 @@ const result = await build({
     mcoded: 'packages/mcoded/src/daemon-entry.ts',
     // History-import CLI (integration plan R6): launched through
     // `scripts/history-import.mjs`, which resolves exactly this file.
-    'history-import': 'packages/v2-adapter/src/history-import-cli.ts',
+    'history-import': 'packages/legacy-history/src/history-import-cli.ts',
     // Storage-worker thread bodies: `node:worker_threads` loads these files
     // DIRECTLY (no bundle pipeline), so each must ship as its own dist entry.
     // `defaultWorkerUrl`/`defaultOffThreadWorkerUrl` (packages/storage-worker)
