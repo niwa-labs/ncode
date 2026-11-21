@@ -1,10 +1,12 @@
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
 import {
   activateMcodeToolsHostEnvironment,
+  classifyMcodeToolsReadinessFailure,
+  ensureMcodeToolsPrivateDirectory,
   resolveBundledMcodeToolsCommandBinDir,
   resolveBundledMcodeToolsResourceDir,
   startMcodeToolsAuthLeaseBroker,
@@ -14,15 +16,11 @@ import {
   type McodeToolsHostAuthSession,
   type McodeToolsHostEnvironmentActivation,
   type McodeToolsHostLogger,
+  type McodeToolsReadinessCategory,
   type ValidatedMcodeToolsResource,
 } from '@mavis/mcode-tools-host';
 
-export type McodeToolsReadinessCategory =
-  | 'disabled'
-  | 'ready'
-  | 'resource_unavailable'
-  | 'broker_unavailable'
-  | 'host_unavailable';
+export type { McodeToolsReadinessCategory } from '@mavis/mcode-tools-host';
 
 export interface McodeToolsReadiness {
   readonly requested: boolean;
@@ -82,7 +80,7 @@ export async function prepareTuiMcodeToolsIntegration(
       logger,
     });
     const configDir = path.join(options.dataDir, 'integrations', 'mcode-tools', options.region);
-    await ensurePrivateDirectory(configDir);
+    await ensureMcodeToolsPrivateDirectory(configDir);
     activation = (dependencies.activateEnvironment ?? activateMcodeToolsHostEnvironment)(
       environment,
       {
@@ -111,7 +109,7 @@ export async function prepareTuiMcodeToolsIntegration(
     activation?.restore();
     await broker?.dispose().catch(() => undefined);
     if (runtimeDir) await removeRuntimeDir(runtimeDir).catch(() => undefined);
-    const category = classifyReadinessFailure(error);
+    const category = classifyMcodeToolsReadinessFailure(error);
     logger.warn(
       `mcode-tools readiness category=${category} buildEnv=${buildEnv} region=${options.region}`,
     );
@@ -188,38 +186,4 @@ function inactiveReadiness(
     ensureCommandPath: NOOP,
     dispose: NOOP_DISPOSE,
   };
-}
-
-async function ensurePrivateDirectory(directory: string): Promise<void> {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  if (process.platform !== 'win32') await chmod(directory, 0o700);
-}
-
-function classifyReadinessFailure(
-  error: unknown,
-): Exclude<McodeToolsReadinessCategory, 'disabled' | 'ready'> {
-  if (isErrorCode(error, 'EADDRINUSE')) return 'broker_unavailable';
-  const message = error instanceof Error ? error.message.toLowerCase() : '';
-  if (
-    [
-      'manifest',
-      'resource',
-      'sha256',
-      'build environment',
-      'package mismatch',
-      'embedded cli',
-    ].some((needle) => message.includes(needle))
-  ) {
-    return 'resource_unavailable';
-  }
-  if (message.includes('broker') || message.includes('socket') || message.includes('named pipe')) {
-    return 'broker_unavailable';
-  }
-  return 'host_unavailable';
-}
-
-function isErrorCode(error: unknown, code: string): boolean {
-  return Boolean(
-    error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === code,
-  );
 }

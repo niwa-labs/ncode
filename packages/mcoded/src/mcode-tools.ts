@@ -29,7 +29,7 @@
  * @module
  */
 
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +37,8 @@ import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
 import { createLogger } from '@mavis/logging';
 import {
 	activateMcodeToolsHostEnvironment,
+	classifyMcodeToolsReadinessFailure,
+	ensureMcodeToolsPrivateDirectory,
 	resolveBundledMcodeToolsCommandBinDir,
 	resolveBundledMcodeToolsResourceDir,
 	startMcodeToolsAuthLeaseBroker,
@@ -46,6 +48,7 @@ import {
 	type McodeToolsHostAuthSession,
 	type McodeToolsHostEnvironmentActivation,
 	type McodeToolsHostLogger,
+	type McodeToolsReadinessCategory,
 } from '@mavis/mcode-tools-host';
 import {
 	MCODE_OAUTH_SCOPES,
@@ -60,12 +63,7 @@ import {
 
 const log = createLogger('mcode:rpc');
 
-export type DaemonMcodeToolsReadinessCategory =
-	| 'disabled'
-	| 'ready'
-	| 'resource_unavailable'
-	| 'broker_unavailable'
-	| 'host_unavailable';
+export type { McodeToolsReadinessCategory as DaemonMcodeToolsReadinessCategory } from '@mavis/mcode-tools-host';
 
 /**
  * The daemon-side twin of the TUI `McodeToolsReadiness`: no
@@ -75,7 +73,7 @@ export type DaemonMcodeToolsReadinessCategory =
 export interface DaemonMcodeToolsReadiness {
 	readonly requested: boolean;
 	readonly ready: boolean;
-	readonly category: DaemonMcodeToolsReadinessCategory;
+	readonly category: McodeToolsReadinessCategory;
 	readonly buildEnv: McodeToolsBuildEnv;
 	readonly version?: string;
 	dispose(): Promise<void>;
@@ -150,7 +148,7 @@ export async function prepareDaemonMcodeToolsIntegration(
 			logger,
 		});
 		const configDir = path.join(options.dataDir, 'integrations', 'mcode-tools', options.region);
-		await ensurePrivateDirectory(configDir);
+		await ensureMcodeToolsPrivateDirectory(configDir);
 		activation = (dependencies.activateEnvironment ?? activateMcodeToolsHostEnvironment)(
 			environment,
 			{
@@ -205,7 +203,7 @@ export async function prepareDaemonMcodeToolsIntegration(
 		activation?.restore();
 		await broker?.dispose().catch(() => undefined);
 		if (runtimeDir) await removeRuntimeDir(runtimeDir).catch(() => undefined);
-		const category = classifyDaemonReadinessFailure(error);
+		const category = classifyMcodeToolsReadinessFailure(error);
 		log.warn('mcode-tools readiness degraded', {
 			category,
 			buildEnv,
@@ -216,19 +214,18 @@ export async function prepareDaemonMcodeToolsIntegration(
 	}
 }
 
-/**
- * Projects the profile's shared OAuth core (the SAME served-dataDir namespace
- * the runtime's model resolver reads, `createProfileOAuthCore`) into the
- * `McodeToolsHostAuthSession` the lease broker serves — the daemon-side twin
- * of the TUI window's `createMcodeToolsBrokerAuthSession`. `undefined` when
- * the OAuth endpoints cannot be resolved: the readiness then degrades instead
- * of starting a broker that cannot ever authenticate.
- */
+/** Bind the broker to the same profile store as the daemon's model resolver. */
 export function createDaemonMcodeToolsAuthSession(
 	options: LocalRuntimeAdapterAuthOptions,
 ): McodeToolsHostAuthSession | undefined {
-	const core: MCodeOAuthCore | undefined = createProfileOAuthCore(options);
-	if (!core) return undefined;
+	const core = createProfileOAuthCore(options);
+	return core ? createMcodeToolsBrokerAuthSession(core) : undefined;
+}
+
+/** Project an OAuth core onto the credential-store-independent broker contract. */
+export function createMcodeToolsBrokerAuthSession(
+	core: Pick<MCodeOAuthCore, 'getStatus' | 'getAccessToken' | 'handleUnauthorized' | 'watch'>,
+): McodeToolsHostAuthSession {
 	const projectStatus = (status: AuthStatusSnapshot) => ({
 		status: status.status,
 		generation: status.generation,
@@ -267,7 +264,7 @@ export function removeDaemonMcodeToolsRuntimeDir(runtimeDir: string): Promise<vo
 /** The ready-but-inactive readiness (never touches the environment). */
 function inactiveDaemonReadiness(
 	requested: boolean,
-	category: Exclude<DaemonMcodeToolsReadinessCategory, 'ready'>,
+	category: Exclude<McodeToolsReadinessCategory, 'ready'>,
 	buildEnv: McodeToolsBuildEnv,
 ): DaemonMcodeToolsReadiness {
 	return {
@@ -284,38 +281,4 @@ function daemonMcodeToolsLogger(): McodeToolsHostLogger {
 		info: (message) => log.info(message, { surface: 'mcode-tools' }),
 		warn: (message) => log.warn(message, { surface: 'mcode-tools' }),
 	};
-}
-
-async function ensurePrivateDirectory(directory: string): Promise<void> {
-	await mkdir(directory, { recursive: true, mode: 0o700 });
-	if (process.platform !== 'win32') await chmod(directory, 0o700);
-}
-
-function classifyDaemonReadinessFailure(
-	error: unknown,
-): Exclude<DaemonMcodeToolsReadinessCategory, 'disabled' | 'ready'> {
-	if (isErrorCode(error, 'EADDRINUSE')) return 'broker_unavailable';
-	const message = error instanceof Error ? error.message.toLowerCase() : '';
-	if (
-		[
-			'manifest',
-			'resource',
-			'sha256',
-			'build environment',
-			'package mismatch',
-			'embedded cli',
-		].some((needle) => message.includes(needle))
-	) {
-		return 'resource_unavailable';
-	}
-	if (message.includes('broker') || message.includes('socket') || message.includes('named pipe')) {
-		return 'broker_unavailable';
-	}
-	return 'host_unavailable';
-}
-
-function isErrorCode(error: unknown, code: string): boolean {
-	return Boolean(
-		error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === code,
-	);
 }

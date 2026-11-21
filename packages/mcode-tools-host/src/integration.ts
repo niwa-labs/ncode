@@ -1,3 +1,5 @@
+import { chmod, mkdir } from 'node:fs/promises';
+
 import {
   installMcodeToolsLauncher,
   removeMcodeToolsLaunchers,
@@ -122,4 +124,45 @@ function activeIntegration(
       if (launcherError) throw launcherError;
     },
   };
+}
+
+export type McodeToolsReadinessCategory =
+  | 'disabled'
+  | 'ready'
+  | 'resource_unavailable'
+  | 'broker_unavailable'
+  | 'host_unavailable';
+
+export async function ensureMcodeToolsPrivateDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') await chmod(directory, 0o700);
+}
+
+export function classifyMcodeToolsReadinessFailure(
+  error: unknown,
+): Exclude<McodeToolsReadinessCategory, 'disabled' | 'ready'> {
+  if (isErrorCode(error, 'EADDRINUSE')) return 'broker_unavailable';
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (
+    [
+      'manifest',
+      'resource',
+      'sha256',
+      'build environment',
+      'package mismatch',
+      'embedded cli',
+    ].some((needle) => message.includes(needle))
+  ) {
+    return 'resource_unavailable';
+  }
+  if (message.includes('broker') || message.includes('socket') || message.includes('named pipe')) {
+    return 'broker_unavailable';
+  }
+  return 'host_unavailable';
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return Boolean(
+    error && typeof error === 'object' && (error as NodeJS.ErrnoException).code === code,
+  );
 }

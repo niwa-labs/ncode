@@ -241,6 +241,7 @@ export { resolveDetachedPermission } from './product-daemon.js';
  */
 export {
 	createDaemonMcodeToolsAuthSession,
+	createMcodeToolsBrokerAuthSession,
 	createDaemonMcodeToolsRuntimeDir,
 	normalizeMcodeToolsHostBuildEnv,
 	prepareDaemonMcodeToolsIntegration,

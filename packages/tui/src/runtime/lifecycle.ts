@@ -4,7 +4,12 @@ import type {
   LocalRuntimeConfig,
 } from '@mavis/local-runtime-v2/process-local';
 import { getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
-import { isPidAlive, readDaemonManifest, resolveDaemonTargets } from '@mavis/mcoded';
+import {
+  createMcodeToolsBrokerAuthSession,
+  isPidAlive,
+  readDaemonManifest,
+  resolveDaemonTargets,
+} from '@mavis/mcoded';
 import {
   getRuntimeBuildEnv,
   getRuntimeRegion,
@@ -19,7 +24,6 @@ import {
   type AuthStatusSnapshot,
   type MCodeOAuthCore,
 } from '@mavis/oauth-core';
-import type { McodeToolsHostAuthSession } from '@mavis/mcode-tools-host';
 import {
   createEmbeddedRuntimeHost,
   type EmbeddedRuntimeHost,
@@ -832,26 +836,6 @@ function isSharedCredentialState(status: AuthStatusSnapshot): boolean {
     status.status === 'expired' ||
     status.status === 'refreshing'
   );
-}
-
-function createMcodeToolsBrokerAuthSession(
-  core: NonNullable<CreateTuiRuntimeDependencies['sharedAuthCore']>,
-): McodeToolsHostAuthSession {
-  const projectStatus = (status: AuthStatusSnapshot) => ({
-    status: status.status,
-    generation: status.generation,
-    ...(status.expiresAtMs === undefined ? {} : { expiresAtMs: status.expiresAtMs }),
-  });
-  return {
-    getStatus: async () => projectStatus(await core.getStatus()),
-    getAccessToken: (minValidityMs) =>
-      core.getAccessToken({
-        requiredScopes: [...MCODE_OAUTH_SCOPES],
-        minValidityMs,
-      }),
-    handleUnauthorized: (generation) => core.handleUnauthorized({ generation }),
-    watch: (listener) => core.watch((status) => listener(projectStatus(status))),
-  };
 }
 
 function fallbackMcodeToolsReadiness(
