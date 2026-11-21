@@ -68,6 +68,7 @@ import type { CliService } from '../../src/local/cli-service.js';
 interface ScriptedTurnInput {
   readonly sessionId: string;
   readonly turnId: string;
+  readonly userMessage: { readonly text: string };
   readonly signal?: AbortSignal;
   readonly eventIdGenerator?: (kind: string) => string;
   readonly runtimeSeqGenerator?: () => number;
@@ -108,7 +109,7 @@ interface ScriptedTurnInput {
 const harness = vi.hoisted(() => ({
   scripts: [] as ((input: ScriptedTurnInput) => Promise<void>)[],
   invocations: 0,
-  startedTurns: [] as { sessionId: string; turnId: string }[],
+  startedTurns: [] as { sessionId: string; turnId: string; text: string }[],
 }));
 
 vi.mock('@mavis/agent-core/pi-turn-runner', async (importOriginal) => {
@@ -119,7 +120,11 @@ vi.mock('@mavis/agent-core/pi-turn-runner', async (importOriginal) => {
       async runTurn(input: ScriptedTurnInput): Promise<void> {
         const index = harness.invocations;
         harness.invocations += 1;
-        harness.startedTurns.push({ sessionId: input.sessionId, turnId: input.turnId });
+        harness.startedTurns.push({
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          text: input.userMessage.text,
+        });
         const script = harness.scripts[index];
         if (script) await script(input);
         // The real runner's exit boundary: user steering is discarded through
@@ -348,25 +353,10 @@ async function restartHost(): Promise<{
   await new Promise((resolve) => setTimeout(resolve, 300));
   dataDir = persistentDir;
   await mkdir(join(dataDir, 'workspace'), { recursive: true });
-  host = await createHost(dataDir);
   harness.invocations = 0;
   harness.scripts = [];
-  const conversation = host.apiHost.runtimeConversation!;
-  const ingress = conversation.ingress as {
-    steer(input: ConversationSteerInput): Promise<{
-      delivered: boolean;
-      mode?: string;
-      turnId?: string;
-    }>;
-  };
-  const originalSteer = ingress.steer.bind(ingress);
-  steers.length = 0;
-  ingress.steer = async (input: ConversationSteerInput) => {
-    const result = await originalSteer(input);
-    steers.push({ input, result });
-    return result;
-  };
-  return { cli: host.cliService as CliService, conversation };
+  host = await createHost(dataDir);
+  return { cli: host.cliService as CliService, conversation: host.apiHost.runtimeConversation! };
 }
 
 async function closeHost(): Promise<void> {
@@ -379,7 +369,7 @@ async function waitOwnerIdle(cli: CliService): Promise<void> {
   await waitFor(async () => (await cli.getActiveTurn(ownerSessionId)) === undefined, 'owner idle');
 }
 
-function ownerTurns(): readonly { sessionId: string; turnId: string }[] {
+function ownerTurns() {
   return harness.startedTurns.filter((turn) => turn.sessionId === ownerSessionId);
 }
 
@@ -934,7 +924,7 @@ describe('reactive subagents wave 3 over the production host', () => {
   it(
     '№16b: crash after the terminal persist, before the delivery — the restart re-schedules the lost wake',
     async () => {
-      let { cli, conversation } = await startRig();
+      const { cli, conversation } = await startRig();
       await createOwner(conversation);
 
       const childLatch = deferred();
@@ -948,6 +938,10 @@ describe('reactive subagents wave 3 over the production host', () => {
             input.signal,
           );
           await deliverDelta(input, [toolResultDelta('call_lost', result.text ?? '')]);
+          // Consume the instruction that released the child. An unread steer is
+          // requeued at turn exit and takes priority over background notices.
+          const consumed = await input.getSteeringMessages?.({ boundary: 'mid-turn' });
+          expect(consumed).toHaveLength(1);
           await deliverDelta(input, [assistantReplyDelta('answered after release')]);
           toolReturned.resolve();
         },
@@ -980,46 +974,34 @@ describe('reactive subagents wave 3 over the production host', () => {
         message: { content: 'release it', attachments: [] },
       });
       await toolReturned.promise;
-      // The child completes: the terminal is PERSISTED, the notification is
-      // only in the scheduler's memory. Close before the first retry fires.
-      // The §3.3 coalescing window admits the wake ~50ms after the terminal,
-      // so holding the delivery with a (process-local) stop window makes the
-      // crash rupture deterministic: the pre-close attempt answers retryable
-      // `busy` — no ingress admission, no receipt, nothing consumed — and the
-      // restarted process (whose stop window is gone) must re-schedule and
-      // WAKE. Any real crash between persist and admission looks identical.
-      const stopWindow = openUserStopWindow(
-        host!.apiHost as unknown as Parameters<typeof openUserStopWindow>[0],
-        ownerSessionId,
-        1_000,
-      );
-      childLatch.resolve();
-      await waitFor(
-        async () => (await host!.apiHost.backgroundTaskService.get(taskId))?.status === 'succeeded',
-        'terminal persisted',
-      );
-      const lostRow = await host!.apiHost.backgroundTaskService.get(taskId);
-      expect(lostRow?.deliveredAt).toBeUndefined();
-      await closeHost();
+      await waitOwnerIdle(cli);
+      expect((await cli.listQueueMessages({ id: ownerSessionId })).pendingCount).toBe(0);
 
-      // Restart: the recovery reschedules the lost terminal delivery. The
-      // observable of a scheduled delivery is its wake admission (the row's
-      // deliveredAt latches later, at the reminder/read settlement).
-      ({ cli, conversation } = await restartHost());
-      const wakeSteerIndex = steers.length;
-      await waitFor(
-        () =>
-          steers
-            .slice(wakeSteerIndex)
-            .some((entry) => entry.input.producerId === 'background-task-delivery'),
-        'the lost terminal wake was admitted after the restart',
-        60_000,
-      );
-      await waitFor(
-        () => ownerTurns().some((turn) => turn.turnId.startsWith('turn_task_delivery')),
-        'the rescheduled wake activated the delivery turn',
-        60_000,
-      );
+      // Hold delivery until shutdown, leaving the terminal row for the next host.
+      const stopWindow = openUserStopWindow(host!.apiHost, ownerSessionId, Date.now());
+      const deliveryTurns = () =>
+        ownerTurns().filter((turn) => turn.turnId.startsWith('turn_task_delivery'));
+      try {
+        childLatch.resolve();
+        await waitFor(
+          async () => (await host!.apiHost.backgroundTaskService.get(taskId))?.status === 'succeeded',
+          'terminal persisted',
+        );
+        expect((await host!.apiHost.backgroundTaskService.get(taskId))?.deliveredAt).toBeUndefined();
+        await closeHost();
+      } finally {
+        stopWindow.close();
+      }
+      expect(deliveryTurns()).toHaveLength(0);
+
+      // The runner records turns throughout startup, including a wake that fires
+      // before restartHost returns. Check the message that actually reached it.
+      const restarted = await restartHost();
+      await waitFor(() => deliveryTurns().length > 0, 'the restarted owner received the terminal notice');
+      await waitOwnerIdle(restarted.cli);
+      expect(deliveryTurns().map((turn) => turn.text)).toEqual([
+        expect.stringContaining(`task_id="${taskId}" status="succeeded"`),
+      ]);
     },
     HOST_TIMEOUT_MS,
   );
