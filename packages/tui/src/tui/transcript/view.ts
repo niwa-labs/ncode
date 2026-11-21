@@ -940,8 +940,9 @@ function renderCell(
     const summary = `${marker} ${title}${target}${
       grouped
         ? chalk.hex(colors.muted)(
-            ` · ${children.length} ${children.length === 1 ? 'call' : 'calls'}` +
-              (interruptedCount > 0 ? ` · ${interruptedCount} interrupted` : ''),
+            ` · ${children.length} ${children.length === 1 ? 'call' : 'calls'}${
+              interruptedCount > 0 ? ` · ${interruptedCount} interrupted` : ''
+            }`,
           )
         : ''
     }`;

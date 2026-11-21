@@ -1,8 +1,7 @@
-import { TurnDeliveryRetired } from '../../src/runtime/remote-host.js';
 /**
  * W4 unit tests: the thin-client seams of `runtime/remote-host.ts`.
  *
- * - `resolveTuiServerMode` — `off` is the default; unknown values fail closed.
+ * - `resolveTuiServerMode` — `auto` is the default; unknown values fail closed.
  * - `createDaemonAutoSpawnHook` — the §4.6.2 spawn.lock dance: TWO windows
  *   racing produce exactly ONE daemon; a lock holder is a quiet no-op for
  *   the loser; an already-live daemon is never spawned over. The child is
@@ -32,6 +31,7 @@ import {
   createDaemonAutoSpawnHook,
   resolveTuiServerMode,
   TuiRemoteCliService,
+  TurnDeliveryRetired,
   TurnStreamDetached,
 } from '../../src/runtime/remote-host.js';
 import { TuiFailure } from '../../src/failure.js';

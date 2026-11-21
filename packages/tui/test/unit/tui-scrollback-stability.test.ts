@@ -610,8 +610,11 @@ describe("transcript cache and long mutable blocks", () => {
   it("writes every row of an unfinished code fence to native scrollback", async () => {
     const terminal = new RecordingTerminal(80, 16);
     const f = fixture(terminal, { appendOnly: () => true });
-    const content = (count: number) => "```text\n" + Array.from({length: count}, (_, i) =>
-      `SCROLL_ROW_${String(i).padStart(3, "0")}`).join("\n");
+    const content = (count: number) => {
+      const rows = Array.from({ length: count }, (_, i) =>
+        `SCROLL_ROW_${String(i).padStart(3, "0")}`);
+      return `\`\`\`text\n${rows.join("\n")}`;
+    };
     f.store.upsert(createTranscriptCell({ id: "long", turnId: "turn", kind: "assistant",
       status: "running", content: content(40), createdAtMs: 1 }));
     await f.render();
@@ -625,7 +628,7 @@ describe("transcript cache and long mutable blocks", () => {
     }
     terminal.scrollLines(-30);
     expect(terminal.getViewport().join("\n")).toContain("SCROLL_ROW_");
-    f.store.upsert({ id: "long", status: "succeeded", content: content(100) + "\n```" });
+    f.store.upsert({ id: "long", status: "succeeded", content: `${content(100)}\n\`\`\`` });
     await f.render();
     for (let i = 0; i < 100; i++) {
       expect(terminal.getScrollBuffer().filter((line) =>
