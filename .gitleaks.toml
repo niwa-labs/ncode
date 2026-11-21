@@ -107,9 +107,12 @@ regexes = [
 ]
 
 [[rules.allowlists]]
-description = "Verified SHA-256 digests of generated provider catalog files"
+description = "Verified SHA-256 digests of generated provider catalogs, including bundled copies"
 condition = "AND"
-paths = ['''(^|/)third_party/pi\-mono/packages/ai/src/providers/data/\.manifest\.json$''']
+paths = [
+  '''(^|/)third_party/pi\-mono/packages/ai/src/providers/data/\.manifest\.json$''',
+  '''(^|/)dist/chunks/chunk-[A-Z0-9]+\.js$''',
+]
 regexTarget = "match"
 regexes = [
   '''^qwen\-token\-plan\-cn\.json":"80824536f0c3cd83ab27424df2d664738cbe3f971b4e568a625432288fa53229"$''',
