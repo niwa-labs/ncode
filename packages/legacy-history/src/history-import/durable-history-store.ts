@@ -11,13 +11,16 @@
 
 import { join } from 'node:path';
 
-import { SqliteZstdBackend } from '@mavis/durable-backend-sqlite-zstd';
+import { currentGeneration, SqliteZstdBackend } from '@mavis/durable-backend-sqlite-zstd';
+import { safeHistoryPathSegment } from '@mavis/local-runtime-v2/canonical-history';
 import { createLogger } from '@mavis/logging';
 import {
   createStorageWorker,
   sqliteZstdStorageBackend,
   type StorageWorker,
 } from '@mavis/storage-worker';
+
+import { DURABLE_HISTORY_WORKER_LIMITS } from './seed-protocol.js';
 
 /**
  * Seed protocol events are storage events (R5): the CLI's begin/chunk/commit
@@ -30,20 +33,6 @@ export const DURABLE_HISTORY_DIRECTORY = 'durable-history';
 /** Per-session log directories live under this subdirectory (owner decision 2026-11-18). */
 export const DURABLE_SESSIONS_DIRECTORY = 'sessions';
 
-/**
- * MUST stay byte-identical to the runtime's `safeHistoryPathSegment`
- * (`local-runtime-v2/.../session-history-paths.ts`): the CLI derives the
- * same per-session directory the runtime opens, from the same session id.
- */
-function safeHistoryPathSegment(value: string): string {
-  return (
-    value
-      .replaceAll(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')
-      .replaceAll(/^\.+/gu, '')
-      .slice(0, 180) || 'snapshot'
-  );
-}
-
 /** Directory of ONE session's own durable log (the runtime's layout). */
 export function durableSessionDirectory(durableRoot: string, sessionId: string): string {
   return join(
@@ -54,10 +43,6 @@ export function durableSessionDirectory(durableRoot: string, sessionId: string):
   );
 }
 
-/** Mirrors the provider's `DURABLE_HISTORY_BATCH_CAP_BYTES` (worker admission). */
-const BATCH_CAP_BYTES = 8 * 1024 * 1024;
-/** Mirrors the provider's `DURABLE_HISTORY_QUEUE_BYTES`. */
-const QUEUE_BYTES = 16 * 1024 * 1024;
 /** Uncompressed read window of one log-scan step (mirrors the provider). */
 const READ_WINDOW_BYTES = 8 * 1024 * 1024;
 
@@ -84,18 +69,15 @@ export function durableHistoryDirectory(durableRoot: string): string {
  */
 export function openDurableHistoryStore(
   durableRoot: string,
-  options?: { readonly sessionId?: string; readonly readonly?: boolean },
+  options?: { readonly sessionId?: string },
 ): DurableHistoryStore {
   const directory = options?.sessionId
     ? durableSessionDirectory(durableRoot, options.sessionId)
     : durableHistoryDirectory(durableRoot);
   const backend = SqliteZstdBackend.open(directory, {
-    maxBatchUncompressedBytes: BATCH_CAP_BYTES,
+    maxBatchUncompressedBytes: DURABLE_HISTORY_WORKER_LIMITS.maxBatchUncompressedBytes,
   });
-  const worker = createStorageWorker(sqliteZstdStorageBackend(backend), {
-    maxBatchUncompressedBytes: BATCH_CAP_BYTES,
-    queueBytes: QUEUE_BYTES,
-  });
+  const worker = createStorageWorker(sqliteZstdStorageBackend(backend), DURABLE_HISTORY_WORKER_LIMITS);
   log.info('import durable history storage opened', {
     directory,
     generation: backend.generation,
@@ -118,6 +100,27 @@ export function openDurableHistoryStore(
       log.info('import durable history storage closed', { directory });
     },
   };
+}
+
+/** Reads the current session log, or the pre-per-session monolith if absent. */
+export function openHistoryStoreForVerification(
+  durableRoot: string,
+  sessionId: string,
+): Pick<DurableHistoryStore, 'backend' | 'dispose'> | undefined {
+  const candidates = [durableSessionDirectory(durableRoot, sessionId), durableHistoryDirectory(durableRoot)];
+  for (const directory of candidates) {
+    let generation: number;
+    try {
+      generation = currentGeneration(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    if (generation === 0) continue;
+    const backend = SqliteZstdBackend.open(directory, { generation, readonly: true });
+    return { backend, dispose: async () => backend.close() };
+  }
+  return undefined;
 }
 
 /** One decoded durable log entry, as the CLI's seed scan needs it. */

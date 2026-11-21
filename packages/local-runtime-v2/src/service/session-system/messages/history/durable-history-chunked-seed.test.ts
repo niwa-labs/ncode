@@ -18,7 +18,8 @@ import {
   type DurableHistoryStorage,
 } from './durable-canonical-history-provider.js';
 import type { SessionHistoryLocationResolver } from './session-history-location.js';
-import type { SessionHistoryPaths } from './session-history-paths.js';
+import { ensureResolvedSessionHistoryPaths, resolveSessionHistoryPaths, type SessionHistoryPaths } from './session-history-paths.js';
+import { runHistoryImport } from '../../../../../../legacy-history/src/history-import/import-service.js';
 
 /**
  * R5 chunked-seed tests: a full state larger than the worker's admission cap
@@ -177,6 +178,26 @@ describe('chunked durable seed (R5)', () => {
   afterEach(async () => {
     if (fixture.storage) await fixture.storage.dispose();
     await rm(fixture.root, { recursive: true, force: true });
+  });
+
+  it('reads CLI-imported records by the live session ID after the dated name is truncated', async () => {
+    const sessionId = '../source/' + 's'.repeat(200);
+    const session: SessionRecord = {
+      sessionId, agentName: 'mavis', workspaceDir: fixture.root, runtime: 'pi-agent',
+      sessionType: 'root', sessionKind: 'conversation', archived: false, status: 'started',
+      sessionOrigin: 'local-runtime', sessionDataVersion: 4, createdAtMs: 1, updatedAtMs: 1,
+    };
+    const source = ensureResolvedSessionHistoryPaths(resolveSessionHistoryPaths(fixture.root, session), session);
+    const messages = [userEnvelope(0, 100)];
+    await fixture.files.publishInitial(source.messages, messages);
+    const durableRoot = join(fixture.root, 'imported');
+    await runHistoryImport({ sourceDir: source.sessionDir, durableRoot });
+    const storage = await createDurableHistoryStorage({ dataDir: durableRoot, ownsSystemRoot: true });
+    fixture.storage = storage;
+    const provider = createDurableSessionSystemCanonicalHistoryProvider({
+      storage, dataDir: durableRoot, sessions: { get: async () => session },
+    });
+    expect((await provider.readActive(sessionId)).identityVector).toEqual(['msg-seed-0']);
   });
 
   it('seeds a history beyond the chunk budget through begin/chunk/commit and rebuilds it', async () => {

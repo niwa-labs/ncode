@@ -1,6 +1,7 @@
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, posix, relative, win32 } from 'node:path';
 
+import { encodedSessionHistoryId } from '../../../../infra/file/canonical-history.js';
 import type { SessionRecord } from '../../sessions/repo/contract.js';
 
 export interface SessionHistoryPaths {
@@ -41,14 +42,7 @@ export function deleteSessionHistory(
   rmSync(sessionDir, { recursive: true, force: true });
 }
 
-export function safeHistoryPathSegment(value: string): string {
-  return (
-    value
-      .replaceAll(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')
-      .replaceAll(/^\.+/gu, '')
-      .slice(0, 180) || 'snapshot'
-  );
-}
+export { safeHistoryPathSegment } from '../../../../infra/file/canonical-history.js';
 
 export function resolveSessionHistoryPaths(
   dataDir: string,
@@ -114,7 +108,7 @@ function buildSessionRelativeDir(
   ]
     .map((part, index) => String(part).padStart(index === 3 ? 3 : 2, '0'))
     .join('-');
-  return [...parts, `${time}-${encodedSessionId(sessionId)}`].join('/');
+  return [...parts, `${time}-${encodedSessionHistoryId(sessionId)}`].join('/');
 }
 
 function validateRelativeDir(value: string): readonly [string, string, string, string] {
@@ -187,10 +181,4 @@ function isRegularFile(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-function encodedSessionId(sessionId: string): string {
-  return `session_${Buffer.from(sessionId || 'unknown-session', 'utf8')
-    .toString('base64url')
-    .slice(0, 180)}`;
 }

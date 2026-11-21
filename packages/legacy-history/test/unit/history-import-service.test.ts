@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { openCas } from '@mavis/cas';
@@ -15,8 +15,13 @@ import {
   SourceDriftError,
   verifyHistoryImport,
 } from '../../src/history-import/import-service.js';
-import { openDurableHistoryStore } from '../../src/history-import/durable-history-store.js';
+import { durableSessionDirectory, openDurableHistoryStore } from '../../src/history-import/durable-history-store.js';
 import { receiptPath, readReceipt } from '../../src/history-import/receipt.js';
+import {
+  ensureResolvedSessionHistoryPaths,
+  resolveSessionHistoryPaths,
+} from '../../../local-runtime-v2/src/service/session-system/messages/history/session-history-paths.js';
+import type { SessionRecord } from '../../../local-runtime-v2/src/service/session-system/sessions/repo/contract.js';
 import { envelopeLine } from './tmp-session.js';
 
 // R6 service tests on synthetic sessions: plan → run (chunked seed into an
@@ -108,6 +113,15 @@ async function tempPaths(prefix: string): Promise<TempPaths> {
   };
 }
 
+function runtimeSession(dataDir: string, sessionId: string) {
+  const session: SessionRecord = {
+    sessionId, agentName: 'mavis', workspaceDir: dataDir, runtime: 'pi-agent', sessionType: 'root',
+    sessionKind: 'conversation', archived: false, status: 'started', sessionOrigin: 'local-runtime',
+    sessionDataVersion: 4, createdAtMs: 1, updatedAtMs: 1,
+  };
+  return ensureResolvedSessionHistoryPaths(resolveSessionHistoryPaths(dataDir, session), session);
+}
+
 describe('history import service (R6)', () => {
   it('plans legacy sessions from a single dir or a parent of session dirs', async () => {
     const paths = await tempPaths('plan');
@@ -121,6 +135,70 @@ describe('history import service (R6)', () => {
       const planned = await planHistoryImports(paths.sourceRoot);
       expect(planned.map((entry) => entry.sessionId)).toEqual(['session-other', 'session-single']);
       expect(planned[1]?.bytes).toBeGreaterThan(0);
+    } finally {
+      await paths.dispose();
+    }
+  });
+
+  it('imports a real dated directory under its full logical session ID', async () => {
+    const paths = await tempPaths('dated-id');
+    try {
+      // The writer truncates the encoded dirname after 180 base64url characters.
+      const id = '../session/' + 's'.repeat(200);
+      const source = runtimeSession(paths.sourceRoot, id);
+      await writeFile(source.messages, userLine('msg-0', 'dated') + '\n');
+      const options = { sourceDir: source.sessionDir, durableRoot: paths.durableRoot };
+      expect(await planHistoryImports(source.sessionDir)).toMatchObject([{ sessionId: id }]);
+      expect(await runHistoryImport(options)).toMatchObject({ sessionId: id, status: 'imported' });
+      expect(await verifyHistoryImport(options)).toMatchObject({ sessionId: id, ok: true });
+      expect(await readReceipt(receiptPath(paths.durableRoot, id))).toMatchObject({ sessionId: id });
+      expect(await readdir(join(paths.durableRoot, 'history-import'))).toEqual(['by-id']);
+      // Different full IDs can project to the same 180-character durable folder.
+      const collision = runtimeSession(paths.sourceRoot + '/other', id + 'other');
+      await writeFile(collision.messages, userLine('msg-1', 'other') + '\n');
+      await expect(runHistoryImport({ sourceDir: collision.sessionDir, durableRoot: paths.durableRoot }))
+        .rejects.toThrow(/already contains session/);
+      expect(await verifyHistoryImport(options)).toMatchObject({ sessionId: id, ok: true });
+    } finally {
+      await paths.dispose();
+    }
+  });
+
+  it('resumes and verifies earlier basename imports even after losing their receipt', async () => {
+    const paths = await tempPaths('dated-legacy');
+    try {
+      const source = runtimeSession(paths.sourceRoot, 'original-session');
+      const physicalName = basename(source.sessionDir);
+      await writeFile(source.messages, syntheticLines().join('\n') + '\n');
+      const manifest = await readFile(source.manifest);
+      await unlink(source.manifest);
+      const options = { sourceDir: source.sessionDir, durableRoot: paths.durableRoot, chunkTargetBytes: 1024 };
+      await expect(runHistoryImport({ ...options, failAfterChunks: 1 })).rejects.toThrow();
+      await writeFile(source.manifest, manifest);
+      expect(await resumeHistoryImport(options)).toMatchObject({ sessionId: physicalName, status: 'imported' });
+      await unlink(receiptPath(paths.durableRoot, physicalName));
+      expect(await verifyHistoryImport(options)).toMatchObject({ sessionId: physicalName, ok: true });
+      expect(await runHistoryImport(options)).toMatchObject({ sessionId: physicalName, status: 'already-imported' });
+      expect(await readdir(join(paths.durableRoot, 'durable-history', 'sessions'))).toEqual([physicalName]);
+    } finally {
+      await paths.dispose();
+    }
+  });
+
+  it('rejects mismatched and unsafe manifest IDs before touching the destination', async () => {
+    const paths = await tempPaths('dated-invalid');
+    try {
+      for (const id of ['valid-id', 'unroutable|id']) {
+        const source = runtimeSession(paths.sourceRoot, id);
+        await writeFile(source.messages, userLine('msg-0', 'dated') + '\n');
+        if (id === 'valid-id') {
+          const value = JSON.parse(await readFile(source.manifest, 'utf8'));
+          await writeFile(source.manifest, JSON.stringify({ ...value, sessionId: 'other-id' }));
+        }
+        await expect(runHistoryImport({ sourceDir: source.sessionDir, durableRoot: paths.durableRoot }))
+          .rejects.toThrow(/identity/i);
+      }
+      expect(await readdir(paths.durableRoot)).toEqual([]);
     } finally {
       await paths.dispose();
     }
@@ -170,6 +248,65 @@ describe('history import service (R6)', () => {
       await paths.dispose();
     }
   }, 60_000);
+
+  it('reports an absent import without creating the target root', async () => {
+    const paths = await tempPaths('verify-absent');
+    try {
+      const sourceDir = await writeSession(paths.sourceRoot, 'absent', [userLine('msg-0', 'hello')]);
+      const durableRoot = join(paths.durableRoot, 'absent');
+      const report = await verifyHistoryImport({ sourceDir, durableRoot });
+      expect(report.ok).toBe(false);
+      expect(report.issues).toContain(`no seed import for absent in ${durableRoot}`);
+      await expect(stat(durableRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await paths.dispose();
+    }
+  });
+
+  it('verifies a live session without taking ownership or sweeping CAS staging files', async () => {
+    const paths = await tempPaths('verify-live');
+    try {
+      const sessionId = 'live';
+      const sourceDir = await writeSession(paths.sourceRoot, sessionId, [imageLine('msg-image', 'F'.repeat(64 * 1024))]);
+      await runHistoryImport({ sourceDir, durableRoot: paths.durableRoot });
+      const stale = join(paths.durableRoot, 'tmp', 'staged');
+      await writeFile(stale, 'staged bytes');
+      await utimes(stale, 0, 0);
+      const writer = openDurableHistoryStore(paths.durableRoot, { sessionId });
+      try {
+        const report = await verifyHistoryImport({ sourceDir, durableRoot: paths.durableRoot });
+        expect(report.ok).toBe(true);
+        expect(report.cas).toMatchObject({ references: 1, verified: 1 });
+        expect(await readFile(stale, 'utf8')).toBe('staged bytes');
+      } finally {
+        await writer.dispose();
+      }
+    } finally {
+      await paths.dispose();
+    }
+  });
+
+  it('checks a legacy monolith only when the session has no generation of its own', async () => {
+    const paths = await tempPaths('verify-legacy');
+    try {
+      const sessionId = 'legacy';
+      const sourceDir = await writeSession(paths.sourceRoot, sessionId, [userLine('msg-0', 'hello')]);
+      await runHistoryImport({
+        sourceDir, durableRoot: paths.durableRoot, keepImagesInline: true,
+        openStore: openDurableHistoryStore,
+      });
+      const report = await verifyHistoryImport({ sourceDir, durableRoot: paths.durableRoot });
+      expect(report.ok).toBe(true);
+      expect(await readdir(paths.durableRoot)).not.toContain('cas');
+      const directory = durableSessionDirectory(paths.durableRoot, sessionId);
+      await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'sessions.g1.db'), 'corrupt session database');
+      await expect(verifyHistoryImport({ sourceDir, durableRoot: paths.durableRoot })).rejects.toThrow();
+    } finally {
+      await paths.dispose();
+    }
+  });
 
   it('imports twice as once: the second run is a no-op', async () => {
     const paths = await tempPaths('twice');

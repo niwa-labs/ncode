@@ -23,3 +23,20 @@ export type {
   CanonicalTurnConfig,
   CanonicalTurnConfigTool,
 } from './canonical-history-jsonl.js';
+
+/** Maps session and snapshot identifiers to the historical on-disk filenames. */
+export function safeHistoryPathSegment(value: string): string {
+  return (
+    value
+      .replaceAll(/[<>:"/\\|?*\u0000-\u001F]/gu, '-')
+      .replaceAll(/^\.+/gu, '')
+      .slice(0, 180) || 'snapshot'
+  );
+}
+
+/** Encoded suffix of the runtime's dated session directories. */
+export function encodedSessionHistoryId(sessionId: string): string {
+  return `session_${Buffer.from(sessionId || 'unknown-session', 'utf8')
+    .toString('base64url')
+    .slice(0, 180)}`;
+}

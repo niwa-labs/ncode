@@ -531,6 +531,11 @@ class FileCasStore implements CasStore {
   }
 }
 
+/** Reads existing blobs without initializing directories or sweeping staged writes. */
+export function openCasReader(rootDir: string): Pick<CasStore, 'get'> {
+  return new FileCasStore(path.resolve(rootDir));
+}
+
 /**
  * Opens (and creates, if needed) a content-addressed blob store rooted at
  * `rootDir` with the layout `<rootDir>/cas/<aa>/<62 hex>` and a `<rootDir>/tmp`

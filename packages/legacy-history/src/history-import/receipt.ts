@@ -13,8 +13,9 @@
  * @module
  */
 
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import { SEED_MAPPING_VERSION } from './seed-protocol.js';
 
@@ -76,7 +77,20 @@ export interface HistoryImportReceipt {
 
 /** Receipt location INSIDE the explicit durable root. */
 export function receiptPath(durableRoot: string, sessionId: string): string {
-  return join(durableRoot, RECEIPTS_DIRECTORY, `${sessionId}.receipt.json`);
+  const directory = join(durableRoot, RECEIPTS_DIRECTORY);
+  const filename = `${sessionId}.receipt.json`;
+  // Preserve the original name whenever it fits in a filesystem component.
+  // Keep opaque IDs in a separate
+  // namespace so a literal session ID cannot collide with a hashed name.
+  const allowedOnWindows = process.platform !== 'win32' ||
+    (!/[<>:"/\\|?*\u0000-\u001f]/u.test(sessionId) &&
+      !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(sessionId));
+  if (allowedOnWindows && basename(filename) === filename && !filename.includes('\0') &&
+      Buffer.byteLength(filename) <= 255) {
+    return join(directory, filename);
+  }
+  const digest = createHash('sha256').update(sessionId).digest('hex');
+  return join(directory, 'by-id', `${digest}.receipt.json`);
 }
 
 /** Reads a receipt; `undefined` when none exists (never a fabricated one). */
@@ -120,7 +134,7 @@ export async function readReceipt(path: string): Promise<HistoryImportReceipt | 
  */
 export async function writeReceipt(path: string, receipt: HistoryImportReceipt): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${String(process.pid)}.tmp`;
+  const temporary = join(dirname(path), `.receipt-${randomUUID()}.tmp`);
   try {
     const handle = await open(temporary, 'wx', 0o600);
     try {

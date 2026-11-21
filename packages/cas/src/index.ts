@@ -1,4 +1,4 @@
-export { openCas } from './cas.js';
+export { openCas, openCasReader } from './cas.js';
 export type { CasStore, GetOptions, OpenCasOptions, PutOptions, PutResult } from './cas.js';
 export { casSpillRef, parseCasSpillRef } from './cas-ref.js';
 export type { CasSpillRefParts } from './cas-ref.js';

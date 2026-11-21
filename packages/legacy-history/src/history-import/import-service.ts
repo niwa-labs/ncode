@@ -32,14 +32,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import { access, readdir } from 'node:fs/promises';
+import { access, lstat, readFile, readdir } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
-import { openCas } from '@mavis/cas';
+import { openCasReader } from '@mavis/cas';
 import { parseCasSpillRef } from '@mavis/cas/cas-ref';
 import { createLogger } from '@mavis/logging';
 
-import type { CanonicalHistoryEnvelope } from '@mavis/local-runtime-v2/canonical-history';
+import { encodedSessionHistoryId, safeHistoryPathSegment, type CanonicalHistoryEnvelope } from '@mavis/local-runtime-v2/canonical-history';
 
 import {
   decodeCanonicalHistoryEnvelope,
@@ -47,6 +47,7 @@ import {
 } from './canonical-revision.js';
 import {
   openDurableHistoryStore,
+  openHistoryStoreForVerification,
   readDurableLogEntries,
   type DurableHistoryStore,
 } from './durable-history-store.js';
@@ -128,13 +129,86 @@ export async function planHistoryImports(sourceDir: string): Promise<readonly Im
 async function planEntry(dir: string): Promise<ImportPlanEntry> {
   const stats = await openV2Session(dir).stats({ validate: true });
   return {
-    sessionId: basename(resolve(dir)),
+    sessionId: await sourceSessionId(resolve(dir)),
     dir,
     messagesPath: join(dir, V2_MESSAGES_FILE),
     bytes: stats.bytes,
     records: stats.lines,
     malformedLines: stats.malformedLines,
   };
+}
+
+/** The v2 writer keeps the full ID in its manifest; the dated dirname can be truncated. */
+async function sourceSessionId(sourceDir: string): Promise<string> {
+  const name = basename(sourceDir);
+  const manifestPath = join(sourceDir, 'manifest.json');
+  let file;
+  try {
+    file = await lstat(manifestPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return name;
+    throw error;
+  }
+  if (!file.isFile()) throw new Error(`Invalid history manifest file: ${manifestPath}`);
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as unknown;
+  if (!manifest || typeof manifest !== 'object' ||
+      !('layout' in manifest) || manifest.layout !== 'v2-final-dated-session') {
+    // Older, flat source directories can have unrelated metadata.
+    return name;
+  }
+  if (!('schemaVersion' in manifest) || manifest.schemaVersion !== 1 ||
+      !('source' in manifest) || manifest.source !== 'local-runtime' ||
+      !('sessionId' in manifest) || typeof manifest.sessionId !== 'string' || !manifest.sessionId) {
+    throw new Error(`Invalid session identity in ${manifestPath}`);
+  }
+  const id = manifest.sessionId;
+  const encoded = /^\d{2}-\d{2}-\d{2}-\d{3}-(session_.*)$/u.exec(name);
+  if (encoded && encoded[1] !== encodedSessionHistoryId(id)) {
+    throw new Error(`Session identity in ${manifestPath} disagrees with its dated directory`);
+  }
+  return id;
+}
+
+/** Resolve an import started before this CLI learned the manifest's logical ID. */
+async function importSessionId(
+  sourceDir: string,
+  root: string,
+  options: { readonly receipt?: string; readonly verify?: boolean },
+): Promise<string> {
+  const id = await sourceSessionId(sourceDir);
+  const oldId = basename(sourceDir);
+  if (id === oldId) return id;
+  if (options.receipt) {
+    const chosen = await readReceipt(options.receipt);
+    if (chosen) {
+      if (chosen.sessionId === oldId || chosen.sessionId === id) return chosen.sessionId;
+      throw new Error(`Receipt ${options.receipt} belongs to a different session`);
+    }
+  }
+
+  async function hasImport(candidate: string): Promise<boolean> {
+    // Verification uses the log alone. Run/resume must also recognize a
+    // pending receipt published just before the old process wrote its begin.
+    if (!options.verify) {
+      const receipt = await readReceipt(receiptPath(root, candidate));
+      if (receipt) {
+        if (receipt.sessionId !== candidate) throw new Error(`Import receipt for ${candidate} belongs to a different session`);
+        return true;
+      }
+    }
+    const store = openHistoryStoreForVerification(root, candidate);
+    if (!store) return false;
+    try {
+      return (await scanSessionSeeds(store, candidate)).scan.last !== undefined;
+    } finally {
+      await store.dispose();
+    }
+  }
+  if (!(await hasImport(oldId))) return id;
+  if (await hasImport(id)) {
+    throw new Error(`Import records exist for both ${id} and its older directory identity ${oldId}`);
+  }
+  return oldId;
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -267,7 +341,11 @@ export async function runHistoryImport(
 ): Promise<RunHistoryImportResult> {
   const sourceDir = resolve(options.sourceDir);
   const durableRoot = resolve(options.durableRoot);
-  const sessionId = basename(sourceDir);
+  const sessionId = await importSessionId(sourceDir, durableRoot, options);
+  if (sessionId !== basename(sourceDir) &&
+      (sessionId.includes('|') || Buffer.byteLength(safeHistoryPathSegment(sessionId)) > 255)) {
+    throw new Error(`Session identity in ${sourceDir} cannot be represented in the durable layout`);
+  }
   const messagesPath = join(sourceDir, V2_MESSAGES_FILE);
   if (!(await fileExists(messagesPath))) {
     throw new Error(`No legacy v2 history at ${messagesPath}; --source must be a session directory`);
@@ -285,6 +363,9 @@ export async function runHistoryImport(
   // log below remains the authority for what actually committed).
   const existingReceipt = await readReceipt(receiptFile);
   if (existingReceipt) {
+    if (existingReceipt.sessionId !== sessionId) {
+      throw new Error(`Receipt ${receiptFile} belongs to a different session`);
+    }
     if (existingReceipt.source.sha256 !== fingerprint.sha256) {
       throw new SourceDriftError(
         `Source of ${sessionId} changed since the receipt was written (${short(existingReceipt.source.sha256)} → ${short(fingerprint.sha256)}); resume refused`,
@@ -304,7 +385,7 @@ export async function runHistoryImport(
     durableRoot,
   );
   try {
-    const logScan = await scanSessionSeeds(store, sessionId);
+    const logScan = await scanSessionSeeds(store, sessionId, !options.openStore);
     const lastImport = logScan.scan.last;
     if (lastImport?.commit && lastImport.importId === importId) {
       // Already imported: publish the completing receipt from the commit.
@@ -679,14 +760,19 @@ export async function resumeHistoryImport(
  * id of the session (the parent chain continues from it).
  */
 async function scanSessionSeeds(
-  store: DurableHistoryStore,
+  store: Pick<DurableHistoryStore, 'backend'>,
   sessionId: string,
+  requireExclusiveSession = false,
 ): Promise<{ readonly scan: { readonly last?: SeedImportScan }; readonly lastEntryId: string | null }> {
   const entries = await readDurableLogEntries(store.backend);
   const scan = createSeedScan();
   let lastEntryId: string | null = null;
   for (const entry of entries) {
-    if (sessionIdOfPayload(entry.payload) !== sessionId) continue;
+    const owner = sessionIdOfPayload(entry.payload);
+    if (requireExclusiveSession && typeof owner === 'string' && owner !== sessionId) {
+      throw new Error(`Durable directory for ${sessionId} already contains session ${owner}`);
+    }
+    if (owner !== sessionId) continue;
     lastEntryId = entry.id;
     if (!isSeedKind(entry.kind)) continue;
     scan.onEntry({ id: entry.id, kind: entry.kind, payload: entry.payload });
@@ -758,7 +844,7 @@ export async function verifyHistoryImport(
 ): Promise<ImportVerificationReport> {
   const sourceDir = resolve(options.sourceDir);
   const durableRoot = resolve(options.durableRoot);
-  const sessionId = basename(sourceDir);
+  const sessionId = await importSessionId(sourceDir, durableRoot, { verify: true });
   const messagesPath = join(sourceDir, V2_MESSAGES_FILE);
   const issues: string[] = [];
   const fingerprint = await fingerprintSource(messagesPath);
@@ -770,19 +856,11 @@ export async function verifyHistoryImport(
     sourceTurns.add(envelope.turn_id);
   });
 
-  // Verify reads the session's OWN file first (the per-session layout), and
-  // falls back to the legacy monolith for imports made before 2026-11-18.
-  const openVerifyStore = () => {
-    try {
-      return openDurableHistoryStore(durableRoot, { sessionId, readonly: true });
-    } catch {
-      return openDurableHistoryStore(durableRoot, { readonly: true });
-    }
-  };
-  const store = (options.openStore ?? openVerifyStore)(durableRoot);
+  const store = options.openStore
+    ? options.openStore(durableRoot)
+    : openHistoryStoreForVerification(durableRoot, sessionId);
   try {
-    const { scan } = await scanSessionSeeds(store, sessionId);
-    const open = scan.last;
+    const open = store ? (await scanSessionSeeds(store, sessionId)).scan.last : undefined;
     const commit = open?.commit;
     if (!open || !commit) {
       issues.push(
@@ -828,7 +906,7 @@ export async function verifyHistoryImport(
     let casReferences = 0;
     let casVerified = 0;
     if (!options.keepImagesInline) {
-      const cas = await openCas(durableRoot);
+      const cas = openCasReader(durableRoot);
       const seen = new Set<string>();
       for (const record of durableRecords) {
         const content = record.message.content;
@@ -892,6 +970,6 @@ export async function verifyHistoryImport(
       revisionMatch,
     };
   } finally {
-    await store.dispose();
+    await store?.dispose();
   }
 }
