@@ -322,6 +322,7 @@ async function startRig(): Promise<{ cli: CliService; conversation: NonNullable<
   host = await createLocalRuntimeHostV2ForTest({
     dataDir,
     runtimeOwnerKind: 'cli',
+    ownsSystemLog: true,
     capabilityProfile: 'cli',
     capabilities: { cliEmbedded: true },
     configGetter: () => config,

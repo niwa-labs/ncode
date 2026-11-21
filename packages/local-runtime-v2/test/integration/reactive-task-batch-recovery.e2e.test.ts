@@ -304,6 +304,7 @@ async function createHost(hostDataDir: string): Promise<CreatedLocalRuntimeHost>
   return createLocalRuntimeHostV2ForTest({
     dataDir: hostDataDir,
     runtimeOwnerKind: 'cli',
+    ownsSystemLog: true,
     capabilityProfile: 'cli',
     capabilities: { cliEmbedded: true },
     configGetter: () => config,
