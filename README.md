@@ -2,6 +2,8 @@
 
 Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of MiniMax Code (MCode) on Pi. Use MiniMax models or connect your own provider.
 
+**Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax and it claims the day’s credits if they’re available. Once today’s check-in is confirmed, the same profile skips it on later launches. ACP and headless runs skip auto check-in.
+
 <p align="center">
   <a href="#quick-start">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·

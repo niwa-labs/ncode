@@ -2,6 +2,8 @@
 
 Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MCode）和 Pi 构建。你可以使用 MiniMax 模型，也可以连接自己的模型服务。
 
+**每日自动签到。** 登录 MiniMax 后，在终端打开 `ncode` 就会自动领取当天可领的积分。签到确认后，当天再次打开同一配置档会跳过签到。ACP 和无界面模式也会跳过自动签到。
+
 <p align="center">
   <a href="#快速开始">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·
