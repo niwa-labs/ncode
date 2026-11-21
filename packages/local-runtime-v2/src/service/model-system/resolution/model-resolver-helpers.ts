@@ -27,6 +27,10 @@ export function buildLocalProviderHeaders(input: {
     for (const key of Object.keys(headers)) {
       if (key.toLowerCase() === 'bedrock-lane') delete headers[key];
     }
+    // Compressed managed SSE can arrive in one batch at the end of generation.
+    if (!Object.keys(headers).some((key) => key.toLowerCase() === 'accept-encoding')) {
+      headers['Accept-Encoding'] = 'identity';
+    }
     headers['User-Agent'] = MANAGED_PROVIDER_USER_AGENT;
     Object.assign(headers, managedBackendRoutingHeaders(input.routingContext, currentBuildEnv()));
   }

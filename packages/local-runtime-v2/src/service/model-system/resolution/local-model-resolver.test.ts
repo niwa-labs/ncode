@@ -126,6 +126,7 @@ describe('LocalModelResolver', () => {
         'X-Mavis-Agent-Id': 'agent-native',
       },
     });
+    expect(new Headers(resolved.headers).has('accept-encoding')).toBe(false);
     expect(resolved.fetch).toBe(fetchImpl);
   });
 });
@@ -216,6 +217,7 @@ describe('LocalModelResolver', () => {
     expect(resolved.headers).toMatchObject({
       Authorization: 'Bearer managed-token',
       'User-Agent': 'MiniMaxAgent',
+      'Accept-Encoding': 'identity',
       'X-Mavis-Session-Id': 'session-managed',
     });
     expect(resolved.fileApiGatewayAuth).toMatchObject({
