@@ -16,7 +16,6 @@ import {
   gatedStorageWorkerBackend,
   sqliteZstdStorageBackend,
   type SingleWriterGate,
-  type StorageWorker,
 } from '@mavis/storage-worker';
 import { createLogger } from '@mavis/logging';
 
@@ -258,7 +257,3 @@ function isNotFound(error: unknown): boolean {
     (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
 }
-
-// Re-exported for the Ш1 composition site so the worker construction and the
-// gate stay in one place (types only; no behavior).
-export type { StorageWorker };

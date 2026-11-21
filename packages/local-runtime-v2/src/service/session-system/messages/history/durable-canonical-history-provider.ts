@@ -2,18 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import {
-  currentGeneration,
-  OwnerWriteLockError,
-  SqliteZstdBackend,
-} from '@mavis/durable-backend-sqlite-zstd';
-import {
-  createStorageWorker,
-  entryDraftSizeBytes,
-  sqliteZstdStorageBackend,
-  type Entry,
-  type StorageWorker,
-} from '@mavis/storage-worker';
+import { entryDraftSizeBytes } from '@mavis/storage-worker';
 import { createLogger } from '@mavis/logging';
 // R5: the chunked full-state seed protocol (history.v2.seed.begin/chunk/commit)
 // has ONE implementation, shared with the history-import CLI. The provider
@@ -68,7 +57,6 @@ import {
   EVENT_REPLACE_ALL,
   EVENT_TOMBSTONE,
   foldFromCheckpoint,
-  isHistoryEventKind,
   materializeFold,
   parseFoldCheckpoint,
   resolveCompactionReplaceRange,
@@ -90,22 +78,16 @@ import {
   synthesizedUnknownOutcomeEnvelopes,
 } from './mutation/session-turn-history-mutation.js';
 import {
-  composeGatedDurableHistoryWorkerBackend,
-  openPiDurableCompositionRoot,
-  type PiDurableCompositionRoot,
-} from './pi-durable-root.js';
-import {
   createDurableHistoryStores,
   DurableHistoryLogOwnedError,
   DurableSessionLogOwnedError,
   type DurableHistoryStores,
-  type SessionDurableStores,
 } from './durable-session-stores.js';
 import { deleteSessionHistory, safeHistoryPathSegment } from './session-history-paths.js';
 // Wave 2 (canon 05 §2.5): the content-addressed image artifact store and the
 // receipt-boundary offload transform (base64 never enters the log).
 import { ImageArtifactStore } from './image-artifact-store.js';
-import { offloadMessageImages, offloadEventsOf } from './image-offload.js';
+import { offloadMessageImages } from './image-offload.js';
 import {
   createSessionHistoryLocationResolver,
   type SessionHistoryLocationResolver,
@@ -150,13 +132,10 @@ import type {
 /**
  * Durable canonical-history provider (integration plan Ш1).
  *
- * Stores the canonical history of every Session as entries of ONE sqlite-zstd
- * durable log per runtime, written through the shared `StorageWorker` (Ш1:
- * the same instance later backs the turn checkpoint barrier — Ш2 — and the
- * steering backend). Appends enqueue only the delta (the JSONL provider's
- * O(n²) full re-read/rewrite per append disappears); the in-memory
- * per-Session state is authoritative between restarts and is rebuilt from
- * the log once per process.
+ * Each session owns a sqlite-zstd history log. The routing storage worker
+ * directs appends to the session's writer and sends unscoped control records
+ * to the daemon's system log. Appends enqueue only the delta. The in-memory
+ * session state is rebuilt from the log on reopen.
  *
  * Selection follows the W10 hybrid default (port-plan §8 W10-C: "новый путь
  * становится hybrid default"): the DURABLE provider is the default since W10,
@@ -235,15 +214,6 @@ export {
   DurableSessionLogOwnedError,
 };
 
-/**
- * Single-entry cap of the durable history log. History deltas carry full
- * provider messages, so the backend default (256 KiB) is raised to keep
- * ordinary large tool rounds on the ordinary append path; the worker's
- * admission cap mirrors the backend's (their documented invariant). The
- * per-session stores factory (`durable-session-stores.ts`) passes the same
- * caps to every session worker it opens.
- */
-const DURABLE_HISTORY_BATCH_CAP_BYTES = 8 * 1024 * 1024;
 /** Uncompressed read window of one log-scan step. */
 const READ_DELTA_WINDOW_BYTES = 8 * 1024 * 1024;
 

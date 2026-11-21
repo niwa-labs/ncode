@@ -58,6 +58,7 @@ export {
   seedCommitEntryId,
   seedEntrySizeBytes,
   seedRootDigest,
+  DURABLE_HISTORY_WORKER_LIMITS,
   SEED_BEGIN_KIND,
   SEED_CHUNK_HARD_CAP_BYTES,
   SEED_CHUNK_KIND,

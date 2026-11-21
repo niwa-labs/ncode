@@ -292,6 +292,26 @@ describe('durable session stores (per-session history)', () => {
     }
   });
 
+  it.each([true, false])('releases the writer after a sidecar fails to open (system=%s)', async (systemLog) => {
+    const dataDir = tempRoot();
+    const root = join(dataDir, 'durable-history');
+    const directory = systemLog ? root : join(root, 'sessions', 'retry');
+    mkdirSync(directory, { recursive: true });
+    const sidecar = join(directory, 'root-resolver.json');
+    writeFileSync(sidecar, 'broken sidecar');
+    const open = async () => {
+      const stores = await createDurableHistoryStores({ dataDir, ownsSystemRoot: systemLog, ownerWaitTimeoutMs: 0 });
+      try {
+        if (!systemLog) await stores.sessionStores('retry');
+      } finally {
+        await stores.dispose();
+      }
+    };
+    await expect(open()).rejects.toMatchObject({ code: 'SIDECAR_INVALID' });
+    rmSync(sidecar);
+    await expect(open()).resolves.toBeUndefined();
+  });
+
   it('dispose closes every open session worker and backend and is idempotent', async () => {
     const root = tempRoot();
     const stores: DurableHistoryStores = await createDurableHistoryStores({
@@ -315,7 +335,3 @@ describe('durable session stores (per-session history)', () => {
     }
   });
 });
-
-// Keep the writer import used (the seed entry helper above does not need it;
-// the explicit reference documents the intent).
-void writeFileSync;

@@ -37,6 +37,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { DURABLE_HISTORY_WORKER_LIMITS } from '@mavis/legacy-history';
 import { createLogger } from '@mavis/logging';
 import {
   currentGeneration,
@@ -45,21 +46,19 @@ import {
 } from '@mavis/durable-backend-sqlite-zstd';
 import {
   createStorageWorker,
-  gatedStorageWorkerBackend,
-  sqliteZstdStorageBackend,
   type Commit,
   type Entry,
   type StorageWorker,
 } from '@mavis/storage-worker';
 
-import { openPiDurableCompositionRoot, type PiDurableCompositionRoot } from './pi-durable-root.js';
+import {
+  composeGatedDurableHistoryWorkerBackend,
+  openPiDurableCompositionRoot,
+  type PiDurableCompositionRoot,
+} from './pi-durable-root.js';
 import { safeHistoryPathSegment } from './session-history-paths.js';
 
 const log = createLogger('mcode:storage');
-
-/** Batch caps mirror the previous ONE-log composition (8 MiB batches, 16 MiB queue). */
-const DURABLE_HISTORY_BATCH_CAP_BYTES = 8 * 1024 * 1024;
-const DURABLE_HISTORY_QUEUE_BYTES = 16 * 1024 * 1024;
 
 /**
  * Bounded wait for a competing writer of ONE log; the same
@@ -216,14 +215,23 @@ function sessionDirectoryOf(sessionsRoot: string, sessionId: string): string {
   return join(sessionsRoot, safeHistoryPathSegment(sessionId));
 }
 
-function openGatedWorker(backend: DurableBackend, gate: PiDurableCompositionRoot['gate']): StorageWorker {
-  // The worker rides the pi gate exactly like the previous composition
-  // (`composeGatedDurableHistoryWorkerBackend`): one gate per file, worker
-  // appends and pi commits structurally serialized.
-  return createStorageWorker(gatedStorageWorkerBackend(sqliteZstdStorageBackend(backend), gate), {
-    maxBatchUncompressedBytes: DURABLE_HISTORY_BATCH_CAP_BYTES,
-    queueBytes: DURABLE_HISTORY_QUEUE_BYTES,
-  });
+async function openLogStores(
+  directory: string,
+  waitMs: number,
+  wrapRefusal: (refusal: OwnerWriteLockError, waitedMs: number) => Error,
+): Promise<DurableSystemStores> {
+  const backend = await openWaitingForOwnership(directory, waitMs, wrapRefusal);
+  try {
+    const pi = await openPiDurableCompositionRoot({ backend, directory });
+    const worker = createStorageWorker(
+      composeGatedDurableHistoryWorkerBackend(backend, pi.gate),
+      DURABLE_HISTORY_WORKER_LIMITS,
+    );
+    return { directory, backend, pi, worker };
+  } catch (error) {
+    backend.close();
+    throw error;
+  }
 }
 
 /**
@@ -247,16 +255,13 @@ export async function createDurableHistoryStores(options: {
   // -- system (shared) log: only scheduling/delegation owners open it -------
   let system: DurableSystemStores | undefined;
   if (options.ownsSystemRoot) {
-    const backend = await openWaitingForOwnership(directory, waitMs, (refusal, waitedMs) =>
+    system = await openLogStores(directory, waitMs, (refusal, waitedMs) =>
       wrapSystemRefusal(directory, refusal, waitedMs),
     );
-    const pi = await openPiDurableCompositionRoot({ backend, directory });
-    const worker = openGatedWorker(backend, pi.gate);
-    system = { directory, backend, pi, worker };
     log.info('durable system log opened (this runtime owns scheduling/delegation)', {
       directory,
-      generation: backend.generation,
-      head: backend.head,
+      generation: system.backend.generation,
+      head: system.backend.head,
     });
   }
 
@@ -276,13 +281,10 @@ export async function createDurableHistoryStores(options: {
     if (pending) return pending;
     const created = (async () => {
       const sessionDirectory = sessionDirectoryOf(sessionsRoot, sessionId);
-      mkdirSync(sessionDirectory, { recursive: true });
-      const backend = await openWaitingForOwnership(sessionDirectory, waitMs, (refusal) =>
+      const logStores = await openLogStores(sessionDirectory, waitMs, (refusal) =>
         wrapSessionRefusal(sessionId, sessionDirectory, refusal),
       );
-      const pi = await openPiDurableCompositionRoot({ backend, directory: sessionDirectory });
-      const worker = openGatedWorker(backend, pi.gate);
-      const stores: SessionDurableStores = { sessionId, directory: sessionDirectory, backend, pi, worker };
+      const stores: SessionDurableStores = { ...logStores, sessionId };
       sessions.set(sessionId, stores);
       return stores;
     })();
@@ -473,7 +475,7 @@ async function openWaitingForOwnership(
     let refusal: OwnerWriteLockError | undefined;
     try {
       return SqliteZstdBackend.open(directory, {
-        maxBatchUncompressedBytes: DURABLE_HISTORY_BATCH_CAP_BYTES,
+        maxBatchUncompressedBytes: DURABLE_HISTORY_WORKER_LIMITS.maxBatchUncompressedBytes,
       });
     } catch (error) {
       if (!(error instanceof OwnerWriteLockError)) throw error;

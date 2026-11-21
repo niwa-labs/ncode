@@ -57,9 +57,15 @@ export const SEED_COMMIT_KIND = 'history.v2.seed.commit';
  */
 export const SEED_MAPPING_VERSION = 'canonical-history-seed.v1';
 
+/** Shared admission limits for the CLI importer and runtime history writers. */
+export const DURABLE_HISTORY_WORKER_LIMITS = {
+	maxBatchUncompressedBytes: 8 * 1024 * 1024,
+	queueBytes: 16 * 1024 * 1024,
+} as const;
+
 /**
  * Serialized entry budget of one seed chunk. Comfortably below the worker's
- * admission cap (`DURABLE_HISTORY_BATCH_CAP_BYTES`, 8 MiB, mirrored by
+ * admission cap (8 MiB, also used by
  * {@link SEED_CHUNK_HARD_CAP_BYTES}) so metadata and id variance can never
  * push a planned chunk over admission.
  */
@@ -67,12 +73,11 @@ export const SEED_CHUNK_TARGET_BYTES = 6 * 1024 * 1024;
 
 /**
  * Hard admission ceiling of one seed entry, including a single-oversized-record
- * chunk. Mirrors the durable history provider's `DURABLE_HISTORY_BATCH_CAP_BYTES`
- * (the worker's `maxBatchUncompressedBytes`): a record whose entry serializes
+ * chunk. Uses the worker's `maxBatchUncompressedBytes`: a record whose entry serializes
  * at or above this bound cannot be admitted at all and fails the import with a
  * controlled record-too-large error instead of a partial publish.
  */
-export const SEED_CHUNK_HARD_CAP_BYTES = 8 * 1024 * 1024;
+export const SEED_CHUNK_HARD_CAP_BYTES = DURABLE_HISTORY_WORKER_LIMITS.maxBatchUncompressedBytes;
 
 export interface SeedBeginPayload {
 	readonly sessionId: string;
