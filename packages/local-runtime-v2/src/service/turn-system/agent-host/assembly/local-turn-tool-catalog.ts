@@ -376,6 +376,7 @@ export function buildLocalTurnToolCatalog(
               };
             },
           };
+          const entryDirectory = path.dirname(process.argv[1] ?? '');
           const codemode = createCodemodeRuntimeTool({
             resolveCallableTools: () =>
               callable.map((tool) => ({
@@ -388,9 +389,8 @@ export function buildLocalTurnToolCatalog(
             // esbuild's source plugin rewrites import.meta.url to the original
             // .ts path, so anchor the bundled worker at the running entry
             // (dist/mcoded.js | dist/cli.js -> dist/codemode-worker.js).
-            workerUrl: pathToFileURL(
-              path.join(path.dirname(process.argv[1] ?? ''), 'codemode-worker.js'),
-            ),
+            workerUrl: pathToFileURL(path.join(entryDirectory, 'codemode-worker.js')),
+            wasmPath: path.join(entryDirectory, 'quickjs.wasm'),
           });
           return await codemode.impl.execute(ctx, input as never, signal);
         },

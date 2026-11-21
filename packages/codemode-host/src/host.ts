@@ -17,7 +17,7 @@ import {
   type CodemodeResult,
   CodemodeSandbox,
   InlineCodemodeSandbox,
-  type CodemodeSandboxBaseOptions,
+  type CodemodeSandboxOptions,
   loadQuickJSWasm,
   parseCodemodeSource,
 } from '@earendil-works/pi-codemode';
@@ -56,6 +56,8 @@ export interface CodemodeExecuteInput {
    * the build emits dist/codemode-worker.js and the caller passes its URL.
    */
   readonly workerUrl?: string | URL;
+  /** Path to the QuickJS module shipped with a bundled worker. */
+  readonly wasmPath?: string;
 }
 
 export interface CodemodeToolOutput {
@@ -150,18 +152,19 @@ export async function executeCodemodeScript(input: CodemodeExecuteInput): Promis
     onCallsChanged: input.onCallsChanged,
   });
 
-  const sandboxOptions: CodemodeSandboxBaseOptions = {
+  const sandboxOptions: CodemodeSandboxOptions = {
     tools: nested.sandboxTools,
     timeoutMs: sourceOptions.timeoutMs ?? input.timeoutMs ?? Number.POSITIVE_INFINITY,
     memoryLimitBytes: CODEMODE_MEMORY_LIMIT_BYTES,
     // Bundled-daemon support: the worker file must exist beside the host chunk
     // (the source tree resolves it next to pi-codemode's dist automatically).
     ...(input.workerUrl ? { workerUrl: input.workerUrl } : {}),
+    ...(input.wasmPath ? { wasm: loadQuickJSWasm(input.wasmPath) } : {}),
   };
 
   let result: CodemodeResult;
   if (input.sandboxMode === 'inline') {
-    const sandbox = new InlineCodemodeSandbox({ ...sandboxOptions, wasm: loadQuickJSWasm() });
+    const sandbox = new InlineCodemodeSandbox({ ...sandboxOptions, wasm: sandboxOptions.wasm ?? loadQuickJSWasm() });
     try {
       result = await sandbox.execute(code, { signal: input.signal, store: input.store });
     } finally {

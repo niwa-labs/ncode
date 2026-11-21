@@ -53,27 +53,37 @@ test('the built image preview worker processes a synthetic PNG and exits cleanly
   assert.deepEqual([...Buffer.from(preview, 'base64').subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
 });
 
-test('the built PTC QuickJS worker runs a program with a tool call', { timeout: 15000 }, async (t) => {
+test('the bundled Codemode worker loads its QuickJS module and calls a tool', { timeout: 15000 }, async (t) => {
   const { Worker } = await import('node:worker_threads');
-  const worker = new Worker(new URL('../dist/quickjs-worker.js', import.meta.url));
+  const wasm = await WebAssembly.compile(readFileSync(new URL('../dist/quickjs.wasm', import.meta.url)));
+  const worker = new Worker(new URL('../dist/codemode-worker.js', import.meta.url), {
+    workerData: {
+      code: 'const result = await tools.echo({ n: 41 }); return result.n + 1;',
+      tools: [{ name: 'echo', jsName: 'echo', description: 'Return the input.' }],
+      globals: [],
+      memoryLimitBytes: 32 * 1024 * 1024,
+      store: {},
+      interrupt: new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
+      wasm,
+    },
+  });
   t.after(() => worker.terminate());
+  const calls = [];
   const result = await new Promise((resolve, reject) => {
     worker.once('error', reject);
+    worker.once('exit', (code) => reject(new Error(`Codemode worker exited with code ${code}`)));
     worker.on('message', (message) => {
-      if (message.type === 'ready') {
-        worker.postMessage({
-          type: 'start',
-          code: 'const r = await tools.echo({ n: 41 }); return r.n + 1;',
-          toolNames: ['echo'],
-          limits: { maxConsoleBytes: 1024, maxHeapBytes: 32 * 1024 * 1024, maxComputeMs: 5000, maxToolCalls: 4 },
-        });
-      } else if (message.type === 'tool_call') {
-        worker.postMessage({ type: 'tool_result', requestId: message.requestId, resultJson: message.argsJson });
-      } else if (message.type === 'completed' || message.type === 'failed') {
+      if (message.type === 'call') {
+        calls.push({ target: message.target, name: message.name, args: message.args });
+        worker.postMessage({ type: 'result', id: message.id, ok: true, payload: message.args });
+      } else if (message.type === 'crash') {
+        reject(new Error(message.message));
+      } else if (message.type === 'done') {
         resolve(message);
       }
     });
   });
-  assert.equal(result.type, 'completed', JSON.stringify(result.error));
-  assert.equal(result.valueJson, '42');
+  assert.deepEqual(calls, [{ target: 'tool', name: 'echo', args: '{"n":41}' }]);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.value, '42');
 });

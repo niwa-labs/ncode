@@ -30,6 +30,7 @@ export interface CodemodeRuntimeToolDeps {
   readonly sandboxMode?: CodemodeSandboxMode;
   /** Bundled-daemon support: explicit worker file URL (see host.ts). */
   readonly workerUrl?: string | URL;
+  readonly wasmPath?: string;
   readonly timeoutMs?: number;
   readonly maxOutputTokens?: number;
   /** Session store for `load()`; `store()` writes are handed back in details. */
@@ -59,6 +60,7 @@ export function createCodemodeRuntimeTool(deps: CodemodeRuntimeToolDeps): Runtim
           ...(deps.readStore ? { store: deps.readStore(ctx) ?? {} } : {}),
           ...(deps.sandboxMode !== undefined ? { sandboxMode: deps.sandboxMode } : {}),
           ...(deps.workerUrl !== undefined ? { workerUrl: deps.workerUrl } : {}),
+          ...(deps.wasmPath !== undefined ? { wasmPath: deps.wasmPath } : {}),
           ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
           ...(deps.maxOutputTokens !== undefined ? { maxOutputTokens: deps.maxOutputTokens } : {}),
           ...(deps.onCallsChanged !== undefined ? { onCallsChanged: deps.onCallsChanged } : {}),
