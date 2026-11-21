@@ -571,6 +571,12 @@ describe('torn tail', () => {
 });
 
 describe('format generations', () => {
+	it('leaves a missing directory untouched on read-only open', () => {
+		const missing = join(workDir, 'absent');
+		expect(() => SqliteZstdBackend.open(missing, { readonly: true })).toThrow();
+		expect(existsSync(missing)).toBe(false);
+	});
+
 	it('creates g1 for an empty directory and opens the highest generation by default', async () => {
 		const first = SqliteZstdBackend.open(workDir);
 		expect(first.generation).toBe(1);

@@ -401,7 +401,7 @@ export class SqliteZstdBackend {
 	 * lost its write bits (a sealed generation) opens read-only.
 	 */
 	static open(directory: string, options: OpenDurableBackendOptions = {}): SqliteZstdBackend {
-		mkdirSync(directory, { recursive: true });
+		if (!options.readonly) mkdirSync(directory, { recursive: true });
 		let generation: number;
 		if (options.generation !== undefined) {
 			if (!Number.isSafeInteger(options.generation) || options.generation < 1) {
