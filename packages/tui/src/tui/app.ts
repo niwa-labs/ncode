@@ -36,7 +36,7 @@ import { TuiFeatureFlow } from './controller/product/feature-flow.js';
 import { TuiRuntimeEventFlow } from './controller/runtime/runtime-event-flow.js';
 import { TuiQueueFlow } from './controller/run/queue-flow.js';
 import { resolveTuiEffortChoice } from './features/model/effort.js';
-import { shouldAutoCheckin, markAutoCheckinDone } from '../checkin/auto-daily.js';
+import { shouldAutoCheckin } from '../checkin/auto-daily.js';
 import { TuiPromptSuggestionStore } from './features/composer/prompt-suggestion.js';
 import { TuiSessionFlow } from './controller/session-flow.js';
 import { TuiCommandFlow } from './controller/product/command-flow.js';
@@ -286,6 +286,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
   });
   const featureFlow = new TuiFeatureFlow({
+    dataDir: options.dataDir,
     runtime: options.runtime,
     version: options.version,
     planMode: () => planModeFlow.snapshot(),
@@ -1058,22 +1059,17 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
         .catch(() => undefined);
       void activeRunFlow.refresh().catch(() => undefined);
       void goalFlow?.refresh().catch(() => undefined);
-      // Owner request 2026-11-17: the daily check-in runs itself once per
-      // local day on interactive TUI open (never for pipe/exec surfaces —
-      // this start() path only fires for the interactive terminal UI).
-      if (process.stdout.isTTY && options.dataDir && shouldAutoCheckin(options.dataDir)) {
-        void featureFlow.runDailyCheckin().then((outcome) => {
-          if (outcome && outcome.status !== 'unavailable') {
-            markAutoCheckinDone(options.dataDir as string);
-          }
-        });
-      }
       checkTuiApplicationUpdate(options, updateNotice, () => stopped, tui);
     },
     suspend,
     resume,
     openSession,
     continueLatestSession,
+    async runStartupCheckin() {
+      if (stopped || !options.dataDir || !shouldAutoCheckin(options.dataDir)) return;
+      if (controller.snapshot().account?.managedTokenPresent === false) return;
+      await featureFlow.runDailyCheckin();
+    },
     setStartupStatus(message) {
       chromeFlow?.setStartupHint(message);
       updateChromeAndRequestRender();

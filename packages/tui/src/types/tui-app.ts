@@ -121,6 +121,7 @@ export interface TuiApp {
   continueLatestSession(): Promise<boolean>;
   /** Internal startup chrome shown while the embedded Runtime is initializing. */
   setStartupStatus(status?: string): void;
+  runStartupCheckin(): Promise<void>;
   submit(input: string): Promise<void>;
   /** Exposed for integration tests that submit with an explicit seed. */
   commandFlow: TuiCommandFlow;

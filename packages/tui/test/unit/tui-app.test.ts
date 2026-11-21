@@ -2726,6 +2726,62 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
+  it("skips automatic check-in for a signed-out account", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ncode-signed-out-checkin-"));
+    const runtime = createRuntime();
+    vi.mocked(runtime.getAccountStatus).mockResolvedValue({
+      status: "needs-login", managedTokenPresent: false, warnings: [],
+    });
+    const app = createTuiApp({
+      runtime, dataDir, terminal: new FakeTerminal(), version: "test", workspaceDir: "/workspace",
+    });
+    app.start();
+    await app.ready;
+    await app.runStartupCheckin();
+    expect(runtime.runDailyCheckin).not.toHaveBeenCalled();
+    expect(app.interaction.current()).toBeUndefined();
+    await app.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("honors a successful manual check-in on the next automatic check", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ncode-manual-checkin-"));
+    const runtime = createRuntime();
+    const app = createTuiApp({
+      runtime, dataDir, terminal: new FakeTerminal(), version: "test", workspaceDir: "/workspace",
+    });
+    try {
+      app.start();
+      await app.ready;
+      await app.submit("/checkin");
+      await app.runStartupCheckin();
+      expect(runtime.runDailyCheckin).toHaveBeenCalledOnce();
+    } finally {
+      await app.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries auto check-in after a failure and skips after server confirmation", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ncode-retry-checkin-"));
+    const runtime = createRuntime();
+    vi.mocked(runtime.runDailyCheckin).mockRejectedValueOnce(new Error("offline"));
+    const app = createTuiApp({
+      runtime, dataDir, terminal: new FakeTerminal(), version: "test", workspaceDir: "/workspace",
+    });
+    try {
+      app.start();
+      await app.ready;
+      await app.runStartupCheckin();
+      await app.runStartupCheckin();
+      await app.runStartupCheckin();
+      expect(runtime.runDailyCheckin).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("runs /checkin immediately for a signed-in MiniMax account", async () => {
     const runtime = createRuntime();
     const app = createTuiApp({
@@ -15837,6 +15893,14 @@ describe.each([
       await vi.waitFor(() => expect(app?.editor.disableSubmit).toBe(false));
       app!.tui.renderNow();
       await terminal.flush();
+      await vi.waitFor(() => {
+        expect(runtime.runDailyCheckin).toHaveBeenCalledOnce();
+        expect(app!.transcript.snapshot().some((cell) =>
+          cell.content.includes("Checked in: Cycle day 2, +20 Credits"),
+        )).toBe(true);
+      });
+      await app!.runStartupCheckin();
+      expect(runtime.runDailyCheckin).toHaveBeenCalledOnce();
       const history = terminal.getScrollBuffer().join("\n");
       if (mode === "regular" && count > 0) {
         expect(history).not.toContain("OLD TRANSCRIPT");

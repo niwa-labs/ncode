@@ -111,6 +111,7 @@ export interface LaunchTuiOptions {
 type LaunchApp = Pick<TuiApp, 'ready' | 'firstFrame' | 'start' | 'stop' | 'stopped' | 'submit'> & {
   readonly editor?: Pick<TuiApp['editor'], 'disableSubmit'>;
   readonly setStartupStatus?: TuiApp['setStartupStatus'];
+  readonly runStartupCheckin?: TuiApp['runStartupCheckin'];
   readonly controller?: Pick<TuiApp['controller'], 'snapshot'> &
     Partial<Pick<TuiApp['controller'], 'ensureSession'>>;
   readonly openSession?: TuiApp['openSession'];
@@ -619,6 +620,9 @@ export async function launchTui(
     incidentReporter.breadcrumb('cli.first-frame.rendered');
 
     const initialPrompt = initialStateReady ? options.initialPrompt?.trim() : undefined;
+    // Restoring a session replaces its transcript. Append the server's daily
+    // reward status only after that restore, without delaying the first prompt.
+    if (initialStateReady && initialPrompt !== '/checkin') void app.runStartupCheckin?.();
     if (initialPrompt) void submitInitialTuiPrompt(app, observability, initialPrompt);
     stoppedNormally = await Promise.race([
       app.stopped.then(() => true),

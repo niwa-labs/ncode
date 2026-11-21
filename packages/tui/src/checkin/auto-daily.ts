@@ -17,7 +17,7 @@ export function localDay(now: Date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-/** True when the auto check-in has not run yet on this local day. */
+/** True until MiniMax confirms a manual or automatic check-in for this local day. */
 export function shouldAutoCheckin(dataDir: string, now: Date = new Date()): boolean {
   try {
     const marker = join(dataDir, AUTO_DAILY_CHECKIN_MARKER);
@@ -28,7 +28,7 @@ export function shouldAutoCheckin(dataDir: string, now: Date = new Date()): bool
   }
 }
 
-/** Marks the local day as already auto-checked-in; failures are non-fatal. */
+/** Records a confirmed check-in for the local day the request started. */
 export function markAutoCheckinDone(dataDir: string, now: Date = new Date()): void {
   try {
     const marker = join(dataDir, AUTO_DAILY_CHECKIN_MARKER);

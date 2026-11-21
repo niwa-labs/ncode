@@ -1,3 +1,4 @@
+import { markAutoCheckinDone } from '../../../checkin/auto-daily.js';
 import { formatContextWindow } from '../../features/model/context-window.js';
 import type {
   TuiConfigurationPort,
@@ -112,6 +113,7 @@ interface ReportInspectionResult {
 }
 
 export interface TuiFeatureFlowOptions {
+  readonly dataDir?: string;
   readonly runtime: FeatureRuntime;
   readonly controller: TuiChatController;
   readonly surface: TuiInteractionSurface;
@@ -1173,7 +1175,11 @@ export class TuiFeatureFlow {
 
   async runDailyCheckin(): Promise<TuiDailyCheckinOutcome | undefined> {
     try {
+      const started = new Date();
       const outcome = await this.options.runtime.runDailyCheckin();
+      if (this.options.dataDir && outcome.status !== 'unavailable') {
+        markAutoCheckinDone(this.options.dataDir, started);
+      }
       this.options.append(formatTuiDailyCheckinOutcome(outcome));
       return outcome;
     } catch {
