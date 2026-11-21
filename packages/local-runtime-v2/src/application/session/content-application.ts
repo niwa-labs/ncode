@@ -103,20 +103,28 @@ export class SessionContentApplication {
         ...(request.limit !== undefined ? { limit: request.limit } : {}),
         ...(request.before ? { before: request.before } : {}),
       });
-      const queryCollapseViews = await this.readQueryCollapseViews(
-        request.id,
-        page.messages,
-      );
       const messages = await this.toSessionMessageViews(
         request.id,
         page.messages,
       );
-      const lastMsgId = messages.at(-1)?.msgId;
+      // The wire page must fit the daemon RPC frame (see the constants): trim
+      // the chronological page from its OLDEST end so the newest entries —
+      // where every history reader starts — always survive, then scope the
+      // query-collapse projection to what we actually serve.
+      const { views, droppedCount } = fitSessionMessageViewsToWireBudget(messages);
+      const servedRecords =
+        droppedCount > 0 ? page.messages.slice(droppedCount) : page.messages;
+      const queryCollapseViews = await this.readQueryCollapseViews(
+        request.id,
+        servedRecords,
+      );
+      const lastMsgId = views.at(-1)?.msgId;
+      const nextCursor = servedNextCursor(page, droppedCount, views);
       return {
-        messages,
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        messages: views,
+        ...(nextCursor ? { nextCursor } : {}),
         ...(lastMsgId ? { lastMsgId } : {}),
-        hasMore: page.hasMore,
+        hasMore: servedHasMore(page, droppedCount),
         queryCollapseViews: queryCollapseViews.map(toQueryCollapseView),
       };
     } catch (error) {
@@ -610,6 +618,8 @@ function messageApplicationError(error: MessageQueryServiceError): AppError {
   switch (error.reason) {
     case "session-not-found":
       return new AppError(404, "SESSION_NOT_FOUND", error.message);
+    case "cursor-not-found":
+      return new AppError(400, "MESSAGE_CURSOR_NOT_FOUND", error.message);
     case "data-corrupt":
       return new AppError(500, "MESSAGE_DATA_CORRUPT", error.message);
   }
@@ -1044,4 +1054,110 @@ function jsonStringOrString(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Wire bounds for Session history pages, derived from the daemon RPC
+ * transport (`MAX_INBOUND_FRAME_BYTES`, mcoded protocol.ts = 8 MiB): a
+ * serialized response crossing that limit is invisible to the client — the
+ * inbound-frame guard destroys the connection, so a huge history read dies
+ * as "connection lost"/"Internal error" instead of a diagnosable error.
+ * Pages are therefore bounded HERE. This is a transport framing bound, not a
+ * data policy: the durable history stays byte-complete, bounded views carry
+ * explicit markers, and the full entry remains fetchable per id
+ * (getSessionSourceDetail / getToolDetail).
+ */
+const HISTORY_PAGE_WIRE_BUDGET_BYTES = 6 * 1024 * 1024;
+/** A single view above this is projected bounded; one bounded view always fits the page budget. */
+const HISTORY_ENTRY_WIRE_CAP_BYTES = 1024 * 1024;
+/** Strings above this inside a bounded view are replaced with markers. */
+const HISTORY_STRING_WIRE_CAP_BYTES = 64 * 1024;
+const HISTORY_STRING_PREVIEW_BYTES = 2 * 1024;
+
+/**
+ * Trim the chronological page to the wire budget, keeping the NEWEST entries
+ * (history readers start at the newest; `before` paging walks backwards).
+ * Returns the kept views and how many OLDEST records were dropped, so the
+ * caller can align raw-record slices and recompute the cursor.
+ */
+export function fitSessionMessageViewsToWireBudget(views: SessionMessageView[]): {
+  readonly views: SessionMessageView[];
+  readonly droppedCount: number;
+} {
+  if (views.length === 0) return { views, droppedCount: 0 };
+  const bounded = views.map((view) =>
+    wireBytesOfSessionMessageView(view) > HISTORY_ENTRY_WIRE_CAP_BYTES
+      ? (boundSessionMessageView(view) as SessionMessageView)
+      : view,
+  );
+  let keptBytes = 0;
+  let keepFrom = 0;
+  // Walk newest-first (views are chronological, oldest first) and keep the
+  // newest suffix that fits the budget.
+  for (let index = bounded.length - 1; index >= 0; index -= 1) {
+    const size = wireBytesOfSessionMessageView(bounded[index]!);
+    if (keptBytes + size > HISTORY_PAGE_WIRE_BUDGET_BYTES && index < bounded.length - 1) {
+      keepFrom = index + 1;
+      break;
+    }
+    keptBytes += size;
+    keepFrom = index;
+  }
+  return { views: bounded.slice(keepFrom), droppedCount: keepFrom };
+}
+
+function wireBytesOfSessionMessageView(view: SessionMessageView): number {
+  return Buffer.byteLength(JSON.stringify(view), 'utf8');
+}
+
+/**
+ * Bounded wire projection of one oversized view: every string over the
+ * string cap becomes an explicit marker (JSON, so string-typed fields keep
+ * parsing client-side). Called only for views already over the entry cap, so
+ * ordinary history passes through byte-for-byte unchanged.
+ */
+function boundSessionMessageView(view: unknown): unknown {
+  return boundWireStrings(view);
+}
+
+export function boundWireStrings(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const bytes = Buffer.byteLength(value, 'utf8');
+    if (bytes <= HISTORY_STRING_WIRE_CAP_BYTES) return value;
+    return JSON.stringify({
+      wire_truncated: true,
+      bytes,
+      preview: value.slice(0, HISTORY_STRING_PREVIEW_BYTES),
+    });
+  }
+  if (Array.isArray(value)) return value.map((item) => boundWireStrings(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        boundWireStrings(item),
+      ]),
+    );
+  }
+  return value;
+}
+
+/**
+ * The served page's continuation cursor. When the budget dropped the oldest
+ * records, the repository cursor (which anchors at the FULL read's oldest
+ * message) would SKIP the dropped entries on the next request — recompute it
+ * from the last kept view so paging continues coherently from what the
+ * client actually received.
+ */
+export function servedNextCursor(
+  page: MessageQueryPage,
+  droppedCount: number,
+  views: SessionMessageView[],
+): string | undefined {
+  if (droppedCount > 0) return views[0]?.msgId;
+  return page.nextCursor;
+}
+
+function servedHasMore(page: MessageQueryPage, droppedCount: number): boolean {
+  return droppedCount > 0 ? true : page.hasMore;
 }

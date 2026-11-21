@@ -18,6 +18,7 @@ describe('TuiRunCoordinator response usage', () => {
       sendMessage: vi.fn(async function* () {
         for (const message of messages) yield { type: 'message' as const, message };
         yield { type: 'session-status' as const, status: 'finished' as const };
+        yield { type: 'done' as const };
       }),
       abortSession: vi.fn(async () => true),
       steer: vi.fn(async () => ({ queueItemId: 'unused' })),

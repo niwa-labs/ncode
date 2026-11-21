@@ -59,9 +59,15 @@ import {
   parseWindowsNativeDelete,
 } from '@mavis/permission';
 import type { AgentMessageProtocol } from '@mavis/agent-core/protocol/agent-message';
+import type { RuntimePermissionMark } from '@mavis/agent-core/protocol/runtime-event';
 
 import type { LocalPermissionMessageSource } from './service.js';
 import { LocalPermissionStoreUnhealthyError, type LocalPermissionRuleStore } from './rules.js';
+import {
+  localPermissionVerdictKey,
+  recordLocalPermissionVerdict,
+  type LocalPermissionVerdictAttribution,
+} from './verdict-ledger.js';
 import type {
   LocalPluginHookEffectivePermissions,
   LocalPluginHookPermissionMutationInput,
@@ -71,7 +77,8 @@ import type { LocalRuntimeConfig } from '../config/types.js';
 import type { LocalSessionRecord } from '../sessions/controller.js';
 import type { MetricsClient } from '../common/metrics.js';
 import { logger } from '../common/logger.js';
-import { readLocalPermissionMode } from '../api/host-helpers.js';
+import { readLocalPermissionMode, type LocalPermissionMode } from '../api/host-helpers.js';
+import { isStricterPermissionMode } from './mode-strictness.js';
 import { applyAskGate } from './ask-gate.js';
 import { selectMatchingRule } from './rule-match.js';
 import {
@@ -80,7 +87,6 @@ import {
   evaluateLocalPermissionCheck,
   evaluateWindowsPathSafetyCheck,
   expandWindowsCommandSurfaces,
-  parseWindowsShellFamily,
   splitWindowsCommandSegments,
 } from './checkers.js';
 import { inspectTrashRuntime } from '../infra/ensure-trash-script.js';
@@ -88,6 +94,50 @@ import { inspectTrashRuntime } from '../infra/ensure-trash-script.js';
 function readPermissionPolicyOwner(value: unknown): 'engine' | 'core' {
   if (value === undefined || value === 'core') return 'core';
   return 'engine';
+}
+
+/**
+ * §2.4 mode resolution. Without a Session-bound mode this is the historical
+ * chain (plugin hook → explicit override → config). With one, the Session
+ * mode anchors the decision: the plugin-hook mode (and any explicit
+ * override) applies only when STRICTER, so neither a hook nor a caller can
+ * silently relax a Session's negotiated mode. A weaker hook mode is dropped
+ * with a diagnostic log line.
+ */
+function resolveSessionAnchoredPermissionMode(input: {
+  pluginMode?: string;
+  sessionMode?: 'default' | 'auto' | 'bypassPermissions';
+  override?: PermissionMode;
+  configMode: LocalPermissionMode;
+  sessionId?: string;
+}): PermissionMode {
+  if (input.sessionMode === undefined) {
+    return (input.pluginMode ?? input.override ?? input.configMode) as PermissionMode;
+  }
+  let resolved: PermissionMode = input.sessionMode;
+  if (input.pluginMode !== undefined) {
+    if (isStricterPermissionMode(input.pluginMode, input.sessionMode)) {
+      resolved = input.pluginMode as PermissionMode;
+    } else if (input.pluginMode !== input.sessionMode) {
+      logger.warn(
+        {
+          event: 'permission.plugin_mode_ignored',
+          sessionId: input.sessionId,
+          sessionMode: input.sessionMode,
+          pluginMode: input.pluginMode,
+        },
+        'permission.plugin_mode_ignored',
+      );
+    }
+  }
+  if (
+    input.override !== undefined &&
+    isStricterPermissionMode(input.override, input.sessionMode) &&
+    isStricterPermissionMode(input.override, resolved)
+  ) {
+    resolved = input.override;
+  }
+  return resolved;
 }
 
 /**
@@ -163,6 +213,44 @@ function findWindowsDeleteReason(
 function readLeadingExecutable(command: string): string | undefined {
   const program = /^\s*(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(command);
   return program?.[1] ?? program?.[2] ?? program?.[3];
+}
+
+/**
+ * The destructive-delete guard is fail-closed: anything other than an explicit
+ * `false` keeps it enforced, so a malformed or partially-written config can
+ * never silently disarm an irreversibility safety net.
+ */
+function readDangerousCommandGateEnabled(value: unknown): boolean {
+  return value !== false;
+}
+
+/**
+ * Resolve whether the destructive-delete guard applies to THIS call.
+ *
+ * Two independent reasons to keep it on, and one to drop it:
+ *   - the config did not explicitly disable it (fail-closed), or
+ *   - the call did not come from the main Session, so the user's preference
+ *     does not transfer to an unattended sub-agent, or an origin that could
+ *     not be identified at all.
+ *
+ * Only the main Session with an explicit opt-out runs deletes unrecoverably.
+ */
+function resolveDeleteGuardEnforced(
+  config: { permission?: { dangerousCommandGateEnabled?: unknown } },
+  sessionScope: 'main' | 'subagent' | undefined,
+): boolean {
+  if (sessionScope !== 'main') return true;
+  return readDangerousCommandGateEnabled(config.permission?.dangerousCommandGateEnabled);
+}
+
+
+function parseWindowsShellFamily(command: string): 'cmd' | 'powershell' | undefined {
+  const executable = readLeadingExecutable(command)?.toLowerCase();
+  if (!executable) return undefined;
+  const base = path.win32.basename(executable).replace(/\.(?:exe|cmd|bat)$/i, '');
+  if (base === 'cmd') return 'cmd';
+  if (base === 'powershell' || base === 'pwsh') return 'powershell';
+  return undefined;
 }
 
 function resolveWindowsShellFamily(
@@ -335,6 +423,14 @@ export interface LocalPermissionCheckResult {
    * this flag, so Hook output cannot bypass them.
    */
   hookAutoApprovalEligible?: boolean;
+  /**
+   * Present only on `ask` verdicts that are bypass-immune ("неотключаемые",
+   * §3): no permission mode may silently auto-allow them. The ask-gate
+   * passes them through in bypassPermissions, plugin hooks cannot
+   * auto-approve them, and the surfaced question offers one-time
+   * allow/deny only (no allow-always / deny-always).
+   */
+  bypassImmune?: true;
   requestId?: string;
   ruleContents?: string[];
   ruleMatchers?: PermissionDecision['ruleMatchers'];
@@ -351,6 +447,23 @@ export interface LocalPermissionCheckResult {
    * facade-decidable subset.
    */
   denySource?: Exclude<ToolDenialSource, 'user'>;
+  /**
+   * §4 `decidedBy`: who produced this verdict on the check side — `'rule'`
+   * (a `permission.json` rule, see `ruleKind`, or a built-in checker
+   * policy, `ruleKind: 'builtin'`), `'classifier'` (managed-auto cloud
+   * allow), or `'mode'` (a permission mode waived the check: bypass step
+   * 2a, ask-gate downgrade, `off`). The ask/user/hook rows of the §4.1
+   * table are attributed by the turn gate, not here.
+   */
+  decidedBy?: Extract<RuntimePermissionMark['decidedBy'], 'rule' | 'classifier' | 'mode'>;
+  /**
+   * Scope of the rule that produced the verdict: the matched rule's source
+   * (`session` / `agent` / `global`), `'builtin'` for built-in checker
+   * policy, `null` when no rule was involved.
+   */
+  ruleKind?: RuntimePermissionMark['ruleKind'];
+  /** Effective permission mode snapshot this check ran under. */
+  mode?: RuntimePermissionMark['mode'];
 }
 
 export interface LocalPermissionCheckParams {
@@ -371,6 +484,14 @@ export interface LocalPermissionCheckParams {
   sessionOwnedReadablePaths?: readonly string[];
   /** Validated same-call plan snapshot for Hook rechecks; never public tool/HTTP input. */
   nativeDeleteSnapshot?: boolean;
+  /** Which Session kind asked; the delete guard applies to the main Session only. */
+  sessionScope?: 'main' | 'subagent';
+  /**
+   * The Session's bound permission mode (spec §2.4), set by the hosted
+   * capabilities seam when the Session has a registry entry. When present it
+   * anchors the decision: the plugin-hook mode applies only if stricter.
+   */
+  sessionPermissionMode?: 'default' | 'auto' | 'bypassPermissions';
 }
 
 interface WindowsHardSafetyResult {
@@ -458,12 +579,16 @@ export class LocalPermissionFacade {
    */
   async checkPermission(params: LocalPermissionCheckParams): Promise<LocalPermissionCheckResult> {
     const config = this.deps.configGetter();
-    const nativeDelete = params.nativeDeleteSnapshot ?? config.permission?.nativeDelete === true;
+    const nativeDelete =
+      params.nativeDeleteSnapshot ?? !resolveDeleteGuardEnforced(config, params.sessionScope);
     const pluginContext = await this.resolvePluginHookPermissionContext(params);
-    const rawMode =
-      pluginContext.mode ??
-      params.permissionModeOverride ??
-      readLocalPermissionMode(config.permissionMode);
+    const rawMode = resolveSessionAnchoredPermissionMode({
+      pluginMode: pluginContext.mode,
+      sessionMode: params.sessionPermissionMode,
+      override: params.permissionModeOverride,
+      configMode: readLocalPermissionMode(config.permissionMode),
+      sessionId: params.sessionId,
+    });
     const policyOwner = readPermissionPolicyOwner(config.permission?.policyOwner);
 
     const verdict = await this.checkPermissionRaw(
@@ -477,17 +602,27 @@ export class LocalPermissionFacade {
     // the gate cares only about bypassPermissions; passing the raw mode
     // through unchanged is correct.
     const gatedVerdict = applyAskGate(verdict, rawMode);
-    let finalVerdict: LocalPermissionCheckResult = gatedVerdict;
+    // §4 `decidedBy`: the ask-gate downgrade is a mode waiver — it overrides
+    // whatever attribution the raw ask carried (the user waived review, no
+    // rule and no classifier decided this allow).
+    const askGateDowngraded =
+      verdict.behavior === 'ask' && gatedVerdict.behavior === 'allow' && !verdict.bypassImmune;
+    const attributedVerdict: LocalPermissionCheckResult = askGateDowngraded
+      ? { ...gatedVerdict, decidedBy: 'mode', ruleKind: null, mode: rawMode }
+      : gatedVerdict;
+    let finalVerdict: LocalPermissionCheckResult = attributedVerdict;
     if (
-      gatedVerdict.behavior !== 'deny' &&
-      (params.toolName === 'bash' || rawMode !== 'off' || gatedVerdict.rewrittenInput !== undefined)
+      attributedVerdict.behavior !== 'deny' &&
+      (params.toolName === 'bash' || rawMode !== 'off' || attributedVerdict.rewrittenInput !== undefined)
     ) {
       finalVerdict = {
-        ...gatedVerdict,
+        ...attributedVerdict,
         executionPlan: createPermissionExecutionPlan({
           toolName: params.toolName,
           input: params.input,
-          ...(gatedVerdict.rewrittenInput ? { rewrittenInput: gatedVerdict.rewrittenInput } : {}),
+          ...(attributedVerdict.rewrittenInput
+            ? { rewrittenInput: attributedVerdict.rewrittenInput }
+            : {}),
           shell: this.deps.shellFamily ?? 'unknown',
           context: {
             workingDirectory: await this.resolveWorkingDirectory(
@@ -496,9 +631,22 @@ export class LocalPermissionFacade {
             ),
             homeDir: homedir(),
           },
-          nativeDelete,
+          requireRecoverableDelete: !nativeDelete,
         }),
       };
+    }
+    // §4: record the final attribution for the turn gate, which reads it
+    // right after its own check resolves (see verdict-ledger.ts for why the
+    // hosted adapter between us cannot carry the fields itself).
+    if (finalVerdict.decidedBy !== undefined) {
+      recordLocalPermissionVerdict(
+        localPermissionVerdictKey(params.sessionId, params.toolName, params.input),
+        {
+          decidedBy: finalVerdict.decidedBy,
+          ruleKind: finalVerdict.ruleKind ?? null,
+          mode: finalVerdict.mode ?? rawMode,
+        },
+      );
     }
     logger.info(
       {
@@ -546,11 +694,19 @@ export class LocalPermissionFacade {
     const config = this.deps.configGetter();
     const pluginContext =
       resolvedPluginContext ?? (await this.resolvePluginHookPermissionContext(params));
+    // checkPermission hands over the mode it already resolved from the SAME
+    // plugin context — reuse it instead of resolving (and logging
+    // permission.plugin_mode_ignored) a second time.
     const rawMode =
-      pluginContext.mode ??
-      effectiveMode ??
-      params.permissionModeOverride ??
-      readLocalPermissionMode(config.permissionMode);
+      effectiveMode !== undefined && resolvedPluginContext !== undefined
+        ? effectiveMode
+        : resolveSessionAnchoredPermissionMode({
+            pluginMode: pluginContext.mode,
+            sessionMode: params.sessionPermissionMode,
+            override: effectiveMode ?? params.permissionModeOverride,
+            configMode: readLocalPermissionMode(config.permissionMode),
+            sessionId: params.sessionId,
+          });
     const policyOwner =
       effectivePolicyOwner ?? readPermissionPolicyOwner(config.permission?.policyOwner);
     const platform = this.deps.platform ?? process.platform;
@@ -559,7 +715,24 @@ export class LocalPermissionFacade {
     const nativeDelete =
       effectiveNativeDelete ??
       params.nativeDeleteSnapshot ??
-      config.permission?.nativeDelete === true;
+      !resolveDeleteGuardEnforced(config, params.sessionScope);
+    // OUR guard-off early-allow (transplanted verbatim from our facade): a
+    // delete-shaped command from the main Session with the switch explicitly
+    // off is allowed as written — no rewrite, our reason text — before any
+    // of the safety/rewrite machinery applies.
+    if (!resolveDeleteGuardEnforced(config, params.sessionScope)) {
+      const earlyCommand = readCommand(params.input);
+      if (earlyCommand !== undefined && isDeleteLikeCommand(earlyCommand)) {
+        return {
+          behavior: 'allow',
+          reason:
+            'Allowed: the destructive-delete guard is disabled, so this delete runs as written and is not recoverable.',
+          decidedBy: 'rule',
+          ruleKind: 'builtin',
+          mode: rawMode,
+        };
+      }
+    }
     const command = readCommand(params.input);
     const skipWindowsHardSafetyChecks =
       platform === 'win32' && this.deps.skipWindowsHardSafetyChecks === true;
@@ -570,14 +743,18 @@ export class LocalPermissionFacade {
       nativeDelete,
       skipWindowsHardSafetyChecks,
     );
-    if (windowsHardSafety.denial) return windowsHardSafety.denial;
+    if (windowsHardSafety.denial) {
+      return { ...windowsHardSafety.denial, decidedBy: 'rule', ruleKind: 'builtin', mode: rawMode };
+    }
     const { recoverableNativeDelete } = windowsHardSafety;
     workingDirectory = windowsHardSafety.workingDirectory;
 
     const posixTrashSafety = nativeDelete
       ? undefined
       : this.evaluatePosixTrashSafety(platform, command);
-    if (posixTrashSafety) return posixTrashSafety;
+    if (posixTrashSafety) {
+      return { ...posixTrashSafety, decidedBy: 'rule', ruleKind: 'builtin', mode: rawMode };
+    }
 
     // Native deletion skips only the recoverable-trash rewrite. Keep shared
     // UNC/root/home safety ahead of the off-mode short-circuit on every host.
@@ -598,6 +775,9 @@ export class LocalPermissionFacade {
           behavior: 'deny',
           reason: nativeHardCheck.reason,
           denySource: 'safety-immune',
+          decidedBy: 'rule',
+          ruleKind: 'builtin',
+          mode: rawMode,
         };
       }
     }
@@ -617,6 +797,9 @@ export class LocalPermissionFacade {
       return {
         behavior: 'allow',
         reason: 'Allowed: permission mode is off; permission review was skipped.',
+        decidedBy: 'mode',
+        ruleKind: null,
+        mode: rawMode,
       };
     }
 
@@ -657,10 +840,23 @@ export class LocalPermissionFacade {
       );
       const reason = `Permission rule store is unhealthy (${error.reasonCode}); approval is required.`;
       if (rawMode === 'bypassPermissions') {
-        return { behavior: 'deny', reason, denySource: 'safety' };
+        return {
+          behavior: 'deny',
+          reason,
+          denySource: 'safety',
+          decidedBy: 'rule',
+          ruleKind: 'builtin',
+          mode: rawMode,
+        };
       }
       if (!windowsDeleteNeedsRewrite && !posixDeleteNeedsRewrite) {
-        return { behavior: 'ask', reason };
+        return {
+          behavior: 'ask',
+          reason,
+          decidedBy: 'rule',
+          ruleKind: 'builtin',
+          mode: rawMode,
+        };
       }
       // Rule-store failure must not skip the recoverable-delete transformation.
       // Run safety/rewrite without granting any rule, then retain the required ask.
@@ -730,7 +926,14 @@ export class LocalPermissionFacade {
       localHardCheck.denyKind === 'bypass-immune' &&
       !recoverableNativeDelete
     ) {
-      return { behavior: 'deny', reason: localHardCheck.reason, denySource: 'safety-immune' };
+      return {
+        behavior: 'deny',
+        reason: localHardCheck.reason,
+        denySource: 'safety-immune',
+        decidedBy: 'rule',
+        ruleKind: 'builtin',
+        mode: rawMode,
+      };
     }
 
     // Run the deterministic engine. Output carries:
@@ -785,6 +988,10 @@ export class LocalPermissionFacade {
         behavior: 'ask',
         reason: unhealthyStoreReason,
         rewrittenInput: decision.rewrittenInput,
+        ...(decision.bypassImmune ? { bypassImmune: true } : {}),
+        decidedBy: 'rule',
+        ruleKind: 'builtin',
+        mode: rawMode,
       };
     }
 
@@ -810,6 +1017,9 @@ export class LocalPermissionFacade {
       return {
         behavior: 'ask',
         reason: localHardCheck.reason,
+        decidedBy: 'rule',
+        ruleKind: 'builtin',
+        mode: rawMode,
       };
     }
 
@@ -827,6 +1037,7 @@ export class LocalPermissionFacade {
         behavior: 'allow',
         reason: formatDecisionReason(decision.reason, 'allow', localeHint),
         rewrittenInput: decision.rewrittenInput,
+        ...markAttribution(decision.reason, rawMode, 'allow'),
       };
     }
     if (decision.behavior === 'deny') {
@@ -834,6 +1045,7 @@ export class LocalPermissionFacade {
         behavior: 'deny',
         reason: formatDecisionReason(decision.reason, 'deny', localeHint),
         denySource: classifyDenySource(decision.reason),
+        ...markAttribution(decision.reason, rawMode, 'deny'),
       };
     }
 
@@ -845,6 +1057,8 @@ export class LocalPermissionFacade {
       ruleMatchers: decision.ruleMatchers,
       rewrittenInput: decision.rewrittenInput,
       ...(isOrdinaryFallbackAsk(decision.reason) ? { hookAutoApprovalEligible: true } : {}),
+      ...(decision.bypassImmune ? { bypassImmune: true } : {}),
+      ...markAttribution(decision.reason, rawMode, 'ask'),
     };
 
     // 'never' (Always allow / bypassPermissions): the raw pipeline still
@@ -862,6 +1076,9 @@ export class LocalPermissionFacade {
         behavior: 'deny',
         reason: `Denied by dontAsk permission mode: ${baseAsk.reason}`,
         denySource: 'rule',
+        decidedBy: 'mode',
+        ruleKind: null,
+        mode: rawMode,
       };
     }
 
@@ -934,6 +1151,8 @@ export class LocalPermissionFacade {
           localeHint,
         ),
         policyOwner,
+        // The classifier failed; the surviving ask is engine policy.
+        markAttribution(decision.reason, rawMode, 'ask'),
       );
     }
     this.emitLlmCheckMetrics(gatewayVerdict.kind, classifyStartedAt);
@@ -946,6 +1165,7 @@ export class LocalPermissionFacade {
           'allow',
           formatAutoClassifierReason('allow', gatewayVerdict.reasonLocalized, localeHint),
           policyOwner,
+          { decidedBy: 'classifier', ruleKind: null, mode: rawMode },
         );
       case 'block':
         return mapClassifierRecommendation(
@@ -953,6 +1173,8 @@ export class LocalPermissionFacade {
           'ask',
           formatAutoClassifierReason('block', gatewayVerdict.reasonLocalized, localeHint),
           policyOwner,
+          // The classifier did not allow; the ask stands on engine policy.
+          markAttribution(decision.reason, rawMode, 'ask'),
         );
       case 'confirm':
         return mapClassifierRecommendation(
@@ -960,6 +1182,7 @@ export class LocalPermissionFacade {
           'ask',
           formatAutoClassifierReason('confirm', gatewayVerdict.reasonLocalized, localeHint),
           policyOwner,
+          markAttribution(decision.reason, rawMode, 'ask'),
         );
       case 'timeout':
       default:
@@ -978,6 +1201,7 @@ export class LocalPermissionFacade {
             localeHint,
           ),
           policyOwner,
+          markAttribution(decision.reason, rawMode, 'ask'),
         );
     }
   }
@@ -1408,11 +1632,44 @@ function classifyDenySource(reason: DecisionReason): Exclude<ToolDenialSource, '
   return 'safety';
 }
 
+/**
+ * §4 `decidedBy` attribution for a check-side verdict: a matched
+ * `permission.json` rule keeps its scope (`session` / `agent` / `global`),
+ * a `mode` reason is a mode waiver, and every other structured reason
+ * (safetyCheck, workingDirectory, rmRewrite, hard-deny patterns, …) is
+ * built-in checker policy. Compound bash commands attribute to the first
+ * sub-result that produced the SAME outcome as the whole verdict (a global
+ * allow on `curl` must not be credited for the deny of `curl … && shred …`).
+ */
+function markAttribution(
+  reason: DecisionReason,
+  mode: PermissionMode,
+  behavior: 'allow' | 'deny' | 'ask',
+): LocalPermissionVerdictAttribution {
+  if (reason.type === 'rule') {
+    return { decidedBy: 'rule', ruleKind: reason.rule.source, mode };
+  }
+  if (reason.type === 'mode') {
+    return { decidedBy: 'mode', ruleKind: null, mode };
+  }
+  if (reason.type === 'subcommandResults') {
+    for (const sub of reason.reasons.values()) {
+      if (sub.behavior !== behavior) continue;
+      if (sub.reason.type === 'rule') {
+        return { decidedBy: 'rule', ruleKind: sub.reason.rule.source, mode };
+      }
+      if (behavior !== 'allow') break;
+    }
+  }
+  return { decidedBy: 'rule', ruleKind: 'builtin', mode };
+}
+
 function mapClassifierRecommendation(
   decision: PermissionDecision,
   behavior: 'allow' | 'ask',
   reason: string,
   policyOwner: 'engine' | 'core',
+  attribution: LocalPermissionVerdictAttribution,
 ): LocalPermissionCheckResult {
   const reduced =
     policyOwner === 'core'
@@ -1432,6 +1689,10 @@ function mapClassifierRecommendation(
       behavior: 'deny',
       reason: formatDecisionReason(reduced.reason, 'deny'),
       denySource: classifyDenySource(reduced.reason),
+      // §4.1: the classifier only ever allows — a deny here is the core
+      // reducer's own policy (the classifier recommendation lost), so it is
+      // attributed from the reduced reason, never as `classifier`.
+      ...markAttribution(reduced.reason, attribution.mode as PermissionMode, 'deny'),
     };
   }
   if (reduced.behavior === 'allow') {
@@ -1439,6 +1700,7 @@ function mapClassifierRecommendation(
       behavior: 'allow',
       reason,
       rewrittenInput: reduced.rewrittenInput,
+      ...attribution,
     };
   }
   return {
@@ -1447,6 +1709,8 @@ function mapClassifierRecommendation(
     ruleContents: reduced.ruleContents,
     ruleMatchers: reduced.ruleMatchers,
     rewrittenInput: reduced.rewrittenInput,
+    ...(reduced.bypassImmune ? { bypassImmune: true } : {}),
+    ...attribution,
   };
 }
 

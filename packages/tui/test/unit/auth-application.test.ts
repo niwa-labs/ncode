@@ -5,6 +5,7 @@ import { createLocalAuthFixture } from '../../../oauth-core/test/helpers/local-a
 
 import type { McodeBusinessEvent } from '../../src/analytics/business-telemetry.js';
 import { McodeAuthApplication } from '../../src/auth/application.js';
+import { createFakeAccountIdentityFetch } from '../helpers/fake-account-identity-fetch.js';
 
 function sharedCore(status: 'anonymous' | 'authenticated' | 'logout_pending' = 'anonymous') {
   return {
@@ -26,6 +27,11 @@ function sharedCore(status: 'anonymous' | 'authenticated' | 'logout_pending' = '
       return { status: 'authenticated' as const, generation: 1 };
     }),
     logout: vi.fn(async (): Promise<LogoutResult> => ({ status: 'anonymous', generation: 2 })),
+    // The fake has no credential store behind it: the post-login identity
+    // projection fails its lease read and stays a silent no-op (fail-open).
+    getAccessToken: vi.fn(async () => {
+      throw new Error('credential store is unavailable in the shared fake core');
+    }),
   };
 }
 
@@ -71,8 +77,10 @@ describe('McodeAuthApplication', () => {
       const fixture = await createLocalAuthFixture();
       try {
         const core = fixture.createManager();
+        const { fetchImpl } = createFakeAccountIdentityFetch();
         const application = new McodeAuthApplication({
           dataDir: fixture.dataDir, sharedAuthCore: core, region: 'cn', buildEnv: 'test',
+          fetchImpl,
         });
         await application.login();
         const lease = await core.getAccessToken({ minValidityMs: 30_000 });

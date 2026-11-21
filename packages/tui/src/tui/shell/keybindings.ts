@@ -268,7 +268,7 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     key: 'ctrl+c',
     action: 'clear',
     when: 'composer',
-    description: 'Clear the Composer; press twice to exit',
+    description: 'Interrupt the active turn; when idle, clear the Composer (twice to exit)',
     helpOrder: 120,
   },
   {
@@ -284,7 +284,7 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     key: 'ctrl+d',
     action: 'exit',
     when: 'composer',
-    description: 'Exit when the Composer is empty',
+    description: 'Exit immediately (the draft survives shutdown recovery)',
     helpOrder: 121,
   },
   {
@@ -403,6 +403,14 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     helpOrder: 20,
   },
   {
+    id: 'interaction.view-plan',
+    key: 'ctrl+o',
+    action: 'view-plan',
+    when: 'interaction',
+    description: 'Show or hide the full Plan during Plan Review',
+    helpOrder: 82,
+  },
+  {
     id: 'composer.toggle-plan',
     key: 'shift+tab',
     action: 'toggle-plan',
@@ -443,14 +451,6 @@ const DEFAULT_TUI_KEYBINDINGS: readonly TuiKeybindingDefinition[] = [
     description: 'Scroll the current interaction',
     helpOrder: 81,
     helpGroup: 'interaction.navigation',
-  },
-  {
-    id: 'interaction.view-plan',
-    key: 'ctrl+o',
-    action: 'view-plan',
-    when: 'interaction',
-    description: 'Show or hide the full Plan during Plan Review',
-    helpOrder: 82,
   },
 ];
 

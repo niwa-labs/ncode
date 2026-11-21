@@ -350,6 +350,7 @@ function resolveSelectionContext(input: {
   // following a higher-priority model selection.
   const contributors = sources.slice(0, modelIndex + 1);
   assertRequiredCatalogModel(modelSource, modelConfig, model);
+  assertVariantSupported(contributors, model, modelConfig);
   return { sources, modelIndex, modelSource, model, modelConfig, contributors };
 }
 
@@ -378,10 +379,62 @@ function assertRequiredCatalogModel(
   model: { readonly providerId: string; readonly modelId: string },
 ): void {
   if (!source.requireCatalog || (modelConfig && modelConfig.enabled !== false)) return;
+  // A `#variant` suffix that leaked into the modelId looks like an unknown
+  // model; point callers at the split syntax instead of a bare catalog miss.
+  const hint = model.modelId.includes('#')
+    ? ' Use provider/model#variant so the variant is selected separately.'
+    : '';
   throw new AgentModelSelectionError(
     'MODEL_SELECTION_INVALID',
-    `Model ${formatModelKey(model.providerId, model.modelId)} from ${source.source} is unavailable in the current catalog.`,
+    `Model ${formatModelKey(model.providerId, model.modelId)} from ${source.source} is unavailable in the current catalog.${hint}`,
   );
+}
+
+/**
+ * A requested thinking variant (`provider/model#variant` or a Session-derived
+ * variant) must name a variant the selected model exposes. Models without any
+ * variant machinery keep their previous behavior (ignore or fail later in
+ * model-ref validation) instead of failing on this new gate.
+ */
+function assertVariantSupported(
+  contributors: readonly AgentModelSelectionSource[],
+  model: { readonly providerId: string; readonly modelId: string },
+  modelConfig: LocalModelConfig | undefined,
+): void {
+  const contributor = contributors.find(({ selection }) => selection?.variant !== undefined);
+  const variant = contributor?.selection?.variant;
+  if (variant === undefined) return;
+  const available = availableModelVariants(modelConfig);
+  const normalized =
+    variant === 'thinking'
+      ? 'thinking'
+      : variant === '' || variant === 'none-thinking'
+        ? 'none-thinking'
+        : undefined;
+  if (normalized === undefined || (available.length > 0 && !available.includes(normalized))) {
+    const list = available.length > 0 ? ` (available: ${available.join(', ')})` : '';
+    throw new AgentModelSelectionError(
+      'MODEL_SELECTION_INVALID',
+      `Variant "${variant}" from ${contributor?.source ?? 'model selection'} is not available for ${formatModelKey(model.providerId, model.modelId)}${list}.`,
+    );
+  }
+}
+
+const MODEL_VARIANT_NAMES = ['thinking', 'none-thinking'] as const;
+type ModelVariantName = (typeof MODEL_VARIANT_NAMES)[number];
+
+/** Canonical variant spellings the selected model exposes. */
+function availableModelVariants(modelConfig: LocalModelConfig | undefined): readonly string[] {
+  const declared: readonly ModelVariantName[] = MODEL_VARIANT_NAMES.filter(
+    (name) => modelConfig?.variants?.[name] && modelConfig.variants[name]?.disabled !== true,
+  );
+  let byMode: readonly ModelVariantName[];
+  const mode = modelConfig?.thinking_config?.mode;
+  if (mode === 'forced_on') byMode = ['thinking'];
+  else if (mode === 'forced_off') byMode = ['none-thinking'];
+  else if (mode === 'switchable') byMode = ['thinking', 'none-thinking'];
+  else byMode = declared;
+  return declared.length > 0 ? byMode.filter((name) => declared.includes(name)) : byMode;
 }
 
 function withRuntimeDefault(

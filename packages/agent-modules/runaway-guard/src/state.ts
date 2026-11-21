@@ -20,6 +20,14 @@ export interface ShadowState {
   childStepsProjected: number;
   reminderAttempted: boolean;
   reminderInjected: boolean;
+  /**
+   * Reminder escalation bookkeeping: the occurrence level a reminder last
+   * fired at (`undefined` — never fired) and the monotone escalation count
+   * for the whole turn. A streak break clears the fired-at level (a NEW
+   * stuck pattern gets a fresh reminder) but keeps the escalation monotone.
+   */
+  reminderFiredAtOccurrences?: number;
+  reminderEscalation: number;
   readonly signalStats: Record<RunawayGuardSignalKind, MutableSignalStats>;
   detectActionStreaks: Map<string, number>;
   pollingActionStreaks: Map<string, number>;
@@ -45,6 +53,10 @@ export function clearDetectionStreaks(state: ShadowState): void {
   state.progressStreaks.clear();
   state.recentActionBatches = [];
   state.activeAbabKey = undefined;
+  // A genuine pattern break re-arms the NEXT reminder (a new stuck pattern
+  // deserves a fresh nudge at its own threshold); the escalation level stays
+  // monotone for the turn so repeat offenders get stronger wording.
+  state.reminderFiredAtOccurrences = undefined;
 }
 
 export function recordMaxOccurrences(
@@ -106,6 +118,7 @@ export function newShadowState(): ShadowState {
     childStepsProjected: 0,
     reminderAttempted: false,
     reminderInjected: false,
+    reminderEscalation: 0,
     signalStats: createSignalStats(),
     detectActionStreaks: new Map(),
     pollingActionStreaks: new Map(),

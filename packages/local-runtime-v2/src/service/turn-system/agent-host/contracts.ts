@@ -1,4 +1,3 @@
-import type { PromptSuggestionTurnPort } from './runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   AgentRuntime,
   AssemblyResult,
@@ -20,6 +19,7 @@ import type {
   ContextCompactor,
 } from './compaction/contracts.js';
 import type { AgentEventDelivery } from './events/contracts.js';
+import type { WireCompactionBarrier } from '../compaction/context-wire.js';
 import type {
   AgentHostHistoryFailure,
   AgentHostUsageProjection,
@@ -40,6 +40,7 @@ import type {
   AgentHostTurnOutcome,
   LocalTurnExecutor,
 } from './runner/contracts.js';
+import type { PromptSuggestionTurnPort } from './runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   AgentHostTurnCapabilityLifecycle,
   AgentHostTurnCapabilityView,
@@ -153,16 +154,6 @@ export function parseBackgroundTaskOriginMetadata(
   };
 }
 
-/** Display snapshots stay on the queue message; AgentHost receives only execution metadata. */
-export function parseBackgroundTaskDeliveryOrigin(
-  value: unknown,
-): BackgroundTaskOriginMetadata | undefined {
-  if (!isProtocolRecord(value)) return undefined;
-  const metadata = { ...value };
-  delete metadata.tasks;
-  return parseBackgroundTaskOriginMetadata(metadata);
-}
-
 function readNonEmptyTaskIds(value: unknown): readonly string[] | undefined {
   if (
     !Array.isArray(value) ||
@@ -209,17 +200,22 @@ export interface AgentHostCompactionDependencies<
   TAgent extends AgentExecutionSnapshot = AgentExecutionSnapshot,
 > {
   readonly preparation: ContextCompactionPreparationSource<TAgent>;
-  readonly automatic: AutomaticContextCompactor;
-  readonly manual: ContextCompactor;
+  /**
+   * Wave 2 (canon 05 §2.2: "Legacy-компактор в wire-режиме удаляется
+   * полностью"): the legacy AUTO compactor exists only in the jsonl
+   * compatibility mode — wire mode composes `undefined` (the unified
+   * scheduler owns compaction; the tool axis is the text-offload pass below).
+   */
+  readonly automatic?: AutomaticContextCompactor;
+  /**
+   * Wave 2: the legacy MANUAL compactor (`LocalContextCompactor.compactManual`
+   * → `compactContext`) exists only in the jsonl compatibility mode. Wire
+   * mode routes the manual /compact through the unified barrier instead.
+   */
+  readonly manual?: ContextCompactor;
   readonly control: AgentHostCompactionControl;
   readonly lifecycle: ContextCompactionLifecycle;
   readonly observer?: ContextCompactionObserver;
-  /**
-   * Remote switch for the cache-sharing checkpoint request on non-managed
-   * Providers, read once per Turn and per manual compaction. Absent: every
-   * checkpoint request keeps the isolated shape.
-   */
-  readonly checkpointSharedPrefixEnabled?: () => boolean;
   readonly metricsClient?: {
     counter(name: string, value: number, labels?: Record<string, string>): void;
     histogram(name: string, value: number, labels?: Record<string, string>): void;
@@ -228,6 +224,34 @@ export interface AgentHostCompactionDependencies<
     recordBound(scope: string, messages: readonly unknown[]): boolean;
     advanceHistory(scope: string): void;
   };
+  /**
+   * В1 (opus-decisions-20261101): the wire-mode compaction admission point —
+   * the session's unified-scheduler barrier, resolved by sessionId. The
+   * before-LLM compaction hook consults it FIRST: `evaluate()` level
+   * none/background never waits (the background threshold stays
+   * non-blocking); level blocking awaits `runBlocking` raced against the
+   * turn's abort signal, and the committed checkpoint rides back as the
+   * hook's `replaceMessages` decision (whose delivery reseeds the session's
+   * wire pipeline, so the request compiles the CUT window). `undefined` (the
+   * jsonl compatibility mode, or a session without the unified seam) keeps
+   * the hook exactly as before.
+   */
+  readonly wireCompactionBarrier?: (sessionId: string) => WireCompactionBarrier | undefined;
+  /** Resolves the manual route from durable history after a cold session open. */
+  readonly prepareManualWireCompaction?: (
+    sessionId: string,
+    turnId: string,
+  ) => Promise<WireCompactionBarrier | undefined>;
+
+  /**
+   * Wave 2 (canon 05 §2.2, item 2.4): the tool-result TEXT offload axis —
+   * the legacy `tool_archive` compaction demoted to an offload pass. Composed
+   * in wire mode (the durable default): it plans the archiver over the
+   * canonical history and applies `offload` events (artifact with the full
+   * text, stub receipt with the reference). Best-effort by contract: faults
+   * are logged, never fail the request.
+   */
+  readonly toolResultOffload?: (sessionId: string) => Promise<void>;
 }
 
 /** Constructor seam for the accepted-work Host; it contains no product workflow. */
@@ -249,7 +273,16 @@ export interface AgentHostDependencies<
   readonly turnRuntimeFacts?: TurnRuntimeFactSource;
   readonly preparation: LocalTurnPreparationSource<TAgent>;
   readonly history: CanonicalHistoryStore;
+  /**
+   * Ш3 durable mode: provider snapshots reach the turn path
+   * ownership-transferred (validated, frozen, Pi-compatible), so Turn
+   * preparation hands them to Pi without the per-turn copy. Omitted by every
+   * jsonl composition: the legacy copy path stays exact.
+   */
+  readonly piCompatibleHistorySnapshots?: boolean;
   readonly events: AgentEventDelivery;
+  /** Optional next-message suggestion port; absent = the feature adds nothing. */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   readonly executor: LocalTurnExecutor<TAgent>;
   /** Confirms candidate task reads only after the owning Turn is durably committed. */
   readonly backgroundTaskReads?: {
@@ -269,11 +302,6 @@ export interface AgentHostDependencies<
   readonly turnCapabilities?: AgentHostTurnCapabilityLifecycle;
   /** Observes the exact immutable assembly selected for this accepted Turn. */
   readonly assemblyObserver?: AgentHostAssemblyObserver;
-  /**
-   * Optional next-message suggestion seam: told when a Turn starts, and
-   * forwarded to the Turn executor for the post-commit generation.
-   */
-  readonly promptSuggestion?: PromptSuggestionTurnPort;
   /** Best-effort structured diagnostics; production binds the persistent local-runtime logger. */
   readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'error'>;
   /** Request-scoped payload transform shared by normal and manual Provider calls. */
@@ -335,7 +363,6 @@ export type {
   CompactionOutcome,
   ContextCompactionHooks,
   ManualContextCompactionInput,
-  PostCompactionContextUsage,
   ContextCompactionResult,
   ContextCompactor,
 } from './compaction/contracts.js';

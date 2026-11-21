@@ -37,6 +37,46 @@ mkdirSync(outdir, { recursive: true });
 
 // Bundle checked-in workspace sources and resolve npm dependencies from each importer.
 // Native and optional platform integrations keep their installed module locations.
+
+/**
+ * Resolve `subpath` against the wildcard patterns of a package export map
+ * (`"./utils/*"`), substituting the matched suffix into every target string.
+ * Exact entries win (checked by the caller first); among patterns the longest
+ * prefix matches first — the same preference Node's resolver applies.
+ */
+function matchWildcardExport(exports, subpath) {
+  if (exports === undefined || typeof exports !== "object") return undefined;
+  const patterns = Object.entries(exports)
+    .filter(([pattern]) => pattern.includes("*"))
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [pattern, entry] of patterns) {
+    const star = pattern.indexOf("*");
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (
+      subpath.startsWith(prefix) &&
+      subpath.endsWith(suffix) &&
+      subpath.length >= prefix.length + suffix.length
+    ) {
+      const matched = subpath.slice(
+        prefix.length,
+        subpath.length - suffix.length,
+      );
+      const substitute = (value) =>
+        typeof value === "string" ? value.replaceAll("*", matched) : value;
+      if (typeof entry === "string") return substitute(entry);
+      if (entry !== null && typeof entry === "object") {
+        const mapped = {};
+        for (const [condition, target] of Object.entries(entry)) {
+          mapped[condition] = substitute(target);
+        }
+        return mapped;
+      }
+    }
+  }
+  return undefined;
+}
+
 const sourcePlugin = {
   name: "standalone-workspace-sources",
   setup(bundler) {
@@ -52,10 +92,17 @@ const sourcePlugin = {
       const exports = pkg.manifest.exports;
       const exported =
         exports?.[subpath] ?? (subpath === "." ? exports : undefined);
+      // W02: vendored pi packages use wildcard export patterns
+      // (`"./utils/*": { "import": "./dist/utils/*.js" }`) — expand the
+      // pattern when the exact subpath has no entry, so a source-graph
+      // dependency on pi-durable/chord (whose sources import pi-ai
+      // `utils/*` subpaths) resolves through the same export map the
+      // package itself defines.
+      const resolvedExport = exported ?? matchWildcardExport(exports, subpath);
       const target =
-        (typeof exported === "string"
-          ? exported
-          : (exported?.types ?? exported?.import ?? exported?.default)) ??
+        (typeof resolvedExport === "string"
+          ? resolvedExport
+          : (resolvedExport?.types ?? resolvedExport?.import ?? resolvedExport?.default)) ??
         (subpath === "." ? pkg.manifest.types : undefined);
       if (typeof target !== "string" || !target.startsWith("./"))
         throw new Error(`Unmapped workspace export: ${specifier}`);
@@ -80,11 +127,20 @@ const result = await build({
   entryPoints: {
     cli: "packages/tui/src/index.ts",
     "image-preview-worker": "packages/tui/src/host/image-preview-worker.ts",
-    // run_code resolves its Worker beside the bundled caller (ptcWorkerUrl).
-    "quickjs-worker":
-      "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/ptc/quickjs-worker.ts",
+    'codemode-worker': 'packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/codemode-worker.ts',
     'mcode-tools': 'packages/tui/src/cli/mcode-tools-entry.ts',
     'matrix-mcp-stdio': 'packages/agent-tools/src/desktop/matrix-mcp-stdio.ts',
+    mcoded: 'packages/mcoded/src/daemon-entry.ts',
+    // History-import CLI (integration plan R6): launched through
+    // `scripts/history-import.mjs`, which resolves exactly this file.
+    'history-import': 'packages/v2-adapter/src/history-import-cli.ts',
+    // Storage-worker thread bodies: `node:worker_threads` loads these files
+    // DIRECTLY (no bundle pipeline), so each must ship as its own dist entry.
+    // `defaultWorkerUrl`/`defaultOffThreadWorkerUrl` (packages/storage-worker)
+    // resolve them as `worker.js`/`off-thread.worker.js` next to the bundle
+    // root, falling back to the `.ts` sources when running unbundled.
+    worker: 'packages/storage-worker/src/worker.ts',
+    'off-thread.worker': 'packages/storage-worker/src/off-thread.worker.ts',
   },
   external: cliExternalModules,
   outdir,
@@ -131,7 +187,7 @@ for (const name of ["seccomp", "srt-win", "java-proxy-agent"]) {
 chmodSync(path.join(outdir, "cli.js"), 0o755);
 await copyMcodeToolsArtifact(root, outdir);
 cpSync(path.join(root, 'packages/tui/src/cli/mcode-tools-launchers'), path.join(outdir, 'internal-bin'), { recursive: true });
-for (const name of ['internal-bin/mcode-tools', 'mcode-tools.js', 'matrix-mcp-stdio.js'])
+for (const name of ['internal-bin/mcode-tools', 'mcode-tools.js', 'matrix-mcp-stdio.js', 'mcoded.js', 'history-import.js'])
   chmodSync(path.join(outdir, name), 0o755);
 writeFileSync(
   path.join(outdir, "metafile.json"),
@@ -163,14 +219,12 @@ cpSync(
   path.join(outdir, "photon_rs_bg.wasm"),
 );
 
-// run_code's QuickJS Worker (getQuickJS -> release-sync variant) loads its
-// wasm from beside dist/quickjs-worker.js.
-const quickJsRequire = createRequire(
-  createRequire(path.join(root, "packages/local-runtime-v2/package.json")).resolve(
-    "quickjs-emscripten",
-  ),
+// run_code's pi-codemode worker (CodemodeSandbox worker_threads entry) loads
+// its quickjs wasm from beside dist/codemode-worker.js.
+const codemodeRequire = createRequire(
+  path.join(root, "packages/codemode-host/package.json"),
 );
 cpSync(
-  quickJsRequire.resolve("@jitl/quickjs-wasmfile-release-sync/wasm"),
-  path.join(outdir, "emscripten-module.wasm"),
+  codemodeRequire.resolve("quickjs-wasi/quickjs.wasm"),
+  path.join(outdir, "quickjs.wasm"),
 );

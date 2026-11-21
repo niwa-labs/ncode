@@ -51,3 +51,16 @@ describe("MiniMax Code TUI command catalog in side conversations", () => {
     expect(sessionsHandler).not.toHaveBeenCalled();
   });
 });
+
+describe('manual compaction discovery', () => {
+  it('shows /compact before the first turn and routes it to the session-aware handler', async () => {
+    const compact = vi.fn();
+    const catalog = createTuiCommandCatalog([], { compact }, () => ({
+      hasSession: false, hasParentSession: false, managedTokenPresent: false,
+      queueEnabled: true, hasLiveRun: false, queuedCount: 0, canRetry: false,
+    }));
+    expect(catalog.slashCommands.map(({ name }) => name)).toContain('compact');
+    await expect(catalog.dispatch('/compact')).resolves.toMatchObject({ status: 'handled' });
+    expect(compact).toHaveBeenCalledOnce();
+  });
+});

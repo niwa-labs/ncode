@@ -2,12 +2,12 @@ import { ProjectMcpRuntime } from '../project-mcp.service.js';
 import { SessionMcpServers } from './session-servers.js';
 import { projectNativeTools, reserveConfiguredServerNames } from './native-tool-projection.js';
 import { McpNameRegistry } from '@mavis/mcp';
+import { coerceRuntimeToolInput } from '@mavis/agent-core/tools';
 import type { RuntimeTool, ToolResult } from '@mavis/agent-core/tools';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { LocalMavisMcpServiceAdapter } from '../tools/local-mavis-adapter.js';
 import { mapMcpContent, normalizeCallResult } from '../tools/result-mapping.js';
-import { localMcpCallFailureResult, withMcpProgrammatic } from '../tools/programmatic-result.js';
 import { listMcpRuntimeToolEntriesForTurn } from '../tools/runtime-tools.js';
 import { readConfiguredMcpServerNames } from './config-file.js';
 import { readLocalMcpFile, writeLocalMcpFile } from './configuration.repository.js';
@@ -715,20 +715,29 @@ export class LocalMcpService {
             // long-running remote MCP call (e.g. built-in matrix generation
             // tools) unblocks the tool immediately instead of waiting for the
             // per-server timeout to fire.
-            const result = await this.call(tool.server, tool.toolName, readRecord(input) ?? {}, {
-              context,
-              signal,
-            });
+            // Silent lossless coercion before dispatch ("42" → 42 against a
+            // declared type), like pi's own agent-loop coercion. No model-
+            // facing note: every studied harness (pi/deepseek/MiMo/QwenPaw/
+            // grok) keeps this quiet (owner decision 2026-11-17).
+            const coerced = coerceRuntimeToolInput(def.schema, input);
+            const result = await this.call(
+              tool.server,
+              tool.toolName,
+              readRecord(coerced) ?? {},
+              {
+                context,
+                signal,
+              },
+            );
             const mapped = mapMcpContent(result);
-            // PTC-only payload (structuredContent as data, raw protocol error) rides along.
-            return withMcpProgrammatic(result, {
+            return {
               tool_name: def.name,
               text: mapped.text,
               content: mapped.content,
               ...(result.isError !== undefined ? { isError: result.isError } : {}),
               details: { mcp: result, server: tool.server, tool: tool.toolName },
               output: { mcp: result },
-            });
+            };
           },
         },
         source: tool.source,
@@ -754,7 +763,7 @@ export class LocalMcpService {
       transport.type === 'stdio'
         ? (this.options.turnStdioDiscoveryTimeoutMs ??
           this.options.turnDiscoveryTimeoutMs ??
-          30_000)
+          15_000)
         : turnDiscoveryTimeoutMs;
     const timeoutMs = Math.min(configuredTimeout(config), discoveryTimeoutMs);
     const controller = new AbortController();
@@ -763,6 +772,11 @@ export class LocalMcpService {
         (async () => {
           const overrides = await this.resolveConnectionOverrides(server, config, context);
           this.assertOpen();
+          // zcode-model freshness (cross-harness study 2026-11-17: codex /
+          // zcode / grok all cache tools/list on the connection; niwa's exact
+          // per-question schema rides the tools/list_changed notification,
+          // which invalidates the pool snapshot — the next turn's cached
+          // listTools refetches it). Upstream behavior restored.
           return pool.listTools(server, overrides, {
             signal: this.connectionSignal(config, controller.signal),
             timeout: timeoutMs,
@@ -891,7 +905,10 @@ export class LocalMcpService {
           'MCP server connection failed. Retry or check its configuration.',
           config,
         );
-        return localMcpCallFailureResult(err);
+        return {
+          isError: true,
+          content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
+        };
       }
     }
 

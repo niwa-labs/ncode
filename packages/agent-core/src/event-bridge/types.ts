@@ -5,7 +5,7 @@
  * everything in this file is pure type vocabulary.
  */
 
-import type { RuntimeEvent, RuntimeProtocolError } from '../protocol/runtime-event.js';
+import type { RuntimeEvent, RuntimeProtocolError, TurnPermissionMarkSource } from '../protocol/runtime-event.js';
 import type { ToolCallProvenanceResolver } from '../tools/types.js';
 import type { RespDataTransform } from './resp-data.js';
 import type { PiTurnRunnerLogger } from '../pi-turn-runner/types.js';
@@ -52,6 +52,11 @@ export interface EventBridgeContext {
   captureToolTiming?: boolean;
   /** Turn-local, fail-open resolver for Plugin capability attribution. */
   toolCallProvenanceResolver?: ToolCallProvenanceResolver;
+  /**
+   * Turn-local, fail-open source of §4 permission marks. Absent (or no entry
+   * for the id) — tool-call statuses ship without the `permission` field.
+   */
+  permissionMarks?: TurnPermissionMarkSource;
 }
 
 /**

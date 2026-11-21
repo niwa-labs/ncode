@@ -1,11 +1,7 @@
-import { readPtcExecutionDetails } from '@mavis/agent-core/tools';
 import type { RunawayGuardToolPolicy } from '@mavis/agent-extension';
 
 type RunawayGuardToolStep = Parameters<NonNullable<RunawayGuardToolPolicy['projectProgress']>>[0];
 type RunawayGuardToolResult = RunawayGuardToolStep['result'];
-type RunawayGuardChildStep = ReturnType<
-  NonNullable<RunawayGuardToolPolicy['projectChildSteps']>
->[number];
 
 /** Shared by production assembly and offline replay so typed task rules cannot drift. */
 export function createProductionRunawayGuardToolPolicies(): Readonly<
@@ -14,6 +10,14 @@ export function createProductionRunawayGuardToolPolicies(): Readonly<
   const shellSearchPolicy: RunawayGuardToolPolicy = {
     kind: 'detect',
     isExpectedResult: isExpectedShellSearchNoMatch,
+    // The live polling-loop case: the model ran the SAME remote status check
+    // ~370 times, varying only embedded timestamps, pids and percentages to
+    // defeat the byte-exact action fingerprint (it literally reasoned "be
+    // careful about the runaway guard … one check with different content").
+    // The detection key therefore normalizes volatile numeric runs in the
+    // command text: commands equal up to numbers are the SAME action for
+    // runaway detection (the reminder still never blocks anything).
+    projectActionKey: projectShellActionKey,
   };
   return {
     bash: shellSearchPolicy,
@@ -32,50 +36,37 @@ export function createProductionRunawayGuardToolPolicies(): Readonly<
       kind: 'polling',
       projectProgress: projectTaskOutputProgress,
     },
-    run_code: {
-      kind: 'detect',
-      projectChildSteps: projectRunCodeChildSteps,
-    },
   };
 }
 
 /**
- * A run_code result stays successful when its children fail, so the guard
- * reads the children from the host-written PTC envelope of this exact call.
- * Text is never parsed; a missing or untrusted envelope yields no children.
+ * Detection skeleton of a shell invocation: the command text with every run
+ * of 2+ digits collapsed to `#` (single digits stay — loop counters and
+ * one-off flags differ meaningfully). Non-command arguments pass through
+ * unchanged; a missing command falls back to the raw arguments.
+ *
+ * Known, accepted price of collapsing digit runs: multi-digit signal
+ * numbers and pids are digits too, so `kill -15 123` and `kill -18 456`
+ * are the SAME key — genuinely different commands can earn one extra
+ * reminder. That trade is deliberate and asymmetric on purpose: a
+ * false-positive reminder is cheap (one hidden custom marker appended
+ * before the next request; it never rejects a tool, never aborts a Turn,
+ * and — since the reminder moved from steering to the deferred slot — does
+ * not even extend the Turn), while a false negative on a number-varied
+ * polling loop was the live 375-iteration incident. When in doubt, remind.
+ * The accepted collision starts where BOTH varying numbers are 2+ digits:
+ * a single-digit signal survives this skeleton, so `kill -9 123` and
+ * `kill -15 124` stay distinct.
  */
-function projectRunCodeChildSteps(step: RunawayGuardToolStep): readonly RunawayGuardChildStep[] {
-  if (step.toolName !== 'run_code' || step.result?.toolName !== 'run_code') return [];
-  const ptc = readPtcExecutionDetails({
-    role: 'toolResult',
-    toolName: step.result.toolName,
-    details: step.result.details,
-  });
-  if (!ptc) return [];
-  const errors = new Map<string, { readonly code: string; readonly toolErrorCode?: string }>();
-  for (const fact of ptc.retained_facts) {
-    if (fact.kind !== 'child_error' || errors.has(fact.child_tool_call_id)) continue;
-    errors.set(fact.child_tool_call_id, {
-      code: fact.code,
-      ...(fact.tool_error_code === undefined ? {} : { toolErrorCode: fact.tool_error_code }),
-    });
+function projectShellActionKey(argumentsValue: unknown): unknown {
+  if (!isRecord(argumentsValue)) return argumentsValue;
+  for (const key of ['command', 'cmd', 'script', 'input', '_raw'] as const) {
+    const command = nonEmptyString(argumentsValue[key]);
+    if (command) {
+      return { ...argumentsValue, [key]: command.replace(/\d{2,}/gu, '#') };
+    }
   }
-  return ptc.child_calls
-    .filter((call) => call.parent_tool_call_id === step.toolCallId)
-    .map((call) => {
-      const isError = call.is_error === true;
-      const error = isError ? errors.get(call.child_tool_call_id) : undefined;
-      // The envelope keeps arguments only for a few builtin tools and writes an
-      // empty object for the rest, so empty means "not kept", never "no arguments".
-      const kept = call.input && Object.keys(call.input).length > 0 ? call.input : undefined;
-      return {
-        toolName: call.tool_name,
-        ...(kept ? { arguments: kept } : {}),
-        isError,
-        ...(error ? { errorCode: error.code } : {}),
-        ...(error?.toolErrorCode === undefined ? {} : { toolErrorCode: error.toolErrorCode }),
-      };
-    });
+  return argumentsValue;
 }
 
 function isExpectedShellSearchNoMatch(

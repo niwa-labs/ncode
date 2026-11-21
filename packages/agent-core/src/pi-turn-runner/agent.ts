@@ -1,10 +1,12 @@
-import { Agent, type AgentTool, type AgentToolCall } from '@earendil-works/pi-agent-core';
-import type { UserMessage } from '@earendil-works/pi-ai';
+import { Agent, type FinishTurn, type runAgentLoop } from '@earendil-works/pi-agent-core';
+import { getCurrentSystemMessage, type UserMessage } from '@earendil-works/pi-ai';
+import { diffSystemPromptSections } from '@earendil-works/pi-coding-agent';
 import type { TurnTerminationReason } from '../event-bridge/types.js';
+import { contextWireRequestMessages } from './context-wire.js';
 import { projectAgentMessagesForModel } from './outbound-message-normalizer.js';
 import { resolveMaxImagesPerRequest } from './request-image-limit.js';
+import { createRequestSnapshotBoundary, type RequestSnapshotBoundary } from './request-snapshot.js';
 import { failureReason } from './terminal.js';
-import { newRuntimeTool } from './tools.js';
 import type { turnState } from './turn.js';
 import type { UserMessageInput } from './types.js';
 
@@ -32,16 +34,84 @@ export function toPiUserMessage(input: UserMessageInput): PiUserMessage {
   return message;
 }
 
-export function newAgent(turn: turnState): Agent {
+export function newAgent(turn: turnState, runLoop?: typeof runAgentLoop): Agent {
+  // W04 C-obligation: canonical snapshot at EVERY prepareRequest boundary —
+  // first request included — whenever the host wired the W02/W03 bridge.
+  // Absent supplier (legacy default) leaves the pin hook unset, so behavior
+  // is byte-identical to the pre-bridge path.
+  const requestSnapshots: RequestSnapshotBoundary = createRequestSnapshotBoundary({
+    sessionId: turn.input.sessionId,
+    turnId: turn.input.turnId,
+    logger: turn.logger,
+    ...(turn.input.prepareRequestSnapshot
+      ? { supplier: turn.input.prepareRequestSnapshot }
+      : {}),
+  });
+  turn.requestSnapshots = requestSnapshots;
   return new Agent({
+    ...(runLoop ? { runLoop } : {}),
+    // Product transports own attribution; do not adopt Pi CLI branding.
+    identity: { attribution: null },
     initialState: {
-      systemPrompt: turn.input.systemPrompt,
+      ...(turn.input.systemPromptSections ? {} : { systemPrompt: turn.input.systemPrompt }),
       model: turn.llm.model,
       thinkingLevel: turn.thinkingLevel,
       tools: turn.tools,
-      messages: turn.initialMessages,
+      messages: turn.input.systemPromptSections ? turn.initialMessages :
+        turn.initialMessages.filter((message) => message.role !== 'system' || message.sections === undefined),
     },
     convertToLlm: (messages) => {
+      // Ш4 context-wire: the composition-owned memoized pipeline compiles the
+      // provider-bound payload. `project()` returning `undefined` (or
+      // throwing) degrades THIS request to the legacy conversion below, so a
+      // wire-mode fault can never lose or corrupt provider context. Note the
+      // request-shaping contract: the projected window replaces the payload
+      // derived from `messages`; request-only before-LLM message replacements
+      // (context lifecycle) are superseded by the pipeline's own window.
+      // The transcript's system messages are NOT part of the window — they
+      // carry the system prompt and the tool declarations the provider
+      // request is shaped from — so they ride verbatim ahead of the
+      // projection (see `contextWireRequestMessages`).
+      if (turn.input.contextWire) {
+        try {
+          const request = turn.input.contextWire.project();
+          if (request) {
+            turn.logger.info(
+              {
+                session_id: turn.input.sessionId,
+                turn_id: turn.input.turnId,
+                provider: turn.llm.model.provider,
+                record_count: request.records.length,
+                total_bytes: request.totalBytes,
+                last_roles: request.records.slice(-6).map((record) => record.role),
+                last_tool_results: request.records.slice(-6).flatMap((record) =>
+                  record.toolCallId ? [record.toolCallId] : [],
+                ),
+              },
+              '[pi-turn-runner] context-wire payload projected',
+            );
+            return contextWireRequestMessages(messages, request, turn.llm.model);
+          }
+          turn.logger.debug(
+            {
+              session_id: turn.input.sessionId,
+              turn_id: turn.input.turnId,
+              provider: turn.llm.model.provider,
+            },
+            '[pi-turn-runner] context-wire projection unavailable; legacy conversion used',
+          );
+        } catch (error) {
+          turn.logger.warn(
+            {
+              session_id: turn.input.sessionId,
+              turn_id: turn.input.turnId,
+              provider: turn.llm.model.provider,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            '[pi-turn-runner] context-wire projection failed; legacy conversion used for this request',
+          );
+        }
+      }
       const outbound = projectAgentMessagesForModel(messages, turn.llm.model);
       if (outbound.removedCount > 0) {
         turn.logger.warn(
@@ -95,63 +165,37 @@ export function newAgent(turn: turnState): Agent {
     streamFn: turn.streamFn,
     getApiKey: (provider) => (provider === turn.llm.model.provider ? turn.llm.apiKey : undefined),
     toolExecution: 'parallel',
-    ...(turn.input.toolConfig.missingToolMessage
-      ? { missingToolMessage: turn.input.toolConfig.missingToolMessage }
-      : {}),
-    ...(turn.input.toolConfig.resolveMissingTool
-      ? { resolveMissingTool: (toolCall) => resolveMissingTool(turn, toolCall) }
-      : {}),
     sessionId: turn.input.sessionId,
+    // W04 §5.1 row 32: shouldStopAfterTurn migrates onto the pin-native
+    // finishTurn hook — product `true` → {action:"end"}, `false`/`undefined` →
+    // undefined (normal scheduling). NEVER {action:"continue"}: an explicit
+    // continuation would add a provider request the old hook never added.
+    ...(turn.input.shouldStopAfterTurn
+      ? {
+          finishTurn: (async (completedTurn: Parameters<FinishTurn>[0], signal?: AbortSignal) =>
+            (await turn.input.shouldStopAfterTurn?.(completedTurn)) === true
+              ? ({ action: 'end' } as const)
+              : undefined) satisfies FinishTurn,
+        }
+      : {}),
+    // W04 §5.1 row 15: post-dequeue steering admission veto (pin seam, vendored).
     ...(turn.input.shouldStopAfterSteering
       ? { shouldStopAfterSteering: turn.input.shouldStopAfterSteering }
       : {}),
-    ...(turn.input.shouldStopAfterTurn
-      ? { shouldStopAfterTurn: turn.input.shouldStopAfterTurn }
+    // Reactive subagents §1.7 (wave 3): accepted-owner-input generation probe
+    // for the pin's sequential-executor yield seam. Absent hosts keep the
+    // batch behavior byte-identical.
+    ...(turn.input.ownerInputGeneration
+      ? { ownerInputGeneration: turn.input.ownerInputGeneration }
       : {}),
+    // W04 §5.1 row 1: opt-in finalization of unexpected provider tool calls.
     ...(turn.input.unexpectedToolCallFallback
       ? { unexpectedToolCallFallback: turn.input.unexpectedToolCallFallback }
       : {}),
+    ...(requestSnapshots.prepareRequest ? { prepareRequest: requestSnapshots.prepareRequest } : {}),
     ...(turn.llm.payloadTransform ? { onPayload: turn.llm.payloadTransform } : {}),
     ...(turn.llm.responseObserver ? { onResponse: turn.llm.responseObserver } : {}),
   });
-}
-
-/**
- * A direct call the host resolves outside this turn's catalog gets the same Pi wrapper as a
- * catalog tool: the turn's tool context, no PTC parent, no result observer.
- */
-function resolveMissingTool(turn: turnState, toolCall: AgentToolCall): AgentTool | undefined {
-  const runtimeTool = turn.input.toolConfig.resolveMissingTool?.({
-    id: toolCall.id,
-    name: toolCall.name,
-    arguments: toolCall.arguments,
-  });
-  if (runtimeTool?.def.name !== toolCall.name) return undefined;
-  return newRuntimeTool(runtimeTool, turn.input.toolConfig.context, () =>
-    turn.bridge.getActiveAssistantMessageId(),
-  );
-}
-
-/**
- * Pi ends its loop on a provider error, so a response an afterLlmCall hook
- * recovered from (already removed from the transcript) is repeated here by
- * continuing from the same transcript.
- */
-async function repeatRecoveredRequest(
-  agent: Agent,
-  turn: turnState,
-  convergeAtIdle: (() => Promise<void>) | undefined,
-): Promise<void> {
-  for (let recovery = turn.recovery.pending; recovery; recovery = turn.recovery.pending) {
-    delete turn.recovery.pending;
-    if (turn.input.signal?.aborted) return;
-    turn.recovery.active = recovery;
-    turn.metrics.forgetLLMFailureObservation();
-    await agent.continue();
-    await agent.waitForIdle();
-    await convergeAtIdle?.();
-    await agent.waitForIdle();
-  }
 }
 
 export async function runAgent(
@@ -161,6 +205,19 @@ export async function runAgent(
 ): Promise<TurnTerminationReason | undefined> {
   const startMode = turn.input.startMode ?? 'prompt';
   try {
+    if (turn.input.systemPromptSections) {
+      const patch = diffSystemPromptSections(
+        getCurrentSystemMessage(agent.state.messages)?.sections ?? {},
+        { ...turn.input.systemPromptSections },
+      );
+      if (patch) {
+        agent.state.messages = [...agent.state.messages, {
+          role: 'system', content: '', sections: patch, timestamp: Date.now(),
+        }];
+        // Persist before the request, including continuation without a new user.
+        await turn.history?.flushTail();
+      }
+    }
     if (startMode === 'continue') {
       await agent.continue();
     } else {
@@ -169,11 +226,10 @@ export async function runAgent(
         toPiUserMessage(turn.input.userMessage),
       ]);
     }
+    await runContextOverflowRecovery(agent, turn);
     await agent.waitForIdle();
-    await repeatRecoveredRequest(agent, turn, convergeAtIdle);
     await convergeAtIdle?.();
     await agent.waitForIdle();
-    await repeatRecoveredRequest(agent, turn, convergeAtIdle);
     if (turn.input.signal?.aborted) {
       return { kind: 'aborted' };
     }
@@ -200,4 +256,59 @@ export async function runAgent(
     );
     return failureReason(runError);
   }
+}
+
+/**
+ * В1 (opus-decisions-20261101) context-overflow recovery at the loop level —
+ * the pi `_checkCompaction`/`agent.continue()` shape (agent-session.ts
+ * :3037-3107). The transport retry inside `withLLMRetry` re-sends the SAME
+ * provider context, so an overflowed request can only be retried where the
+ * context is rebuilt: after the run settles with an overflow-failed
+ * response, the failed response is rejected out of the transcript (the same
+ * surgery the response-control discard path applies) and the host recovery
+ * wraps the ONE continuation whose request recompiles the context — the
+ * compacted window in wire mode. Absent recovery or a non-overflow failure
+ * changes nothing.
+ */
+async function runContextOverflowRecovery(agent: Agent, turn: turnState): Promise<void> {
+  const recovery = turn.input.llmRetry?.contextOverflowRecovery;
+  const failure = agent.state.errorMessage;
+  if (recovery === undefined || failure === undefined || turn.input.signal?.aborted) return;
+  if (!recovery.isOverflowError(failure)) return;
+  turn.logger.info(
+    {
+      session_id: turn.input.sessionId,
+      turn_id: turn.input.turnId,
+      error: failure,
+    },
+    '[pi-turn-runner] context overflow failed the request; compacting once and retrying',
+  );
+  rejectFailedAssistantResponse(agent, turn);
+  await recovery.recover(() => agent.continue(), { error: failure });
+}
+
+/**
+ * Removes the failed assistant response (the transcript tail) from the agent
+ * state and marks it rejected so `transformContext` also strips any
+ * loop-context copy before the recovery's continuation request — the exact
+ * steps of the response-control `discardAssistantMessage` path (events.ts),
+ * minus the in-flight bridge reset that no longer applies after the run
+ * settled. Without this, `agent.continue()` refuses ("Cannot continue from
+ * message role: assistant") and the retried request would re-send the failed
+ * response.
+ *
+ * The failed response's `message_end` already delivered it through
+ * `onHistoryChangedHook` (the run settled before the recovery starts), so the
+ * removal also rewinds the history delivery cursor: without the explicit
+ * reconciliation the recovery answer — appended at the same index the failed
+ * response vacated — is swallowed by the length-based `flushTail` and never
+ * reaches durable history.
+ */
+function rejectFailedAssistantResponse(agent: Agent, turn: turnState): void {
+  const messages = agent.state.messages;
+  const last = messages[messages.length - 1];
+  if (last === undefined || last.role !== 'assistant') return;
+  turn.rejectedAssistantMessages.add(last);
+  agent.state.messages = messages.slice(0, -1);
+  turn.history?.reconcileRemoval();
 }

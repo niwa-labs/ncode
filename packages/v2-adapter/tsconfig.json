@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024"],
+    "target": "ES2024",
+    // The paths entries below compile neighbor-package SOURCES (the same
+    // resolution the standalone typecheck derives), so mirror the two flags
+    // `tsconfig.standalone.json` overrides for exactly that purpose: `.ts`
+    // extension imports and override modifiers are legal in that source tree.
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"],
+      "@mavis/storage-worker": ["../../packages/storage-worker/src/index.ts"],
+      "@mavis/durable-seam": ["../../packages/durable-seam/src/index.ts"],
+      "@earendil-works/chord/context": ["../../third_party/chord/src/context/index.ts"],
+      "@mavis/agent-tools/truncation/cas-spill": ["../../packages/agent-tools/src/truncation/cas-spill.ts"],
+      "@mavis/wire-compiler": ["../../packages/wire-compiler/src/index.ts"],
+      "@mavis/local-runtime-v2/canonical-history": ["../../packages/local-runtime-v2/src/infra/file/canonical-history.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

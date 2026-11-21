@@ -1,5 +1,5 @@
 import type { SessionRepository } from '../../sessions/repo/contract.js';
-import { MessageDataCorruptionError } from '../repo/contract.js';
+import { MessageCursorNotFoundError, MessageDataCorruptionError } from '../repo/contract.js';
 import type { DisplayMessageRecord, MessageRepository } from '../repo/contract.js';
 import type { MessageDisplayReadiness } from '../repo/readiness.js';
 
@@ -17,7 +17,7 @@ export interface MessageQueryPage {
   readonly hasMore: boolean;
 }
 
-export type MessageQueryFailureReason = 'session-not-found' | 'data-corrupt';
+export type MessageQueryFailureReason = 'session-not-found' | 'data-corrupt' | 'cursor-not-found';
 
 export class MessageQueryServiceError extends Error {
   constructor(
@@ -68,11 +68,18 @@ export class MessageQueryService {
         ...(input.before ? { before: input.before } : {}),
       });
       return {
-        messages: page.messages,
+        // The repository's bounded pages are newest-first (the staged-backfill
+        // read contract); presentation pages stay chronological, as every
+        // existing consumer expects.
+        messages:
+          limit !== undefined && page.messages.length > 1
+            ? [...page.messages].reverse()
+            : page.messages,
         ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
         hasMore: page.hasMore,
       };
     } catch (error) {
+      if (error instanceof MessageCursorNotFoundError) throw new MessageQueryServiceError('cursor-not-found', error.message);
       if (error instanceof MessageDataCorruptionError) {
         throw new MessageQueryServiceError('data-corrupt', error.message);
       }

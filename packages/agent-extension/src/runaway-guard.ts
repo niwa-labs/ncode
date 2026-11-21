@@ -1,5 +1,6 @@
 import type {
   AgentExtension,
+  BeforeLlmCallHandler,
   BeforeToolCallHandler,
   StepEndHandler,
   TurnAssemblyCtx,
@@ -27,7 +28,6 @@ export {
   type RunawayGuardReplayInput,
   type RunawayGuardReplayResult,
   type RunawayGuardToolPolicy,
-  type RunawayGuardChildStep,
   type RunawayGuardTrustedToolProvenance,
   type RunawayGuardObservation,
   type RunawayGuardSignalSummary,
@@ -35,6 +35,22 @@ export {
   type RunawayGuardReminderObservation,
   type RunawayGuardControllerDecision,
 } from '@mavis/runaway-guard';
+
+/**
+ * `customType` of the durable hidden marker a fired guard reminder becomes.
+ * The marker rides the host `appendMessage` before-LLM decision (the same
+ * channel as the todo-cadence reminder): `role:'custom'`, `display:false` —
+ * durable context annotation, never a user-authored turn of phrase. The
+ * canonical-history validator accepts it via the portable pi custom-message
+ * shape (no `details`).
+ */
+export const RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE = 'runaway_guard_reminder';
+
+/** A fired reminder parked for the next provider request of the same Turn. */
+interface PendingGuardReminder {
+  readonly content: string;
+  readonly observation: RunawayGuardReminderObservation;
+}
 
 export interface RunawayGuardShadowExtensionOptions extends Omit<
   RunawayGuardOptions,
@@ -65,7 +81,7 @@ export function runawayGuardShadowExtension(
   return createRunawayGuardExtension(options);
 }
 
-/** At most one Steer attempt per Turn; never rejects a tool or aborts a Turn. */
+/** At most one deferred reminder per Turn; never rejects a tool or aborts a Turn. */
 export function runawayGuardExtension(options: RunawayGuardExtensionOptions = {}): AgentExtension {
   return createRunawayGuardExtension(options, options.remindAfterOccurrences ?? 3);
 }
@@ -84,6 +100,15 @@ function createRunawayGuardExtension(
     string,
     Map<string, RunawayGuardTrustedToolProvenance>
   >();
+  /**
+   * Deferred reminder slot, keyed `${sessionId}\u0000${turnId}` like the guard
+   * state. `on_step_end` parks a fired reminder here instead of steering;
+   * `before_llm_call` of the NEXT provider request drains it as an
+   * `appendMessage` custom marker. If the model stops (no next request), the
+   * `turn_end` cleanup drops it — a reminder never extends a finished Turn,
+   * and steering stays pi-strict (only live user producers).
+   */
+  const pendingReminders = new Map<string, PendingGuardReminder>();
   const beforeToolCall: BeforeToolCallHandler = (event, _signal, ctx) => {
     try {
       if (!isEnabledBestEffort(options.isEnabled)) {
@@ -100,15 +125,46 @@ function createRunawayGuardExtension(
     }
     return undefined;
   };
+  const beforeLlmCall: BeforeLlmCallHandler = (_input, ctx) => {
+    try {
+      if (!isEnabledBestEffort(options.isEnabled)) {
+        pendingReminders.delete(provenanceKey(ctx));
+        return undefined;
+      }
+      const pending = takePendingReminder(pendingReminders, ctx);
+      if (!pending) return undefined;
+      // Delivered now: the runner turns this decision into a durable hidden
+      // marker append before the Provider request (threshold/escalation
+      // bookkeeping already happened when the reminder fired).
+      guard.markReminderInjected(ctx);
+      notifyBestEffort(options.onReminder, pending.observation);
+      return {
+        type: 'appendMessage',
+        reason: RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE,
+        message: {
+          role: 'custom',
+          customType: RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE,
+          content: pending.content,
+          display: false,
+          timestamp: Date.now(),
+        },
+      };
+    } catch {
+      // Delivery must fail open: drop the slot, never block the request.
+      return undefined;
+    }
+  };
   const onStepEnd: StepEndHandler = (event, ctx) => {
     if (event.signal.aborted) {
       guard.clearDetectionStreaks(ctx);
       clearTrustedToolProvenance(trustedToolProvenanceByTurn, ctx);
+      pendingReminders.delete(provenanceKey(ctx));
       return;
     }
     if (!isEnabledBestEffort(options.isEnabled)) {
       guard.clearDetectionStreaks(ctx);
       clearTrustedToolProvenance(trustedToolProvenanceByTurn, ctx);
+      pendingReminders.delete(provenanceKey(ctx));
       return;
     }
     try {
@@ -128,11 +184,15 @@ function createRunawayGuardExtension(
         afterOccurrences !== undefined && shouldApplyReminder(options.shouldRemind, ctx),
       );
       if (!reminder) return;
-      event.agent.steer({ role: 'user', content: reminder.content, timestamp: Date.now() });
-      guard.markReminderInjected(ctx);
-      notifyBestEffort(options.onReminder, reminder.observation);
+      // Park instead of steer: the reminder must not extend the Turn past its
+      // natural end, bypass the exit-boundary user-producer protection, or
+      // land in durable history as a user message.
+      pendingReminders.set(provenanceKey(ctx), {
+        content: reminder.content,
+        observation: reminder.observation,
+      });
     } catch {
-      // Detection, host facts, steering and observers must all fail open.
+      // Detection, host facts, parking and observers must all fail open.
     }
   };
 
@@ -145,9 +205,13 @@ function createRunawayGuardExtension(
         : 'Observe deterministic convergence signals and inject one bounded strategy reminder.'),
     init(pi) {
       if (afterOccurrences !== undefined) pi.on('before_tool_call', beforeToolCall);
+      pi.on('before_llm_call', beforeLlmCall);
       pi.on('on_step_end', onStepEnd);
       pi.on('turn_end', (_event, ctx) => {
         try {
+          // A reminder still parked here never got its request: the model
+          // stopped, so the reminder is discarded (it never extends a Turn).
+          pendingReminders.delete(provenanceKey(ctx));
           const summary = guard.finishTurn(ctx);
           if (summary) notifyBestEffort(options.onTurnSummary, summary);
         } finally {
@@ -201,6 +265,17 @@ function takeTrustedToolProvenance(
   const current = values.get(provenanceKey(ctx));
   clearTrustedToolProvenance(values, ctx);
   return current ? [...current.values()] : [];
+}
+
+/** Single-shot drain: one parked reminder becomes exactly one marker append. */
+function takePendingReminder(
+  values: Map<string, PendingGuardReminder>,
+  ctx: Pick<TurnAssemblyCtx, 'sessionId' | 'turnId'>,
+): PendingGuardReminder | undefined {
+  const key = provenanceKey(ctx);
+  const pending = values.get(key);
+  if (pending) values.delete(key);
+  return pending;
 }
 
 function clearTrustedToolProvenance(

@@ -4,7 +4,8 @@
 // `provider_error` / `invalid_response`. Structured upstream failures retain
 // their reason after removing configured secrets and common credential shapes.
 
-import { completeSimple, type ThinkingLevel } from '@earendil-works/pi-ai';
+// pi 48c8f322: `completeSimple` moved to the pi-ai `./compat` entry.
+import { completeSimple, type ThinkingLevel } from '@earendil-works/pi-ai/compat';
 import { withOpenCodeGoHeaders } from '@mavis/shared';
 
 import { buildProviderHeaders, providerCompletionUrl } from './provider-request.js';

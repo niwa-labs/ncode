@@ -91,13 +91,22 @@ import type {
   ConversationSendMessageRequest,
   ConversationSendOptions,
 } from "../application/conversation/conversation-application.js";
+import type { TurnStatusSnapshot } from "../application/conversation/conversation-application.js";
 import type { RuntimeApplications } from "../application/initialize.js";
 import type { LocalRuntimeApplication } from "../application/session/process-local-application-contract.js";
+import type {
+  AcpPermissionMode,
+  SessionPermissionModeEntry,
+  SessionPermissionModeRegistry,
+  SetModeResult,
+} from "../service/permission/session-permission-mode.js";
 
 export interface CliServiceOptions {
   readonly applications: RuntimeApplications;
   readonly application: LocalRuntimeApplication;
   readonly conversation: ConversationApplication;
+  /** §2.1 per-session permission-mode registry (the runtime's ONE instance). */
+  readonly sessionPermissionModes?: SessionPermissionModeRegistry;
 }
 
 export type CliSendMessageReq = ConversationSendMessageRequest;
@@ -270,6 +279,26 @@ export class CliService {
       ctx,
       req,
     );
+  }
+
+  /**
+   * W10 `/session` warmer status: the one-line prompt-cache warming status of
+   * the Session, `undefined` when the application surface keeps no warmer
+   * state (warming off, unknown session, or a surface that predates the
+   * diagnostics port).
+   */
+  getSessionCacheWarmingStatus(sessionId: string): string | undefined {
+    return this.options.application.diagnostics?.getSessionCacheWarmingStatus?.(sessionId);
+  }
+
+  /**
+   * W1 §3.2: the sessions whose last durable→jsonl publication failed
+   * (`publishStale`) — the status-seam read for `mcode daemon status`; empty
+   * when every publication attempt is current or the host predates the
+   * diagnostics port.
+   */
+  getSessionPublishStaleSessions(): readonly string[] {
+    return this.options.application.diagnostics?.getSessionPublishStaleSessions?.() ?? [];
   }
 
   getPeekContext(
@@ -471,6 +500,10 @@ export class CliService {
     return this.options.conversation.getActiveTurn(sessionId);
   }
 
+  getTurnStatus(sessionId: string): Promise<TurnStatusSnapshot> {
+    return this.options.conversation.getTurnStatus(sessionId);
+  }
+
   watchEvents(signal?: AbortSignal) {
     return this.options.application.events.watch(signal);
   }
@@ -630,6 +663,50 @@ export class CliService {
     ).getPermissionMode();
   }
 
+  /**
+   * §2.2 ACP surface: binds a Session's permission mode (session/new, load,
+   * resume). Sets the mode and lifts the lock; refuses a DIFFERENT mode while
+   * a Turn is active in the Session.
+   */
+  bindSessionPermissionMode(
+    sessionId: string,
+    mode: AcpPermissionMode,
+    origin: SessionPermissionModeEntry["origin"],
+  ): Promise<SetModeResult> {
+    return Promise.resolve(
+      this.requireSessionPermissionModes().bind(sessionId, mode, origin),
+    );
+  }
+
+  /**
+   * §2.2 ACP surface: set_config_option — same mode is a no-op ok; another
+   * mode after the first accepted Turn is refused with the current value.
+   */
+  setSessionPermissionMode(
+    sessionId: string,
+    mode: AcpPermissionMode,
+  ): Promise<SetModeResult> {
+    return Promise.resolve(
+      this.requireSessionPermissionModes().set(sessionId, mode),
+    );
+  }
+
+  /** §2.2 ACP surface: the Session's bound mode, `undefined` without an entry. */
+  getSessionPermissionMode(
+    sessionId: string,
+  ): Promise<AcpPermissionMode | undefined> {
+    return Promise.resolve(
+      this.requireSessionPermissionModes().get(sessionId)?.mode,
+    );
+  }
+
+  private requireSessionPermissionModes(): SessionPermissionModeRegistry {
+    if (!this.options.sessionPermissionModes) {
+      throw new Error("Runtime does not expose the session permission-mode registry.");
+    }
+    return this.options.sessionPermissionModes;
+  }
+
   setPermissionMode(
     input: Parameters<
       NonNullable<LocalRuntimeApplication["configuration"]>["setPermissionMode"]
@@ -641,28 +718,49 @@ export class CliService {
     ).setPermissionMode(input);
   }
 
-  /** Undefined when this host cannot read the next-message suggestion switch. */
-  getPromptSuggestionEnabled(): Promise<boolean> | undefined {
-    return this.options.application.configuration?.getPromptSuggestionEnabled?.();
+  getDangerousCommandGateEnabled() {
+    return this.requireCapability(
+      "configuration",
+      "Configuration",
+    ).getDangerousCommandGateEnabled();
   }
 
-  /** Undefined when this host cannot persist the next-message suggestion switch. */
-  setPromptSuggestionEnabled(enabled: boolean): Promise<boolean> | undefined {
-    return this.options.application.configuration?.setPromptSuggestionEnabled?.({ enabled });
+  setDangerousCommandGateEnabled(
+    input: Parameters<
+      NonNullable<
+        LocalRuntimeApplication["configuration"]
+      >["setDangerousCommandGateEnabled"]
+    >[0],
+  ) {
+    return this.requireCapability(
+      "configuration",
+      "Configuration",
+    ).setDangerousCommandGateEnabled(input);
   }
 
-  /** Undefined when this host cannot read the PTC switch. */
-  getPtcEnabled(): Promise<boolean> | undefined {
-    return this.options.application.configuration?.getPtcEnabled?.();
+  getSandboxFilesystemMode() {
+    return this.requireCapability(
+      "configuration",
+      "Configuration",
+    ).getSandboxFilesystemMode();
   }
 
-  /** Undefined when this host cannot persist the PTC switch. */
-  setPtcEnabled(enabled: boolean): Promise<boolean> | undefined {
-    return this.options.application.configuration?.setPtcEnabled?.({ enabled });
+  setSandboxFilesystemMode(
+    input: Parameters<
+      NonNullable<LocalRuntimeApplication["configuration"]>["setSandboxFilesystemMode"]
+    >[0],
+  ) {
+    return this.requireCapability("configuration", "Configuration").setSandboxFilesystemMode(
+      input,
+    );
   }
 
-  listModels(input?: Parameters<NonNullable<LocalRuntimeApplication['models']>['list']>[0]) {
-    return this.requireCapability('models', 'Model').list(input);
+  listModels(
+    input?: Parameters<
+      NonNullable<LocalRuntimeApplication["models"]>["list"]
+    >[0],
+  ) {
+    return this.requireCapability("models", "Model").list(input);
   }
 
   selectModel(
@@ -908,7 +1006,7 @@ export class CliService {
 
 function toPermissionDecision(
   reply: ReplyPermissionReq["reply"],
-): "allowAlways" | "allowOnce" | "deny" {
+): "allowAlways" | "allowOnce" | "deny" | "denyAlways" {
   switch (reply) {
     case PermissionReply.AllowOnce:
       return "allowOnce";
@@ -916,6 +1014,8 @@ function toPermissionDecision(
       return "allowAlways";
     case PermissionReply.Deny:
       return "deny";
+    case PermissionReply.DenyAlways:
+      return "denyAlways";
     default:
       throw new Error(`Unsupported permission reply: ${String(reply)}`);
   }

@@ -1,11 +1,15 @@
 import { readImageEncodedContent } from '@mavis/agent-core/tools';
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('@earendil-works/pi-coding-agent/image-resize', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent/image-resize')>();
+// OUR vendor 1.5.2 has no ImageProcessorUnavailableError: it falls back to
+// in-process resizing internally, so a resizeImage throw means the image
+// processing runtime itself cannot load — the request-media pipeline maps
+// every throw to the processor-unavailable outcome.
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>();
   return {
     ...actual,
-    resizeImage: vi.fn(() => Promise.reject(new actual.ImageProcessorUnavailableError())),
+    resizeImage: vi.fn(() => Promise.reject(new Error('photon worker cannot be loaded'))),
   };
 });
 

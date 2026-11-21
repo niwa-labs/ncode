@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { TuiRunCoordinator, type TuiRunRuntime } from '../../src/application/run-coordinator.js';
 import { TuiFailure } from '../../src/failure.js';
-import type { TuiStreamEvent } from '../../src/runtime/stream-events.js';
 
 describe('TuiRunCoordinator', () => {
   it.each([
@@ -170,13 +169,40 @@ describe('TuiRunCoordinator', () => {
     });
   });
 
+  // Incident 2026-11-05: the busy refusal arrives exactly as
+  // `conversation-access` builds it from the mirrored `{ok:false,status,body}`
+  // (the TuiFailure with the body key + message). The coordinator must carry
+  // BOTH the structured error (the ACP shim reads outcome.error.code /
+  // retryable) and the message string (the shim's error text).
+  it('carries a busy-refusal TuiFailure into outcome.error AND the result error string', async () => {
+    const runtime = createRuntime(async function* () {
+      yield* [];
+      throw new TuiFailure('runtime', 'This session already has an active turn.', {
+        code: 'local_session_busy',
+        retryable: false,
+      });
+    });
+
+    const result = await new TuiRunCoordinator(runtime).execute(request('turn-busy-mirror'));
+    expect(result.status).toBe('failed');
+    expect(result.outcome.error).toMatchObject({
+      category: 'runtime',
+      code: 'local_session_busy',
+      message: 'This session already has an active turn.',
+      retryable: false,
+    });
+    expect(result.error).toBe('This session already has an active turn.');
+  });
+
   it('aborts the Runtime Session and reports cancellation', async () => {
     let started = () => undefined;
+    let streamSignal: AbortSignal | undefined;
     const streamStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
     const runtime = createRuntime(async function* pendingCancellation(_req, signal) {
       yield* [];
+      streamSignal = signal;
       started();
       await new Promise<void>((resolve) =>
         signal?.addEventListener('abort', () => resolve(), { once: true }),
@@ -186,7 +212,18 @@ describe('TuiRunCoordinator', () => {
     const running = coordinator.execute(request('turn-cancel'));
     await streamStarted;
 
-    await expect(coordinator.abort()).resolves.toBe(true);
+    const stopRequested = Promise.withResolvers<void>();
+    const stopReply = Promise.withResolvers<boolean>();
+    runtime.abortSession.mockImplementationOnce(() => {
+      stopRequested.resolve();
+      return stopReply.promise;
+    });
+    const stopping = coordinator.abort();
+    await stopRequested.promise;
+    // A stream cancellation can race the turn-scoped stop on the daemon.
+    expect(streamSignal?.aborted).toBe(false);
+    stopReply.resolve(true);
+    await expect(stopping).resolves.toBe(true);
     await expect(running).resolves.toMatchObject({ status: 'cancelled' });
     expect(runtime.abortSession).toHaveBeenCalledWith({
       id: 'session-1',
@@ -238,49 +275,51 @@ describe('TuiRunCoordinator', () => {
     );
   });
 
-  it('settles a timed-out run past a blocked observer and still delivers events in order', async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = createRuntime(async function* (_req, signal) {
-        yield { type: 'delta', role: 'assistant', content: 'first' } as const;
-        yield { type: 'delta', role: 'assistant', content: 'second' } as const;
-        if (!signal?.aborted) {
-          await new Promise<void>((resolve) =>
-            signal?.addEventListener('abort', () => resolve(), { once: true }),
-          );
-        }
-      });
-      const delivered: string[] = [];
-      let unblockReader = () => undefined;
-      const observe = vi.fn(async (event: TuiStreamEvent) => {
-        if (event.type !== 'delta' || typeof event.content !== 'string') return;
-        delivered.push(event.content);
-        // A downstream reader that stops reading after the first line.
-        if (delivered.length === 1) {
-          await new Promise<void>((resolve) => {
-            unblockReader = resolve;
-          });
-        }
-      });
+  // BYOK regression over reactive subagents wave 2: automatic context
+  // compaction starts before the first real model call and reports its
+  // lifecycle as assistant-role `compaction*` markers in the turn stream.
+  // They are runtime maintenance, not model steps — with `--max-steps 1` the
+  // real answer must still be accepted instead of being refused as
+  // `limit_exceeded` with the turn aborted.
+  it('does not let automatic compaction markers consume the --max-steps budget', async () => {
+    const compactionRuntime = createRuntime(async function* () {
+      yield {
+        type: 'message',
+        message: { id: 'compaction-1', role: 'assistant', kind: 'compaction_start', content: '' },
+      } as const;
+      yield {
+        type: 'message',
+        message: { id: 'answer-1', role: 'assistant', content: 'LOCAL_BYOK_OK' },
+      } as const;
+      yield { type: 'done' } as const;
+    });
+    await expect(
+      new TuiRunCoordinator(compactionRuntime).execute({
+        ...request('turn-compaction'),
+        policy: { maxSteps: 1 },
+      }),
+    ).resolves.toMatchObject({ status: 'succeeded', outcome: { answer: 'LOCAL_BYOK_OK' } });
+    expect(compactionRuntime.abortSession).not.toHaveBeenCalled();
 
-      const running = new TuiRunCoordinator(runtime, { releaseObserverOnStop: true }).execute(
-        { ...request('turn-blocked-observer'), policy: { timeoutMs: 20 } },
-        observe,
-      );
-      await vi.advanceTimersByTimeAsync(20);
-      const result = await running;
-
-      expect(result.status).toBe('timeout');
-      expect(runtime.abortSession).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: 'timeout' }),
-      );
-      expect(delivered).toEqual(['first']);
-      unblockReader();
-      await result.observations;
-      expect(delivered).toEqual(['first', 'second']);
-    } finally {
-      vi.useRealTimers();
-    }
+    // The budget still counts real model steps: with maxSteps 1 a second real
+    // answer is refused exactly as before the fix.
+    const limitRuntime = createRuntime(async function* () {
+      yield {
+        type: 'message',
+        message: { id: 'compaction-1', role: 'assistant', kind: 'compaction_start', content: '' },
+      } as const;
+      yield { type: 'message', message: { role: 'assistant', content: 'first' } } as const;
+      yield { type: 'message', message: { role: 'assistant', content: 'second' } } as const;
+    });
+    await expect(
+      new TuiRunCoordinator(limitRuntime).execute({
+        ...request('turn-compaction-limit'),
+        policy: { maxSteps: 1 },
+      }),
+    ).resolves.toMatchObject({ status: 'limit_exceeded', outcome: { answer: 'first' } });
+    expect(limitRuntime.abortSession).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'max_steps' }),
+    );
   });
 
   it('fires timeouts above the Node timer limit only at the requested deadline', async () => {
@@ -334,6 +373,7 @@ describe('TuiRunCoordinator', () => {
       const runtime = createRuntime(async function* () {
         yield { type: 'generic', eventType, data: { requestId: 'old-ask' } } as const;
         yield { type: 'message', message: { role: 'assistant', content: 'Final answer' } } as const;
+        yield { type: 'done' } as const;
       });
       await expect(new TuiRunCoordinator(runtime).execute(request('turn-after-dismiss')))
         .resolves.toMatchObject({ status: 'succeeded', outcome: { answer: 'Final answer' } });
@@ -431,6 +471,7 @@ describe('TuiRunCoordinator', () => {
       yield { type: 'delta', role: 'assistant', content: 'delta ' } as const;
       yield { type: 'delta', role: 'assistant', content: 'answer' } as const;
       yield { type: 'session-status', status: 'finished' } as const;
+      yield { type: 'done' } as const;
     });
 
     await expect(
@@ -451,6 +492,7 @@ describe('TuiRunCoordinator', () => {
       } } as const;
       yield { type: 'message', message: { id: 'final-1', role: 'assistant', content: 'private completed' } } as const;
       yield { type: 'delta', role: 'assistant', content: 'private trailing draft' } as const;
+      yield { type: 'done' } as const;
     });
     const selected = vi.fn();
     const result = await new TuiRunCoordinator(runtime, { onAnswerSelection: selected }).execute(request('selection'));
@@ -470,6 +512,7 @@ describe('TuiRunCoordinator', () => {
         type: 'message',
         message: { role: 'assistant', kind: 'final', content: '' },
       } as const;
+      yield { type: 'done' } as const;
     });
 
     await expect(
@@ -499,6 +542,7 @@ describe('TuiRunCoordinator', () => {
         type: 'message',
         message: { role: 'assistant', kind: 'final', content: 'The final answer.' },
       } as const;
+      yield { type: 'done' } as const;
     });
     const onOutcome = vi.fn();
 
@@ -555,6 +599,7 @@ describe('TuiRunCoordinator', () => {
   it('turns an automation result write failure into a turn failure', async () => {
     const runtime = createRuntime(async function* () {
       yield { type: 'message', message: { role: 'assistant', content: 'answer' } } as const;
+      yield { type: 'done' } as const;
     });
 
     await expect(
@@ -572,6 +617,85 @@ describe('TuiRunCoordinator', () => {
     });
   });
 
+  // --- Wave 2 (incident 2026-11-05, verdict §2.2б): the sawTerminal net ---
+
+  it('reports TURN_DETACHED when the source ends without its terminal done marker', async () => {
+    const runtime = createRuntime(async function* () {
+      yield { type: 'delta', role: 'assistant', content: 'Let me ' } as const;
+      yield { type: 'delta', role: 'assistant', content: 'check…' } as const;
+      // The window closed mid-turn: no `done` ever arrived.
+    });
+    const observed: string[] = [];
+
+    await expect(
+      new TuiRunCoordinator(runtime).execute(request('turn-detached'), (event) =>
+        observed.push(event.type),
+      ),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      outcome: {
+        status: 'failed',
+        answer: null,
+        error: {
+          category: 'runtime',
+          code: 'TURN_DETACHED',
+          message:
+            'The turn window closed before the turn ended; the turn may still be running.',
+          retryable: true,
+        },
+      },
+    });
+    expect(observed).toEqual(['delta', 'delta']);
+    expect(runtime.abortSession).not.toHaveBeenCalled();
+  });
+
+  it('maps a thrown TurnStreamDetached to the same TURN_DETACHED code with the reason', async () => {
+    const { TurnStreamDetached } = await import('../../src/runtime/remote-host.js');
+    const runtime = createRuntime(async function* () {
+      yield { type: 'delta', role: 'assistant', content: 'partial' } as const;
+      throw new TurnStreamDetached({ sessionId: 'session-1', turnId: 'turn-thrown-detached', reason: 'error', attempts: 3 });
+    });
+
+    await expect(new TuiRunCoordinator(runtime).execute(request('turn-thrown-detached'))).resolves.toMatchObject({
+      status: 'failed',
+      outcome: {
+        error: {
+          category: 'runtime',
+          code: 'TURN_DETACHED',
+          message:
+            'The turn window closed before the turn ended; the turn may still be running. ' +
+            '(reason: error, attempts: 3)',
+          retryable: true,
+        },
+      },
+    });
+  });
+
+  it('keeps a real in-band failure when the turn ends with done after an error event', async () => {
+    const runtime = createRuntime(async function* () {
+      yield { type: 'error', message: 'the provider exploded' } as const;
+      yield { type: 'done' } as const;
+    });
+
+    await expect(new TuiRunCoordinator(runtime).execute(request('turn-error-done'))).resolves.toMatchObject({
+      status: 'failed',
+      outcome: {
+        error: { category: 'runtime', message: 'the provider exploded', retryable: true },
+      },
+    });
+  });
+
+  it('keeps an aborted session-status outcome over the TURN_DETACHED net', async () => {
+    const runtime = createRuntime(async function* () {
+      yield { type: 'session-status', status: 'aborted' } as const;
+      // An aborted turn's window can end without [DONE] (the detach path).
+    });
+
+    await expect(new TuiRunCoordinator(runtime).execute(request('turn-aborted-status'))).resolves.toMatchObject({
+      status: 'cancelled',
+    });
+  });
+
   it('maps a Runtime rewind during Headless execution to a content-review block', async () => {
     const runtime = createRuntime(async function* () {
       yield { type: 'generic', eventType: 'messages-rewound', data: {} } as const;
@@ -585,151 +709,6 @@ describe('TuiRunCoordinator', () => {
       status: 'failed',
       outcome: { error: { code: 'CONTENT_REVIEW_BLOCKED' } },
     });
-  });
-});
-
-describe('TuiRunCoordinator turn lifecycle frames', () => {
-  // Shapes match local-runtime-v2 display facts: one compaction attempt upserts
-  // the same id as start, then terminal state, with no content.
-  const compactionStart = {
-    type: 'message',
-    message: {
-      id: 'compaction-a1',
-      turnId: 'turn-lifecycle',
-      role: 'assistant',
-      kind: 'compaction_start',
-    },
-  } as const;
-  const compactionDone = {
-    type: 'message',
-    message: {
-      id: 'compaction-a1',
-      turnId: 'turn-lifecycle',
-      role: 'assistant',
-      kind: 'compaction',
-    },
-  } as const;
-  const compactionFailed = {
-    type: 'message',
-    message: {
-      id: 'compaction-a1',
-      turnId: 'turn-lifecycle',
-      role: 'assistant',
-      kind: 'compaction_failed',
-    },
-  } as const;
-  const answer = {
-    type: 'message',
-    message: {
-      id: 'response-1',
-      turnId: 'turn-lifecycle',
-      role: 'assistant',
-      content: 'REAL_ANSWER',
-    },
-  } as const;
-  const toolStep = {
-    type: 'message',
-    message: {
-      id: 'response-0',
-      turnId: 'turn-lifecycle',
-      role: 'assistant',
-      content: 'Reading files',
-      toolCalls: [{ id: 'call-1', name: 'read' }],
-    },
-  } as const;
-
-  it.each([
-    ['completes', compactionDone],
-    ['fails', compactionFailed],
-  ] as const)(
-    'does not spend --max-steps when automatic compaction %s before the answer',
-    async (_label, terminal) => {
-      const runtime = createRuntime(async function* () {
-        yield compactionStart;
-        yield terminal;
-        yield answer;
-      });
-      const result = await new TuiRunCoordinator(runtime).execute({
-        ...request('turn-lifecycle'),
-        policy: { maxSteps: 1 },
-      });
-      expect(result).toMatchObject({
-        status: 'succeeded',
-        outcome: { answer: 'REAL_ANSWER', usageIncomplete: true },
-      });
-      expect(runtime.abortSession).not.toHaveBeenCalled();
-    },
-  );
-
-  it('keeps the step budget for model responses around mid-turn compaction', async () => {
-    const steps = async function* () {
-      yield toolStep;
-      yield compactionStart;
-      yield compactionDone;
-      yield answer;
-    };
-    const withinBudget = await new TuiRunCoordinator(createRuntime(steps)).execute({
-      ...request('turn-lifecycle'),
-      policy: { maxSteps: 2 },
-    });
-    expect(withinBudget).toMatchObject({ status: 'succeeded', outcome: { answer: 'REAL_ANSWER' } });
-
-    const overBudget = createRuntime(steps);
-    await expect(
-      new TuiRunCoordinator(overBudget).execute({
-        ...request('turn-lifecycle'),
-        policy: { maxSteps: 1 },
-      }),
-    ).resolves.toMatchObject({ status: 'limit_exceeded' });
-    expect(overBudget.abortSession).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: 'max_steps' }),
-    );
-  });
-
-  it('does not let a lifecycle frame replace the selected answer', async () => {
-    const result = await new TuiRunCoordinator(
-      createRuntime(async function* () {
-        yield answer;
-        yield compactionStart;
-        yield compactionDone;
-      }),
-    ).execute(request('turn-lifecycle'));
-    expect(result).toMatchObject({ status: 'succeeded', outcome: { answer: 'REAL_ANSWER' } });
-  });
-
-  it('treats review activity as bookkeeping but the review result as the answer step', async () => {
-    const review = (kind: string, content?: string) => ({
-      type: 'message' as const,
-      message: {
-        id: 'review-activity',
-        turnId: 'turn-lifecycle',
-        role: 'assistant' as const,
-        kind,
-        ...(content ? { content } : {}),
-      },
-    });
-    const result = await new TuiRunCoordinator(
-      createRuntime(async function* () {
-        yield review('review_start');
-        yield review('review_result', '<annotation-result>LGTM</annotation-result>');
-      } as TuiRunRuntime['sendMessage']),
-    ).execute({ ...request('turn-lifecycle'), policy: { maxSteps: 1 } });
-    expect(result).toMatchObject({
-      status: 'succeeded',
-      outcome: { answer: '<annotation-result>LGTM</annotation-result>' },
-    });
-    expect(result.outcome.usageIncomplete).toBeUndefined();
-
-    const overBudget = createRuntime(async function* () {
-      yield answer;
-      yield review('review_result', '<annotation-result>LGTM</annotation-result>');
-    } as TuiRunRuntime['sendMessage']);
-    await expect(
-      new TuiRunCoordinator(overBudget).execute({
-        ...request('turn-lifecycle'),
-        policy: { maxSteps: 1 },
-      }),
-    ).resolves.toMatchObject({ status: 'limit_exceeded' });
   });
 });
 

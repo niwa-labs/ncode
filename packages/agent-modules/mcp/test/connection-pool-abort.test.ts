@@ -2,25 +2,20 @@
  * Regression tests for `McpConnectionPool.callTool` abort propagation.
  *
  * The `image_synthesize` production hang was caused by the pool never
- * forwarding the caller's AbortSignal into the SDK's `client.callTool`, so
- * an in-flight remote HTTP request sat until the per-server timeout (up to
+ * forwarding the caller's AbortSignal into the client's `callTool`, so an
+ * in-flight remote HTTP request sat until the per-server timeout (up to
  * 10 min for generation tools) instead of being cancelled the moment the pi
  * turn aborted.
  *
- * We inject a fake `Client` via a stubbed `ResolvedMcpServer` lookup so we
- * can observe the exact `RequestOptions` the pool hands to
+ * W08 pi-mcp absorption: the pool's client is now the pi `McpClient`
+ * (`callTool(name, args, { timeoutMs, signal })`); the fakes below mirror the
+ * pi signatures. We inject a fake client via a stubbed `ResolvedMcpServer`
+ * lookup so we can observe the exact `McpRequestOptions` the pool hands to
  * `client.callTool(...)` without spinning up any transport.
  */
 import { describe, expect, it } from 'vitest';
 
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-
-import { describeMcpCallError } from '../src/runtime/call-error.js';
-import {
-  McpConnectionPool,
-  McpToolCallNotDispatchedError,
-  McpToolCallTimeoutError,
-} from '../src/runtime/connection-pool.js';
+import { McpConnectionPool } from '../src/runtime/connection-pool.js';
 import type {
   McpConnection,
   McpToolCallResult,
@@ -30,24 +25,24 @@ import type {
 
 interface RecordedCall {
   readonly toolName: string;
-  readonly options?: { timeout?: number; signal?: AbortSignal };
+  readonly options?: { timeoutMs?: number; signal?: AbortSignal };
 }
 
 interface RecordedList {
-  readonly options?: { timeout?: number; signal?: AbortSignal };
+  readonly options?: { timeoutMs?: number; signal?: AbortSignal };
 }
 
 function seedFakeListConnection(
   pool: McpConnectionPool,
   serverName: string,
-  behaviour: (options?: { timeout?: number; signal?: AbortSignal }) => Promise<{ tools: McpToolInfo[] }>,
+  behaviour: (options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<McpToolInfo[]>,
   recorded: RecordedList[],
 ): void {
   const fakeClient = {
-    async listTools(
-      _params: undefined,
-      options?: { timeout?: number; signal?: AbortSignal },
-    ): Promise<{ tools: McpToolInfo[] }> {
+    async listTools(options?: {
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    }): Promise<McpToolInfo[]> {
       recorded.push({ options });
       return behaviour(options);
     },
@@ -77,16 +72,16 @@ function seedFakeListConnection(
 function seedFakeConnection(
   pool: McpConnectionPool,
   serverName: string,
-  behaviour: (options?: { timeout?: number; signal?: AbortSignal }) => Promise<McpToolCallResult>,
+  behaviour: (options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<McpToolCallResult>,
   recorded: RecordedCall[],
 ): void {
   const fakeClient = {
     async callTool(
-      params: { name: string; arguments: Record<string, unknown> },
-      _resultSchema: unknown,
-      options?: { timeout?: number; signal?: AbortSignal },
+      name: string,
+      _args: Record<string, unknown>,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
     ): Promise<McpToolCallResult> {
-      recorded.push({ toolName: params.name, options });
+      recorded.push({ toolName: name, options });
       return behaviour(options);
     },
     async close(): Promise<void> {},
@@ -126,7 +121,7 @@ describe('McpConnectionPool.listTools — abort propagation', () => {
       pool,
       'broken',
       (options) =>
-        new Promise<{ tools: McpToolInfo[] }>((_resolve, reject) => {
+        new Promise<McpToolInfo[]>((_resolve, reject) => {
           const signal = options?.signal;
           if (signal?.aborted) {
             reject(new Error('Request aborted'));
@@ -150,7 +145,7 @@ describe('McpConnectionPool.listTools — abort propagation', () => {
 
     await expect(discovery).rejects.toThrow(/Request aborted/);
     expect(recorded[0]?.options?.signal).toBe(controller.signal);
-    expect(recorded[0]?.options?.timeout).toBe(60_000);
+    expect(recorded[0]?.options?.timeoutMs).toBe(60_000);
     expect(pool.getStats('broken')).toMatchObject({ active: 0, pending: 0 });
 
     await pool.shutdown();
@@ -170,8 +165,8 @@ describe('McpConnectionPool.listTools — abort propagation', () => {
       pool,
       'broken',
       () =>
-        new Promise<{ tools: McpToolInfo[] }>((resolve) => {
-          releaseHead = () => resolve({ tools: [] });
+        new Promise<McpToolInfo[]>((resolve) => {
+          releaseHead = () => resolve([]);
         }),
       recorded,
     );
@@ -304,7 +299,7 @@ describe('McpConnectionPool.callTool — abort propagation', () => {
 
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.options?.signal).toBe(controller.signal);
-    expect(recorded[0]?.options?.timeout).toBe(5_000);
+    expect(recorded[0]?.options?.timeoutMs).toBe(5_000);
 
     await pool.shutdown();
   });
@@ -550,92 +545,5 @@ describe('McpConnectionPool.callTool — abort propagation', () => {
     await secondPromise;
 
     await pool.shutdown();
-  });
-});
-
-describe('McpConnectionPool.callTool — server timeout', () => {
-  const server: ResolvedMcpServer = {
-    name: 'slow',
-    enabled: true,
-    transport: { type: 'http', url: 'https://example.com/mcp' },
-    timeout: 20,
-  };
-
-  it('reports the pool bound firing as a typed timeout of a dispatched call', async () => {
-    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
-    seedFakeConnection(pool, 'slow', () => new Promise<never>(() => undefined), []);
-
-    const failure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
-
-    expect(failure).toBeInstanceOf(McpToolCallTimeoutError);
-    expect(failure).toMatchObject({ timeoutMs: 20, message: expect.stringContaining('timed out') });
-  });
-
-  it('reports the SDK request timeout the same way', async () => {
-    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
-    seedFakeConnection(
-      pool,
-      'slow',
-      async () => {
-        throw new McpError(ErrorCode.RequestTimeout, 'Request timed out');
-      },
-      [],
-    );
-
-    await expect(pool.callTool('slow', 'search', {})).rejects.toBeInstanceOf(
-      McpToolCallTimeoutError,
-    );
-  });
-
-  it('keeps other failures and caller aborts untyped', async () => {
-    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
-    seedFakeConnection(
-      pool,
-      'slow',
-      async () => {
-        throw new Error('socket hang up');
-      },
-      [],
-    );
-
-    const failure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
-
-    expect(failure).not.toBeInstanceOf(McpToolCallTimeoutError);
-    expect(failure).toMatchObject({ message: 'MCP tool call failed: socket hang up' });
-  });
-
-  it('keeps the SDK or pool timeout as the cause that raw-error callers describe', async () => {
-    const sdkTimeout = new McpError(ErrorCode.RequestTimeout, 'Request timed out');
-    const pool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
-    seedFakeConnection(
-      pool,
-      'slow',
-      async () => {
-        throw sdkTimeout;
-      },
-      [],
-    );
-
-    const sdkFailure = await pool.callTool('slow', 'search', {}).catch((error: unknown) => error);
-
-    expect(sdkFailure).toBeInstanceOf(McpToolCallTimeoutError);
-    expect((sdkFailure as Error).cause).toBe(sdkTimeout);
-    expect(describeMcpCallError(sdkFailure)).toEqual({
-      code: ErrorCode.RequestTimeout,
-      message: 'Request timed out',
-    });
-
-    const boundPool = new McpConnectionPool(stubLookup(server), { maxConcurrency: 1 });
-    seedFakeConnection(boundPool, 'slow', () => new Promise<never>(() => undefined), []);
-
-    const boundFailure = await boundPool
-      .callTool('slow', 'search', {})
-      .catch((error: unknown) => error);
-
-    expect(boundFailure).toBeInstanceOf(McpToolCallTimeoutError);
-    expect(describeMcpCallError(boundFailure)).toEqual({
-      name: 'Error',
-      message: 'MCP tool call "search" on "slow" timed out after 20ms',
-    });
   });
 });

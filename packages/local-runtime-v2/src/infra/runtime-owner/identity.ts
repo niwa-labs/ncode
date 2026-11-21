@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import lockfile from 'proper-lockfile';
 
 import { readProcessStartToken } from './process-start-time.js';
-import { serializeRuntimeOwnerLease } from './runtime-owner-lease.js';
+import {
+  parseRuntimeOwnerLease,
+  serializeRuntimeOwnerLease,
+} from './runtime-owner-lease.js';
 
 const DEFAULT_RUNTIME_OWNER_STALE_MS = 10_000;
 const OWNER_DIRECTORY = join('v2', 'runtime-owner-leases');
@@ -34,8 +37,24 @@ type RuntimeOwnerLeaseState = 'active' | 'stale' | 'missing';
 interface RuntimeOwnerLivenessOptions {
   readonly currentPid: number;
   readonly currentInstanceId: string;
+  /**
+   * The start token of THIS process, when the platform probe worked. It is the
+   * pivot of the PID-reuse verdict below: two leases recorded under one pid are
+   * the same process exactly when their tokens match.
+   */
+  readonly currentStartToken?: string;
+  /**
+   * Start tokens of FOREIGN pids recorded in lease files at boot recovery,
+   * snapshotted once per boot (the probe spawns `ps` / reads `/proc`, far too
+   * heavy for the per-ownerId liveness path). A pid absent from the map was
+   * not recoverable at boot — its verdict stays conservative bare-pid
+   * liveness.
+   */
+  readonly bootPidTokens: ReadonlyMap<number, string | undefined>;
   readonly isProcessAlive: (pid: number) => boolean;
   readonly getInstanceLeaseState: (instanceId: string) => RuntimeOwnerLeaseState;
+  /** The structured start token recorded in a foreign instance lease, if any. */
+  readonly getForeignLeaseStartToken: (instanceId: string) => string | undefined;
 }
 
 function formatRuntimeOwnerId(
@@ -60,6 +79,26 @@ function createRuntimeOwnerLiveness(
     // Compromise revokes authority, but does not prove that this process finished draining.
     if (currentInstance) return leaseState !== 'missing';
     if (leaseState === 'missing') return false;
+    // PID reuse (the owner died and a new process took its pid — the restart
+    // case where the new Runtime inherits the old daemon's pid, or an
+    // UNRELATED foreign process recycling it): bare `kill(pid, 0)` liveness
+    // would fence the dead owner's orphaned work forever. The recorded lease
+    // token decides: a foreign instance whose lease was written by a DIFFERENT
+    // process generation than the one currently holding the pid is gone, so
+    // its locks must stay recoverable. The current holder's token is this
+    // process's own (`currentStartToken`) when the pid is ours, and the
+    // boot-recovery snapshot (`bootPidTokens`) for any other pid. A
+    // same-generation lease (equal tokens — e.g. two Runtime instances inside
+    // one process) and a token-less / unsnapshotted (legacy, degraded-probe)
+    // lease keep the conservative verdict.
+    const holderToken =
+      parsed.pid === options.currentPid
+        ? options.currentStartToken
+        : options.bootPidTokens.get(parsed.pid);
+    if (holderToken !== undefined) {
+      const recordedToken = options.getForeignLeaseStartToken(parsed.instanceId);
+      if (recordedToken !== undefined && recordedToken !== holderToken) return false;
+    }
     if (!options.isProcessAlive(parsed.pid)) return false;
     // A delayed heartbeat is not proof that this exact foreign owner died.
     // Its process must close the lease or exit before another Runtime may recover its work.
@@ -109,6 +148,13 @@ export async function createRuntimeOwnerIdentity(options: {
   const isOwnerAlive = createRuntimeOwnerLiveness({
     currentPid: pid,
     currentInstanceId: instanceId,
+    ...(startToken !== undefined ? { currentStartToken: startToken } : {}),
+    // The foreign-pid half of the PID-reuse fence (opus review bug 10): the
+    // lease files present at boot are exactly the recovery set, so their
+    // recorded pids' CURRENT generation tokens are snapshotted once here —
+    // never on the per-ownerId liveness path — letting isOwnerAlive prove a
+    // foreign lease dead even when an unrelated LIVE process now holds its pid.
+    bootPidTokens: await snapshotBootPidTokens(ownerDirectory, pid),
     isProcessAlive: options.isProcessAlive ?? isProcessAlive,
     getInstanceLeaseState: (candidate) => {
       if (candidate === instanceId) {
@@ -131,6 +177,17 @@ export async function createRuntimeOwnerIdentity(options: {
           : 'stale';
       } catch {
         return 'stale';
+      }
+    },
+    getForeignLeaseStartToken: (candidate) => {
+      if (!validInstanceId(candidate)) return undefined;
+      try {
+        const text = readFileSync(ownerLeasePath(ownerDirectory, candidate), 'utf8');
+        const lease = parseRuntimeOwnerLease(text);
+        return lease.format === 'structured' ? lease.startToken : undefined;
+      } catch {
+        // An unreadable lease stays conservative: the pid verdict decides below.
+        return undefined;
       }
     },
   });
@@ -197,8 +254,12 @@ export function createProcessLocalRuntimeOwnerIdentity(
       currentPid: pid,
       currentInstanceId: instanceId,
       isProcessAlive,
+      bootPidTokens: new Map(),
       getInstanceLeaseState: (candidate) =>
         candidate === instanceId && !closed ? 'active' : 'missing',
+      // Process-local identities keep no lease files; foreign instances are
+      // 'missing' above, so this reader is never consulted.
+      getForeignLeaseStartToken: () => undefined,
     }),
     onCompromised: () => () => undefined,
     close: async () => {
@@ -206,6 +267,47 @@ export function createProcessLocalRuntimeOwnerIdentity(
       void closed;
     },
   };
+}
+
+/**
+ * Boot-recovery snapshot of the process-generation tokens of every FOREIGN pid
+ * recorded in an existing owner lease (`snapshotBootPidTokens`'s caller): the
+ * pids named by leases present at boot are the recovery set, and their current
+ * tokens are what later lets `isOwnerAlive` prove a lease dead when an
+ * unrelated live process has since recycled its pid. Never throws — a pid
+ * whose probe fails simply maps to `undefined` (the conservative verdict).
+ */
+async function snapshotBootPidTokens(
+  ownerDirectory: string,
+  selfPid: number,
+): Promise<Map<number, string | undefined>> {
+  const tokens = new Map<number, string | undefined>();
+  let names: readonly string[];
+  try {
+    names = readdirSync(ownerDirectory);
+  } catch {
+    return tokens;
+  }
+  const pids = new Set<number>();
+  for (const name of names) {
+    if (!name.endsWith('.owner')) continue;
+    try {
+      const lease = parseRuntimeOwnerLease(readFileSync(join(ownerDirectory, name), 'utf8'));
+      // Only structured leases carry a comparable token, so only their pids
+      // are worth a probe; our own pid is judged via `currentStartToken`.
+      if (lease.format !== 'structured' || lease.pid === selfPid) continue;
+      pids.add(lease.pid);
+    } catch {
+      continue;
+    }
+  }
+  await Promise.all(
+    [...pids].map(async (pid) => {
+      const { token } = await readProcessStartToken(pid);
+      tokens.set(pid, token);
+    }),
+  );
+  return tokens;
 }
 
 function assertOwnerIdentityActive(closed: boolean, compromise?: Error): void {

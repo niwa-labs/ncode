@@ -14,6 +14,7 @@ import type {
   TuiQueueReceipt,
   TuiQueuedMessage,
   TuiQueueSnapshot,
+  TuiTurnStatusSnapshot,
 } from '../port.js';
 import { buildTuiToolPreview } from '../tool-preview.js';
 import { normalizeTuiQuestionnaireRequest } from '../event-normalizer.js';
@@ -36,6 +37,11 @@ export class TuiInteractionAccess {
       paused: response.paused === true,
       pendingCount: response.pendingCount ?? items.length,
     };
+  }
+
+  async getTurnStatus(sessionId: string): Promise<TuiTurnStatusSnapshot> {
+    const status = await this.cliService.getTurnStatus(sessionId);
+    return toTuiTurnStatus(status);
   }
 
   async continueQueue(sessionId: string): Promise<void> {
@@ -74,6 +80,8 @@ export class TuiInteractionAccess {
       id: sessionId,
       content,
       clientRequestId: this.createQueueRequestId(),
+      // Composer-owned input: the drained turn may serve optional UI-only work.
+      interactiveSurface: true,
       ...(options.clientIntent ? { clientIntent: options.clientIntent } : {}),
       ...(options.reviewRequest ? { reviewRequest: options.reviewRequest } : {}),
       ...(options.model
@@ -207,6 +215,7 @@ const PERMISSION_REPLY = {
   allowOnce: PermissionReply.AllowOnce,
   allowAlways: PermissionReply.AllowAlways,
   deny: PermissionReply.Deny,
+  denyAlways: PermissionReply.DenyAlways,
 } as const satisfies Record<
   TuiPermissionDecision,
   (typeof PermissionReply)[keyof typeof PermissionReply]
@@ -231,6 +240,24 @@ function toTuiPendingPermission(input: PendingPermissionItem): TuiPendingPermiss
       : {}),
     ...(input.createdAt !== undefined ? { createdAt: Number(input.createdAt) } : {}),
     ...(structuredPreview ? { structuredPreview } : {}),
+  };
+}
+
+function toTuiTurnStatus(
+  status: Awaited<ReturnType<CliService['getTurnStatus']>>,
+): TuiTurnStatusSnapshot {
+  return {
+    ...(status.activeTurn ? { activeTurn: { ...status.activeTurn } } : { activeTurn: null }),
+    ...(status.latestActivity
+      ? {
+          latestActivity: {
+            ...status.latestActivity,
+            ...(status.latestActivity.completedAtMs === undefined
+              ? {}
+              : { completedAtMs: status.latestActivity.completedAtMs }),
+          },
+        }
+      : { latestActivity: null }),
   };
 }
 

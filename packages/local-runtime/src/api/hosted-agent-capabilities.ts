@@ -124,6 +124,7 @@ export interface HostedAgentCapabilityRestrictions {
   readonly disableMemory?: boolean;
   readonly disableCron?: boolean;
   readonly disableComputerUse?: boolean;
+  /** Disable management; retain a current-session-only text-history facade. */
   readonly disableMavis?: boolean;
   readonly disabledBuiltinSkillNames?: readonly AgentBuiltinSkillId[];
   readonly resumeCodexAvailable?: boolean;
@@ -163,10 +164,15 @@ export function createHostedAgentCapabilities(
     authContextInvalidator: host.authContextInvalidator,
     routingContextGetter: host.routingContextGetter,
     fetchImpl: host.fetchImpl,
-    providerAuthGetter: (provider: string) =>
-      AuthStorage.create(join(host.configGetter().dataDir, 'codex-auth.json')).getApiKey(provider, {
-        includeFallback: false,
-      }),
+    providerAuthGetter: async (provider: string) => {
+      // W06: the pin AuthStorage has no `getApiKey` (0.79-era surface);
+      // read the stored credential and surface api_key entries only —
+      // OAuth credentials do not yield a static provider key.
+      const credential = await AuthStorage.create(
+        join(host.configGetter().dataDir, 'codex-auth.json'),
+      ).read(provider);
+      return credential?.type === 'api_key' ? credential.key : undefined;
+    },
     turnRuntimeFacts,
     skills: createHostedSkillCapabilities(host, restrictions),
     memory: host.memoryFacade,
@@ -209,6 +215,7 @@ export function createHostedAgentCapabilities(
             : {}),
           ...(input.skipAgentResolution ? { skipAgentResolution: true } : {}),
           builtinCapabilities,
+          ...(restrictions.disableMavis ? { mavisHistoryOnly: true } : {}),
           toolsDisabled: input.toolsDisabled,
           memoryEnabled: memoryGloballyEnabled,
           memoryReadEnabled,

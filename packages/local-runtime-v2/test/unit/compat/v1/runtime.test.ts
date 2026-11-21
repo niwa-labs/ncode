@@ -11,7 +11,7 @@ import {
   cleanupFailedV1Startup,
   createDeferredAgentRuntimeTelemetry,
   createV1RuntimeCompatibility,
-  withAgentStorageScope,
+  withAgentStorageLock,
 } from "../../../../src/compat/v1/runtime.js";
 
 type ThreadGoalIntegration = CreatedLocalRuntimeHost["apiHost"]["threadGoal"];
@@ -32,7 +32,6 @@ const mocked = vi.hoisted(() => ({
   closeAgentDb: vi.fn(),
   inspectCollision: vi.fn(),
   applyCollision: vi.fn(),
-  suppressedDeliveryTaskIds: new Set<string>(),
 }));
 
 vi.mock("@mavis/local-runtime", async () => {
@@ -42,10 +41,7 @@ vi.mock("@mavis/local-runtime", async () => {
   return {
     ...actual,
     closeAgentDb: mocked.closeAgentDb,
-    scanWorkspace: mocked.scanWorkspace,
-    isTaskDeliverySuppressed: (_host: unknown, taskId: string) =>
-      mocked.suppressedDeliveryTaskIds.has(taskId),
-    withAgentNameConflictMigrationScope: async (
+    withAgentNameConflictMigrationLock: async (
       _dataDir: string,
       operation: (scope: {
         inspectCollision: () => unknown;
@@ -120,7 +116,7 @@ describe("v1 runtime compatibility", () => {
     });
     let escaped: (() => unknown) | undefined;
 
-    await withAgentStorageScope("/tmp/runtime", async (scope) => {
+    await withAgentStorageLock("/tmp/runtime", async (scope) => {
       escaped = scope.applyLegacyAgentStorage;
     });
     const escapedCallback = escaped;
@@ -157,7 +153,7 @@ describe("v1 runtime compatibility", () => {
       mappings: [],
     });
 
-    await withAgentStorageScope("/tmp/runtime", async (scope) => {
+    await withAgentStorageLock("/tmp/runtime", async (scope) => {
       expect(scope.inspectLegacyAgentStorage()).toBe(inspection);
       expect(scope.applyLegacyAgentStorage()).toEqual({
         status: "completed",
@@ -176,7 +172,7 @@ describe("v1 runtime compatibility", () => {
     });
 
     await expect(
-      withAgentStorageScope("/tmp/runtime", async (scope) =>
+      withAgentStorageLock("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       ),
     ).rejects.toThrow("rewrite failed");
@@ -200,7 +196,7 @@ describe("v1 runtime compatibility", () => {
 
     let error: unknown;
     try {
-      await withAgentStorageScope("/tmp/runtime", async (scope) =>
+      await withAgentStorageLock("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       );
     } catch (caught) {
@@ -230,7 +226,7 @@ describe("v1 runtime compatibility", () => {
 
     let error: unknown;
     try {
-      await withAgentStorageScope("/tmp/runtime", async (scope) =>
+      await withAgentStorageLock("/tmp/runtime", async (scope) =>
         scope.applyLegacyAgentStorage(),
       );
     } catch (caught) {
@@ -245,35 +241,10 @@ describe("v1 runtime compatibility", () => {
   });
 });
 
-describe("v1 prompt suggestion setting compatibility", () => {
-  beforeEach(resetRuntimeCompatibilityMocks);
-
-  it("persists the next-message suggestion switch through the validated config writer", async () => {
-    let config: { promptSuggestion?: { enabled: boolean } } = {
-      promptSuggestion: { enabled: true },
-    };
-    const updateConfig = vi.fn(async (body: { field: string; set: boolean }) => {
-      config = { promptSuggestion: { enabled: body.set } };
-      return { config };
-    });
-    const configuration = createCompatibility().createServiceCompatibility(
-      createdHost({ configGetter: () => config, updateConfig }),
-      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
-    ).peripherals.configuration;
-    if (!configuration?.setPromptSuggestionEnabled || !configuration.getPromptSuggestionEnabled) {
-      throw new Error("Prompt suggestion setting is unavailable");
-    }
-
-    await expect(configuration.getPromptSuggestionEnabled()).resolves.toBe(true);
-    await expect(configuration.setPromptSuggestionEnabled({ enabled: false })).resolves.toBe(false);
-    expect(updateConfig).toHaveBeenCalledWith({ field: "promptSuggestion.enabled", set: false });
-    await expect(configuration.getPromptSuggestionEnabled()).resolves.toBe(false);
-  });
-});
-
-
-describe('v1 Agent reference compatibility', () => {
-  function resolver(overrides: Partial<AgentReferenceResolver> = {}): AgentReferenceResolver {
+describe("v1 Agent reference compatibility", () => {
+  function resolver(
+    overrides: Partial<AgentReferenceResolver> = {},
+  ): AgentReferenceResolver {
     return {
       resolveAgentReadScope: vi.fn(async (requestedName: string) => ({
         requestedName,
@@ -480,150 +451,6 @@ describe("v1 runtime compatibility host composition", () => {
   });
 });
 
-describe("v1 background Task notification projection", () => {
-  beforeEach(resetRuntimeCompatibilityMocks);
-
-  it("settles a terminal Task as soon as its notification is bound to a still-running Turn", async () => {
-    const tasks = [
-      {
-        taskId: "bg-done",
-        kind: "subagent" as const,
-        status: "succeeded" as const,
-        ownerSessionId: "session-1",
-        createdAt: 100,
-        updatedAt: 200,
-      },
-      {
-        taskId: "bg-running",
-        kind: "bash" as const,
-        status: "running" as const,
-        ownerSessionId: "session-1",
-        createdAt: 100,
-        updatedAt: 200,
-      },
-    ];
-    const services = createCompatibility().createServiceCompatibility(
-      createdHost({
-        backgroundTaskService: { list: async () => ({ items: tasks }) },
-      }),
-      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
-    );
-    const findClientRequestBindings = vi.fn(async () => [
-      {
-        clientRequestId: "background-task-notification:bg-done",
-        turnId: "turn-delivery",
-      },
-    ]);
-    services.backgroundTasks.bindNotificationReceipts({
-      findClientRequestBindings,
-    });
-
-    await expect(
-      services.peripherals.backgroundTasks.list({
-        ownerSessionId: "session-1",
-      }),
-    ).resolves.toEqual(tasks);
-    expect(findClientRequestBindings).not.toHaveBeenCalled();
-
-    await expect(
-      services.peripherals.backgroundTasks.list({
-        ownerSessionId: "session-1",
-        includeNotification: true,
-      }),
-    ).resolves.toEqual([
-      {
-        ...tasks[0],
-        notification: { state: "settled", turnId: "turn-delivery" },
-      },
-      tasks[1],
-    ]);
-    expect(findClientRequestBindings).toHaveBeenCalledWith({
-      sessionId: "session-1",
-      clientRequestIds: ["background-task-notification:bg-done"],
-    });
-  });
-
-  it("settles an unbound notification from a completed read or a user stop", async () => {
-    mocked.suppressedDeliveryTaskIds.clear();
-    mocked.suppressedDeliveryTaskIds.add("stopped");
-    const task = (taskId: string, overrides: Record<string, unknown> = {}) => ({
-      taskId,
-      kind: "bash" as const,
-      status: "succeeded" as const,
-      ownerSessionId: "session-1",
-      createdAt: 100,
-      updatedAt: 200,
-      ...overrides,
-    });
-    const tasks = [
-      task("read", { deliveredAt: 300 }),
-      task("stopped", { status: "canceled" }),
-      task("pending", { status: "failed" }),
-    ];
-    const services = createCompatibility().createServiceCompatibility(
-      createdHost({
-        backgroundTaskService: { list: async () => ({ items: tasks }) },
-      }),
-      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
-    );
-    const query = { ownerSessionId: "session-1", includeNotification: true };
-
-    await expect(
-      services.peripherals.backgroundTasks.list(query),
-    ).resolves.toEqual(tasks);
-
-    services.backgroundTasks.bindNotificationReceipts({
-      findClientRequestBindings: async () => [],
-    });
-    const annotated = await services.peripherals.backgroundTasks.list(query);
-
-    expect(
-      annotated.map((entry) => [entry.taskId, entry.notification]),
-    ).toEqual([
-      ["read", { state: "settled" }],
-      ["stopped", { state: "settled" }],
-      ["pending", { state: "pending" }],
-    ]);
-  });
-
-  it("lists Tasks with an unknown notification state when the Turn ledger cannot be read", async () => {
-    const tasks = [
-      {
-        taskId: "bg-done",
-        kind: "bash" as const,
-        status: "succeeded" as const,
-        ownerSessionId: "session-1",
-        createdAt: 100,
-        updatedAt: 200,
-      },
-    ];
-    const warn = vi.fn();
-    const services = createCompatibility().createServiceCompatibility(
-      createdHost({
-        backgroundTaskService: { list: async () => ({ items: tasks }) },
-        matrixLogger: { info: vi.fn(), warn },
-      }),
-      { dataDir: "/tmp/runtime", runtimeOwnerKind: "tui" },
-    );
-    services.backgroundTasks.bindNotificationReceipts({
-      findClientRequestBindings: async () => {
-        throw new Error("database is locked");
-      },
-    });
-
-    await expect(
-      services.peripherals.backgroundTasks.list({
-        ownerSessionId: "session-1",
-        includeNotification: true,
-      }),
-    ).resolves.toEqual(tasks);
-    expect(warn).toHaveBeenCalledWith(
-      { sessionId: "session-1", turnId: "background-task-notification" },
-      expect.stringContaining("database is locked"),
-    );
-  });
-});
-
 describe("v1 runtime compatibility seams", () => {
   beforeEach(() => {
     resetRuntimeCompatibilityMocks();
@@ -721,6 +548,100 @@ describe("v1 runtime compatibility seams", () => {
 
     expect(services.peripherals).not.toHaveProperty("models");
     expect(services.peripherals).not.toHaveProperty("modelProviders");
+  });
+
+  it("reads the destructive-delete guard fail-closed through the configuration capability", async () => {
+    // Absent and malformed config alike keep the guard on: the safety net may
+    // only be disarmed by an explicit `false`, never by a missing field.
+    for (const permission of [
+      undefined,
+      {},
+      { dangerousCommandGateEnabled: undefined },
+      { dangerousCommandGateEnabled: true },
+    ] as const) {
+      const services = createCompatibility().createServiceCompatibility(
+        createdHost({ configGetter: () => ({ permission }) }),
+        { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+      );
+
+      await expect(
+        services.peripherals.configuration.getDangerousCommandGateEnabled(),
+      ).resolves.toBe(true);
+    }
+
+    const disabled = createCompatibility().createServiceCompatibility(
+      createdHost({
+        configGetter: () => ({
+          permission: { dangerousCommandGateEnabled: false },
+        }),
+      }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    );
+    await expect(
+      disabled.peripherals.configuration.getDangerousCommandGateEnabled(),
+    ).resolves.toBe(false);
+  });
+
+  it("writes the destructive-delete guard through the host config updater", async () => {
+    const setProcessLocalDangerousCommandGateEnabled = vi.fn(
+      async (enabled: boolean) => enabled,
+    );
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({ setProcessLocalDangerousCommandGateEnabled }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    );
+
+    await expect(
+      services.peripherals.configuration.setDangerousCommandGateEnabled({
+        enabled: false,
+      }),
+    ).resolves.toBe(false);
+    expect(setProcessLocalDangerousCommandGateEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("reports an unmanaged sandbox when the host enforces none", async () => {
+    // A host without a sandbox service applies no filesystem level at all, so
+    // naming one here would describe a policy nothing is enforcing.
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({ getProcessLocalSandboxFilesystemMode: () => undefined }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    );
+
+    await expect(
+      services.peripherals.configuration.getSandboxFilesystemMode(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reads the sandbox level from the host sandbox control", async () => {
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({ getProcessLocalSandboxFilesystemMode: () => "delete_guard" }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    );
+
+    await expect(
+      services.peripherals.configuration.getSandboxFilesystemMode(),
+    ).resolves.toBe("delete_guard");
+  });
+
+  it("switches the sandbox level through the host, not a config write", async () => {
+    // The host owns the apply path because only the sandbox service can
+    // re-initialize the platform backend for the new level.
+    const setProcessLocalSandboxFilesystemMode = vi.fn(
+      async (mode: string) => mode,
+    );
+    const services = createCompatibility().createServiceCompatibility(
+      createdHost({ setProcessLocalSandboxFilesystemMode }),
+      { dataDir: "/tmp/runtime" } as CreateLocalRuntimeHostOptions,
+    );
+
+    await expect(
+      services.peripherals.configuration.setSandboxFilesystemMode({
+        mode: "workspace_write",
+      }),
+    ).resolves.toBe("workspace_write");
+    expect(setProcessLocalSandboxFilesystemMode).toHaveBeenCalledWith(
+      "workspace_write",
+    );
   });
 });
 

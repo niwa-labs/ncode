@@ -88,6 +88,7 @@ export {
   touchTodoStateTurn,
   shouldInjectTodoCompletionReminder,
   summarizeTodoStatuses,
+  todoSnapshotKey,
   isTodoTerminal,
   _resetTodoStateForTests,
   type TodoStateSummary,

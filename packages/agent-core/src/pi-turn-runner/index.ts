@@ -44,6 +44,8 @@ export {
   LLM_RETRY_CALL_IDENTITY,
   LLM_RETRY_REQUEST_SETTLED_OBSERVER,
   withLLMRetry,
+  type LLMContextOverflowRecovery,
+  type LLMFailedOverflowAttempt,
   type LLMCallErrorKind,
   type LLMCallOutcome,
   type LLMCallScope,
@@ -88,12 +90,16 @@ export type {
   RequestImage,
   RequestImageLimitResult,
 } from './request-image-limit.js';
-export {
-  isLLMImageLimitMessage,
-  isLLMRequestTooLargeMessage,
-} from '@mavis/shared/llm-error-classifier';
+export { isLLMImageLimitMessage, isLLMRequestTooLargeMessage } from '@mavis/shared/llm-error-classifier';
 export { toPiUserMessage } from './agent.js';
-export { PTC_BATCH_WALL_CLOCK_MS } from './ptc-tool-executor.js';
+export {
+  contextWireMessages,
+  contextWireRequestMessages,
+  type ContextWireProjection,
+  type ContextWireRecord,
+  type ContextWireRecordToolCall,
+  type ContextWireRequest,
+} from './context-wire.js';
 export {
   createToolContextHistogramBucketsByName,
   measureToolArguments,
@@ -134,7 +140,6 @@ export type {
   PiHistoryChangedHookInput,
   PiHistoryChangeReason,
   PiLlmCallPreparedHookInput,
-  PiLlmCallRecovery,
   PiOnLlmCallPreparedHook,
   PiOnHistoryChangedHook,
   PiOnStepEndHook,
@@ -144,3 +149,5 @@ export type {
   PiTurnHooks,
   PiTurnEndHookInput,
 } from './hooks.js';
+
+export { createRequestFork, RequestForkIneligibleError } from './request-fork.js';

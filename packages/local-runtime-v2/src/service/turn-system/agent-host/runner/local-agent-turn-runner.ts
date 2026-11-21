@@ -1,6 +1,7 @@
 import { logger } from '../../../../infra/logging/index.js';
 import {
   PiTurnRunner,
+  type LLMCallSettledEvent,
   type LLMModelConfig,
   type PiEventWriter,
   type PiLLMRequestFailureHook,
@@ -14,14 +15,9 @@ import {
   buildAbortedTerminalStatusEvent,
 } from '@mavis/agent-core/event-bridge';
 import { getRuntimeBuildEnv } from '@mavis/config';
-import type { RuntimeTool } from '@mavis/agent-core/tools';
-import { RespDataType } from '@mavis/agent-core/protocol/agent-message';
-import {
-  RUNTIME_EVENT_SCHEMA,
-  RuntimeEventStatus,
-  RuntimeEventType,
-} from '@mavis/protocol';
+import { RuntimeEventStatus, RuntimeEventType } from '@mavis/protocol';
 import type { MetricsClient } from '@mavis/shared/metrics-proxy';
+import { createLogger } from '@mavis/logging';
 
 import {
   isInputSafetyDecisionFor,
@@ -36,20 +32,13 @@ import type {
   LocalRuntimeTurnRunnerResult,
   LocalRuntimeTurnToolContext,
 } from '../execution/executor.js';
-import {
-  LocalOutputSafetyEventWriter,
-  SAFETY_REVIEW_SLOW_READ_MS,
-} from './output-safety-event-writer.js';
+import { logLlmRequestFailure } from '../execution/llm-logging.js';
+import { LocalOutputSafetyEventWriter } from './output-safety-event-writer.js';
 import { runWithLocalEvalReporter, type LocalEvalReporterFactoryPort } from './eval-reporter.js';
 import { deriveLocalTurnRuntimeOutcome } from './turn-outcome.js';
 import { appendSafetyReplacement } from './safety-replacement.js';
 import { DEFAULT_OUTPUT_REVISION_INSTRUCTION } from '../preparation/config/prompt-templates.js';
-import { readPtcChildTools } from '../execution/ptc/catalog.js';
-import {
-  prepareDirectCallArguments,
-  withDirectCallArguments,
-} from './ptc/direct-call-arguments.js';
-import { createDirectCallReminder, type DirectCallReminder } from './ptc/direct-call-reminder.js';
+import type { SessionCacheWarming } from '../cache-warming/session-cache-warming.js';
 
 export interface LocalPiTurnRunner {
   runTurn(input: RunTurnInput<LocalRuntimeTurnToolContext>): Promise<void>;
@@ -70,7 +59,14 @@ export interface LocalAgentTurnRunnerOptions {
    * Per-turn recorder factory for the development LLM Context Inspector; when omitted, Pi assembly
    * is identical to behavior before injection.
    */
+  readonly runLoopForSession?: PiTurnRunnerOptions['runLoopForSession'];
   readonly llmCaptureFactory?: PiTurnRunnerOptions['llmCaptureFactory'];
+  /**
+   * W06 cache warming: the session-warming controller whose outermost
+   * stream wrapper composes the ONE CacheWarmer into this turn's MAIN
+   * stream path. Absent — no wrapper, byte-identical legacy composition.
+   */
+  readonly cacheWarming?: SessionCacheWarming;
 }
 
 export interface LocalContextUsageCapabilities {
@@ -93,6 +89,10 @@ export interface LocalAgentTurnRunnerResult extends LocalRuntimeTurnRunnerResult
 }
 
 const OUTPUT_SAFETY_MAX_REGENERATIONS = 3;
+
+/** mcode:llm physical-request failure reporting (spec §4: error + err). */
+const llmFailureLog = createLogger('mcode:llm');
+
 /** V2 production runner: direct Pi invocation plus local input/output safety policy. */
 export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
   readonly acceptsEventSummary: boolean;
@@ -121,8 +121,9 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       );
     } finally {
       if (isUserTurn) this.recordRegenerations(input, observation.regenerations);
-      // A PTC Turn ends with one `ptc turn summary` line; no-op on other Turns.
-      input.toolContext?.ptcObserver?.finishTurn();
+      // W06 cache warming: the agent run settled — streaming-mode warming
+      // stops here, idle-mode warming moves to its shorter horizon.
+      this.options.cacheWarming?.onAgentSettled(input.sessionId);
     }
   }
 
@@ -268,7 +269,6 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       ...(input.persistApprovedPartialOnNetworkStop === false
         ? { persistApprovedPartialOnNetworkStop: false }
         : {}),
-      ptcEnabled: input.ptcTools !== undefined || readPtcChildTools(input.tools) !== undefined,
     });
   }
 
@@ -293,13 +293,15 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
     state.pendingRevisionInstruction = undefined;
     observeLlmAttempt(input, scope.attemptIndex, systemPrompt);
     const contextUsageAttempt = this.prepareContextUsageAttempt(input, observedLlm, safetyWriter);
-    const ptcTools = input.ptcTools ?? readPtcChildTools(input.tools);
-    const direct = directPtcChildCallWiring(input, ptcTools, toolContext);
     await this.piRunner.runTurn({
-      ...toPiRunTurnInput(input),
-      ...direct.input,
+      ...toPiRunTurnInput(input, this.options.cacheWarming),
       llm: contextUsageAttempt?.llm ?? observedLlm,
       systemPrompt,
+      ...(input.systemPromptSections ? { systemPromptSections: {
+        ...input.systemPromptSections,
+        ...(systemPrompt !== input.systemPrompt
+          ? { output_revision: systemPrompt.slice(input.systemPrompt.length).trim() } : {}),
+      } } : {}),
       eventWriter: contextUsageAttempt?.eventWriter ?? safetyWriter,
       signal: combineAbortSignals(input.signal, safetyAbort.signal),
       captureToolTiming: getRuntimeBuildEnv() !== 'prod',
@@ -307,8 +309,6 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       runtimeSeqGenerator: state.runtimeSeqGenerator,
       toolConfig: {
         tools: input.tools ?? [],
-        ...direct.toolConfig,
-        missingToolMessage: (toolName) => missingTurnToolMessage(toolName, ptcTools),
         disableBuiltinToolFallback: input.disableBuiltinToolFallback ?? true,
         context: toolContext,
       },
@@ -356,7 +356,6 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
       await appendCancelledTurn(input, state);
       return 'break';
     }
-    if (await this.settlePtcSafetyStop(input, state, safetyWriter)) return 'break';
     if (state.inputRejected) return 'break';
     const inputCorrection = await settleInputCorrection(
       input,
@@ -380,23 +379,6 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
     state.pendingRevisionInstruction = safetyWriter.guidePrompt;
     await recallAttempt(input, safetyWriter, attemptIndex + 1);
     return 'continue';
-  }
-
-  private async settlePtcSafetyStop(
-    input: LocalRuntimeTurnRunnerInput,
-    state: MutableRunnerState,
-    writer: LocalOutputSafetyEventWriter,
-  ): Promise<boolean> {
-    if (!writer.hasPtcChildCalls() || !requiresSafetyStop(state, writer)) return false;
-    const inputSafetyStopped = state.inputRejected || state.inputCorrectionPending;
-    state.ptcSafetyStopped = true;
-    state.inputCorrectionPending = false;
-    if (writer.networkStopped) await settleNetworkStop(input, state, writer);
-    else if (!state.inputRejected) {
-      await settleOutputRetraction(input, state);
-      if (inputSafetyStopped) state.retractionSource = 'input-review';
-    }
-    return true;
   }
 
   private async settleInputReview(
@@ -456,120 +438,6 @@ export class LocalAgentTurnRunner implements LocalRuntimeTurnRunnerPort {
   }
 }
 
-function missingTurnToolMessage(
-  toolName: string,
-  childTools: readonly RuntimeTool[] | undefined,
-): string | undefined {
-  if (!childTools && toolName === 'run_code')
-    return 'run_code is disabled for this turn. Use the current native tool catalog.';
-  return undefined;
-}
-
-type PiRunTurnInput = RunTurnInput<LocalRuntimeTurnToolContext>;
-
-/**
- * PTC-Turn wiring for direct calls of run_code children: the resolver, and the reminder
- * hook placed after every other after-tool hook so it ends the final result. Empty when
- * the Turn has no PTC.
- */
-function directPtcChildCallWiring(
-  input: LocalRuntimeTurnRunnerInput,
-  ptcTools: readonly RuntimeTool[] | undefined,
-  context: LocalRuntimeTurnToolContext,
-): {
-  readonly input: Pick<PiRunTurnInput, 'hooks'>;
-  readonly toolConfig: Pick<PiRunTurnInput['toolConfig'], 'ptcTools' | 'resolveMissingTool'>;
-} {
-  if (!ptcTools) return { input: {}, toolConfig: {} };
-  const reminder = createDirectCallReminder((fields) => {
-    writePtcDirectCallEvent(context, 'ptc hidden tool reminder', fields);
-    context.ptcObserver?.directCallSettled(fields.tool, fields.tool_call_id, fields.appended);
-  });
-  return {
-    input: {
-      hooks: {
-        ...input.hooks,
-        afterToolCallHook: [...(input.hooks?.afterToolCallHook ?? []), reminder.afterToolCall],
-      },
-    },
-    toolConfig: {
-      ptcTools,
-      resolveMissingTool: (toolCall) =>
-        resolveDirectPtcChildTool(toolCall, ptcTools, context, reminder),
-    },
-  };
-}
-
-/**
- * A run_code child the model called directly although the top-level catalog omits it runs
- * as that native tool, as it would with PTC off, after the argument repair in
- * `ptc/direct-call-arguments.ts`; the last such call of a reply gets the reminder of
- * `ptc/direct-call-reminder.ts`. The events name the tool, the call, the repair kinds and
- * whether the reminder was appended, never argument values or content.
- */
-function resolveDirectPtcChildTool(
-  toolCall: { readonly id: string; readonly name: string; readonly arguments: unknown },
-  childTools: readonly RuntimeTool[],
-  context: LocalRuntimeTurnToolContext,
-  reminder: DirectCallReminder,
-): RuntimeTool | undefined {
-  const tool = childTools.find((candidate) => candidate.def.name === toolCall.name);
-  if (!tool) return undefined;
-  const call = { tool: toolCall.name, tool_call_id: toolCall.id };
-  writePtcDirectCallEvent(context, 'ptc hidden tool called directly', call);
-  let prepared: { readonly fixes: readonly string[]; readonly valid: boolean };
-  try {
-    prepared = prepareDirectCallArguments(tool, toolCall.arguments);
-  } catch {
-    // The tool's own preparation threw; Pi reports that error when it prepares the call.
-    prepared = { fixes: [], valid: false };
-  }
-  writePtcDirectCallEvent(context, 'ptc hidden tool arguments prepared', {
-    ...call,
-    fixes: [...prepared.fixes],
-    valid: prepared.valid,
-  });
-  // Before noteResolved: an invalid call is settled (and logged) inside it.
-  context.ptcObserver?.directCallResolved(toolCall.id, prepared.valid);
-  reminder.noteResolved(toolCall, prepared.valid);
-  return withDirectCallArguments(tool);
-}
-
-function writePtcDirectCallEvent(
-  context: LocalRuntimeTurnToolContext,
-  event: string,
-  fields: Readonly<Record<string, unknown>>,
-): void {
-  try {
-    context.ptcLogger?.info?.(
-      { session_id: context.sessionId, turn_id: context.turnId, ...fields },
-      event,
-    );
-  } catch {
-    // Diagnostics must not change the tool call.
-  }
-}
-
-function requiresSafetyStop(
-  state: MutableRunnerState,
-  writer: LocalOutputSafetyEventWriter,
-): boolean {
-  return (
-    state.inputRejected || state.inputCorrectionPending || writer.blocked || writer.networkStopped
-  );
-}
-
-function isSlowReview(startMs: number): boolean {
-  return Date.now() - startMs >= SAFETY_REVIEW_SLOW_READ_MS;
-}
-
-/** 审核返回（或抛错）时看耗时：等了 15 秒以上先通知慢送审，再把是否慢交给调用方。 */
-function observeReviewElapsed(startMs: number, observeSlowReview: () => void): boolean {
-  const slow = isSlowReview(startMs);
-  if (slow) observeSlowReview();
-  return slow;
-}
-
 function reportInputReviewResolution(input: LocalRuntimeTurnRunnerInput, rejected: boolean): void {
   if (input.deferInputReviewResolution !== true) {
     input.onInputReviewResolved?.(rejected);
@@ -592,14 +460,15 @@ function shouldReportInputReviewResolution(input: LocalRuntimeTurnRunnerInput): 
 function buildLocalPiTurnRunnerOptions(
   options: Pick<
     LocalAgentTurnRunnerOptions,
-    'metricsClient' | 'logger' | 'onLLMRequestFailure' | 'observeLLMRequest' | 'llmCaptureFactory'
+    'metricsClient' | 'logger' | 'onLLMRequestFailure' | 'observeLLMRequest' | 'llmCaptureFactory' | 'runLoopForSession'
   >,
 ): PiTurnRunnerOptions {
   return {
     ...(options.metricsClient ? { metricsClient: options.metricsClient } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
-    ...(options.onLLMRequestFailure ? { onLLMRequestFailure: options.onLLMRequestFailure } : {}),
+    onLLMRequestFailure: logLlmRequestFailure(options.onLLMRequestFailure),
     ...(options.observeLLMRequest ? { observeLLMRequest: options.observeLLMRequest } : {}),
+    ...(options.runLoopForSession ? { runLoopForSession: options.runLoopForSession } : {}),
     ...(options.llmCaptureFactory ? { llmCaptureFactory: options.llmCaptureFactory } : {}),
   };
 }
@@ -615,7 +484,6 @@ interface MutableRunnerState {
   retracted: boolean;
   networkStopped: boolean;
   inputSafetyReviewUnknown: boolean;
-  ptcSafetyStopped: boolean;
   approvedPartial?: LocalRuntimeTurnRunnerResult['approvedPartial'];
   retractionVariant?: LocalRuntimeTurnRunnerResult['retractionVariant'];
   retractionSource?: 'input-review' | 'output-review';
@@ -635,7 +503,6 @@ function createMutableRunnerState(input: LocalRuntimeTurnRunnerInput): MutableRu
     retracted: false,
     networkStopped: false,
     inputSafetyReviewUnknown: false,
-    ptcSafetyStopped: false,
     finalAttemptEventStart: (input.eventWriter.outcome?.eventCount ?? input.eventWriter.events.length),
     eventIdGenerator:
       input.eventIdGenerator ??
@@ -892,7 +759,6 @@ function deriveReconcile(
   state: MutableRunnerState,
   status: LocalAgentTurnRunnerResult['outcome']['status'],
 ): LocalRuntimeTurnRunnerResult['reconcile'] {
-  if (state.ptcSafetyStopped) return { kind: 'safety-reconcile', approvedContent: '' };
   if (state.retracted) {
     return {
       kind: 'output-recall',
@@ -918,15 +784,17 @@ function requireToolContext(input: LocalRuntimeTurnRunnerInput): LocalRuntimeTur
 
 function toPiRunTurnInput(
   input: LocalRuntimeTurnRunnerInput,
+  cacheWarming?: SessionCacheWarming,
 ): Omit<RunTurnInput<LocalRuntimeTurnToolContext>, 'eventWriter' | 'toolConfig'> {
   return {
-    ...toPiCoreInput(input),
+    ...toPiCoreInput(input, cacheWarming),
     ...toPiControlInput(input),
   };
 }
 
 function toPiCoreInput(
   input: LocalRuntimeTurnRunnerInput,
+  cacheWarming?: SessionCacheWarming,
 ): Omit<
   RunTurnInput<LocalRuntimeTurnToolContext>,
   | 'eventWriter'
@@ -935,6 +803,7 @@ function toPiCoreInput(
   | 'runtimeSeqGenerator'
   | 'getSteeringMessages'
   | 'shouldStopAfterSteering'
+  | 'ownerInputGeneration'
   | 'shouldStopAfterTurn'
   | 'tryBeginClose'
 > {
@@ -943,14 +812,34 @@ function toPiCoreInput(
     turnId: input.turnId,
     workspaceDir: input.workspaceDir,
     systemPrompt: input.systemPrompt,
+    ...(input.systemPromptSections ? { systemPromptSections: input.systemPromptSections } : {}),
     userMessage: input.userMessage,
     ...(input.beforeUserMessages ? { beforeUserMessages: input.beforeUserMessages } : {}),
     ...(input.startMode ? { startMode: input.startMode } : {}),
     llm: input.llm,
     ...(input.history ? { history: input.history } : {}),
+    // Ш4 context-wire: forward the composition-owned payload projection.
+    ...(input.contextWire ? { contextWire: input.contextWire } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.hooks ? { hooks: input.hooks } : {}),
-    ...(input.llmRetry ? { llmRetry: input.llmRetry } : {}),
+    // W06 cache warming: feed the warmer's economics from the settled usage
+    // of the final successful call, and compose the ONE CacheWarmer over
+    // this turn's MAIN stream path (outermost wrapper).
+    ...(input.llmRetry
+      ? cacheWarming
+        ? {
+            llmRetry: {
+              ...input.llmRetry,
+              onCallSettled: (event: LLMCallSettledEvent) => {
+                cacheWarming.onLLMCallSettled(input.sessionId, event);
+                return input.llmRetry?.onCallSettled?.(event);
+              },
+            },
+          }
+        : { llmRetry: input.llmRetry }
+      : {}),
+    ...(cacheWarming ? { wrapStreamFn: cacheWarming.wrapStreamFn(input.sessionId) } : {}),
+    ...(input.permissionMarks ? { permissionMarks: input.permissionMarks } : {}),
     ...(input.captureToolTiming !== undefined
       ? { captureToolTiming: input.captureToolTiming }
       : {}),
@@ -970,6 +859,7 @@ function toPiControlInput(
   | 'runtimeSeqGenerator'
   | 'getSteeringMessages'
   | 'shouldStopAfterSteering'
+  | 'ownerInputGeneration'
   | 'shouldStopAfterTurn'
   | 'tryBeginClose'
 > {
@@ -980,6 +870,8 @@ function toPiControlInput(
     ...(input.shouldStopAfterSteering
       ? { shouldStopAfterSteering: input.shouldStopAfterSteering }
       : {}),
+    // Reactive subagents §1.7 (wave 3): the yield-to-owner-input probe.
+    ...(input.ownerInputGeneration ? { ownerInputGeneration: input.ownerInputGeneration } : {}),
     ...(input.shouldStopAfterTurn ? { shouldStopAfterTurn: input.shouldStopAfterTurn } : {}),
     ...(input.tryBeginClose ? { tryBeginClose: input.tryBeginClose } : {}),
   };

@@ -5,6 +5,7 @@ import {
   type LocalToolContext,
 } from '../runtime/host.js';
 import type { Api, Context, Model } from '@earendil-works/pi-ai';
+import { createLogger } from '@mavis/logging';
 import type {
   PiLLMRequestFailureHook,
   PiLLMRequestObserver,
@@ -31,6 +32,9 @@ import { applyLocalSessionListOptions } from './record-list-options.js';
 import type { LocalModelThinkingSelection } from '../model-provider/model-selection.js';
 
 export { applyLocalSessionListOptions } from './record-list-options.js';
+
+/** Spec §4 registry: `mcode:runtime` is the local-runtime namespace. */
+const log = createLogger('mcode:runtime');
 
 export type LocalSessionRuntime = 'pi-agent' | 'opencode';
 export type LocalSessionType = 'root' | 'branch';
@@ -335,6 +339,13 @@ export class LocalSessionController {
       updatedAtMs,
     };
     await this.store.upsert(record);
+    log.info('session created', {
+      sessionId: record.sessionId,
+      agentName: record.agentName,
+      sessionType: record.sessionType,
+      sessionOrigin: record.sessionOrigin,
+      origin: input.origin,
+    });
     return record;
   }
 
@@ -374,6 +385,11 @@ export class LocalSessionController {
       updatedAtMs: input.updatedAtMs ?? now,
     };
     await this.store.upsert(record);
+    log.info('legacy session registered', {
+      sessionId: record.sessionId,
+      agentName: record.agentName,
+      sessionType: record.sessionType,
+    });
     return record;
   }
 
@@ -426,6 +442,7 @@ export class LocalSessionController {
     if (!session.archived && updated.archived) {
       this.evalReporterFactory?.releaseReporter(sessionId);
     }
+    log.debug('session updated', { sessionId, status: fields.status });
     return updated;
   }
 
@@ -433,6 +450,7 @@ export class LocalSessionController {
     this.assertSessionMutationAllowed('delete');
     await this.store.delete(sessionId);
     this.evalReporterFactory?.releaseReporter(sessionId);
+    log.info('session deleted', { sessionId });
   }
 
   get activeTurnTimingReader(): LocalActiveTurnTimingReader {
@@ -469,21 +487,45 @@ export class LocalSessionController {
     this.assertTurnStartAllowed();
     const session = await this.store.get(input.sessionId);
     if (!session) {
+      log.warn('turn start rejected: session not found', {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      });
       throw new Error(`Local session ${input.sessionId} not found.`);
     }
     if (session.archived) {
+      log.warn('turn start rejected: session archived', {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      });
       throw new LocalSessionResumeError(input.sessionId);
     }
 
+    const startedAtMs = this.nowMs();
+    log.debug('turn start', { sessionId: input.sessionId, turnId: input.turnId });
     this.turnTimings.begin(input.sessionId, input.turnId);
     let output: LocalRuntimeTurnOutput;
     try {
       output = await this.router.startTurn<TCtx>(session, input);
+    } catch (error) {
+      log.error('turn failed', {
+        err: error,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        durationMs: this.nowMs() - startedAtMs,
+      });
+      throw error;
     } finally {
       // Freeze immediately when the agent loop settles. Session projection and
       // outer Goal accounting may still perform async work after this point.
       this.turnTimings.markSettling(input.sessionId, input.turnId);
     }
+    log.debug('turn end', {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      retracted: output.retracted,
+      durationMs: this.nowMs() - startedAtMs,
+    });
     const latest = await this.store.get(input.sessionId);
     if (latest) {
       await this.store.upsert({

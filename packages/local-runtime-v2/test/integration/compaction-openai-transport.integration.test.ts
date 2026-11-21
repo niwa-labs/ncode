@@ -1,7 +1,9 @@
+import { createRequestFork } from '@mavis/agent-core/pi-turn-runner';
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { streamSimple, type Context, type Model } from "@earendil-works/pi-ai";
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry, not the root index.
+import { streamSimple, normalizeContext, type Context, type Model } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -73,6 +75,19 @@ describe("OpenAI compaction HTTP transport", () => {
             },
           }),
         );
+        return;
+      }
+      if (body.system) {
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        for (const event of [
+          { type: 'message_start', message: { id: 'fixture', type: 'message', role: 'assistant', model: body.model, content: [], usage: { input_tokens: 10, output_tokens: 0 } } },
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: summary } },
+          { type: 'content_block_stop', index: 0 },
+          { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } },
+          { type: 'message_stop' },
+        ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+        response.end();
         return;
       }
       response.writeHead(200, { "content-type": "text/event-stream" });
@@ -251,4 +266,102 @@ describe("OpenAI compaction HTTP transport", () => {
       }),
     ]);
   });
+  it('forks the actual prepared request through the same HTTP encoder with tools, route and an image-free exact prefix', async () => {
+    model = { ...model, input: ['text', 'image'] };
+    const context = normalizeContext({
+      systemPrompt: 'Stable system prompt for the shared request builder.',
+      tools: [{ name: 'read', description: 'Read a file', parameters: Type.Object({ path: Type.String() }) }],
+      messages: [...history(model), { role: 'user', content: [
+        { type: 'text', text: 'Current image stays in the retained suffix.' },
+        { type: 'image', mimeType: 'image/png', data: 'AA==' },
+      ], timestamp: 4 }],
+    });
+    const options = {
+      apiKey: 'synthetic-key', sessionId: 'same-cache-route', cacheRetention: 'long' as const,
+      maxTokens: 4096, headers: { 'x-test-route': 'inherited' },
+      onPayload: (payload: unknown) => payload,
+    };
+    const fork = createRequestFork(streamSimple, model, context, options);
+    await (await fork.main()).result();
+    // The fork owns its snapshot, even if the main loop mutates its arrays.
+    context.messages.length = 0;
+    await (await fork.stream(4, 'Summarize the preceding transcript; do not call tools.')).result();
+    expect(requests).toHaveLength(2);
+    const main = requests[0]!;
+    const summary = requests[1]!;
+    expect(summary.messages.slice(0, -1)).toEqual(main.messages.slice(0, -1));
+    expect(summary.tools).toEqual(main.tools);
+    expect(summary.max_completion_tokens).toBe(4096);
+    expect(summary.max_completion_tokens).toEqual(main.max_completion_tokens);
+    expect(summary.prompt_cache_key).toEqual(main.prompt_cache_key);
+    expect(JSON.stringify(summary)).not.toContain('image_url');
+    expect(JSON.stringify(main)).toContain('image_url');
+    expect(() => fork.stream(3, 'summary')).toThrow('inside a tool round');
+    expect(() => fork.stream(5, 'summary')).toThrow('image-free prefix');
+  });
+
+  it('preserves the final Anthropic payload cache breakpoint when extending the full main anchor', async () => {
+    const anthropicModel = { ...model, api: 'anthropic-messages' as const };
+    const context = normalizeContext({
+      systemPrompt: 'Stable system',
+      tools: [{ name: 'read', description: 'Read a file', parameters: Type.Object({ path: Type.String() }) }],
+      messages: [{ role: 'user', content: 'Covered history ' + 'x'.repeat(94_000), timestamp: 1 },
+        { role: 'user', content: 'Retained tail and host reminders', timestamp: 2 }],
+    });
+    const oldSignal = new AbortController();
+    const signal = new AbortController();
+    const options = { apiKey: 'synthetic-key', sessionId: 'stable-route', maxTokens: 4096, signal: oldSignal.signal };
+    const fork = createRequestFork(streamSimple, anthropicModel, context, options);
+    expect((await (await fork.main()).result()).stopReason).toBe('stop');
+    oldSignal.abort();
+    const result = await (await fork.stream(fork.prefixLength, 'Summarize only the covered history.', signal.signal, 1024)).result();
+    expect(result.stopReason, result.errorMessage).toBe('stop');
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.messages.slice(0, -1)).toEqual(requests[0]!.messages);
+    expect(requests[1]!.max_tokens).toBe(1024);
+    expect(requests[1]!.max_tokens).toBeLessThan(requests[0]!.max_tokens);
+    expect(requests[1]!.system).toEqual(requests[0]!.system);
+    expect(requests[1]!.tools).toEqual(requests[0]!.tools);
+    expect(requests[1]!.messages.at(-1).content.at(-1).cache_control).toBeUndefined();
+    expect(requests[0]!.messages.at(-1).content.at(-1).cache_control).toBeDefined();
+    expect(requests[1]!.messages.at(-2).content.at(-1).cache_control).toEqual(requests[0]!.messages.at(-1).content.at(-1).cache_control);
+  });
+
+  it('refuses a cache identity change by onPayload before sending the fork', async () => {
+    let calls = 0;
+    const fork = createRequestFork(streamSimple, model, normalizeContext({
+      systemPrompt: 'Stable system', messages: [{ role: 'user', content: 'History', timestamp: 1 }],
+    }), { apiKey: 'synthetic-key', onPayload: (payload) => {
+      calls += 1;
+      return calls === 1 ? payload : { ...payload as object, temperature: 0.9 };
+    } });
+    await (await fork.main()).result();
+    const result = await (await fork.stream(fork.prefixLength, 'Summarize.')).result();
+    expect(result.stopReason).toBe('error');
+    expect(result.errorMessage).toContain('changed provider temperature');
+    expect(requests).toHaveLength(1);
+  });
+
+  it('freezes the main payload before later keep-alive callbacks and bypasses the main observer on forks', async () => {
+    let replayOptions: Parameters<Parameters<typeof createRequestFork>[0]>[2];
+    let mainCalls = 0;
+    const main: Parameters<typeof createRequestFork>[0] = (m, c, o) => {
+      mainCalls += 1;
+      replayOptions = o;
+      return streamSimple(m, c, o);
+    };
+    const context = normalizeContext({ systemPrompt: 'Stable main system', messages: [
+      { role: 'user', content: 'Covered history', timestamp: 1 },
+    ] });
+    const fork = createRequestFork(streamSimple, model, context, { apiKey: 'synthetic-key' });
+    await (await fork.main(main)).result();
+    await (await streamSimple(model, normalizeContext({ systemPrompt: 'Later keep-alive callback', messages: [
+      { role: 'user', content: 'Probe', timestamp: 2 },
+    ] }), { ...replayOptions, maxTokens: 1 })).result();
+    const result = await (await fork.stream(fork.prefixLength, 'Summarize.')).result();
+    expect(result.stopReason, result.errorMessage).toBe('stop');
+    expect(requests[2]!.messages.slice(0, -1)).toEqual(requests[0]!.messages);
+    expect(mainCalls).toBe(1);
+  });
+
 });

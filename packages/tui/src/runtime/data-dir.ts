@@ -1,4 +1,4 @@
-import { getPrimaryDataDirPath, getProfile } from '@mavis/config';
+import { getPrimaryDataDirPath, getProfile, normalizeProfileSelector } from '@mavis/config';
 import { resolveMcodeDataEnvironment, type McodeDataEnvironment } from '../auth/environment.js';
 import { configureTuiRuntimeEnvironment } from '../cli/environment.js';
 
@@ -14,6 +14,12 @@ export interface PrepareTuiDataDirOptions {
   getBuildEnv?: () => McodeDataEnvironment;
   getDefaultDataDir?: TuiDefaultDataDirResolver;
   configureRuntimeEnvironment?: typeof configureTuiRuntimeEnvironment;
+  /**
+   * Explicit `--profile` selector. When set — including the string 'default' —
+   * it alone picks the default data directory and the MINIMAX_PROFILE
+   * environment is not read (flag beats env). Absent keeps the env behavior.
+   */
+  profile?: string;
 }
 
 export function resolveDefaultTuiDataDir(
@@ -52,8 +58,12 @@ export function resolveTuiDataDir(
 
 export function prepareTuiDataDir(options: PrepareTuiDataDirOptions = {}): Promise<string> {
   const buildEnv = (options.getBuildEnv ?? resolveMcodeDataEnvironment)();
+  const profileSelector = options.profile;
   const dataDir = resolveTuiDataDir(
-    options.getDefaultDataDir ?? (() => resolveDefaultTuiDataDir(buildEnv)),
+    options.getDefaultDataDir ??
+      (profileSelector !== undefined
+        ? () => getPrimaryDataDirPath(undefined, normalizeProfileSelector(profileSelector))
+        : () => resolveDefaultTuiDataDir(buildEnv)),
     options.environment ?? process.env,
   );
   (options.configureRuntimeEnvironment ?? configureTuiRuntimeEnvironment)({

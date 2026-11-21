@@ -1,7 +1,8 @@
-import { DEFAULT_THINKING_MODEL_IDS } from '@earendil-works/pi-ai';
+import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all';
 import { ThinkingLevel, ThinkingMode } from '@mavis/protocol';
 import { describe, expect, it } from 'vitest';
 
+import { isAdaptiveDefaultThinkingModelId } from './adaptive-thinking-models.js';
 import {
   capabilitiesFromModelConfig,
   modelLimitsFromConfig,
@@ -12,6 +13,14 @@ import {
 } from './model-ref.js';
 import { OPENPLATFORM_THINKING_VARIANTS_CAPABILITY } from './openplatform-thinking.js';
 import type { LocalModelConfig } from '../contracts.js';
+
+/**
+ * W06 (PORT-PI-1.3, registry PR-03 №12/№37): the family is classified by the
+ * pinned catalog metadata. These ids existed in the 0.79-era hardcoded list
+ * AND carry `compat.forceAdaptiveThinking` at the pin — the compatibility
+ * core of the old patch.
+ */
+const LEGACY_FAMILY_IDS_AT_PIN = ['claude-opus-5', 'claude-sonnet-5', 'claude-fable-5'] as const;
 
 describe('modelRefForModel', () => {
   it('resolves managed selection from configured options and rejects explicit conflicts', () => {
@@ -429,7 +438,7 @@ describe('BYOK Think Effort selection', () => {
     },
   );
 
-  it.each([`${DEFAULT_THINKING_MODEL_IDS[0]}[1m]`, ...DEFAULT_THINKING_MODEL_IDS.slice(1)])(
+  it.each([`${LEGACY_FAMILY_IDS_AT_PIN[0]}[1m]`, ...LEGACY_FAMILY_IDS_AT_PIN.slice(1)])(
     'omits thinking for default-thinking model %s while preserving effort',
     (modelId) => {
       const protocol = resolveByokThinkingProtocol('anthropic-messages', 'medium', modelId);
@@ -447,7 +456,7 @@ describe('BYOK Think Effort selection', () => {
       resolveByokThinkingProtocol(
         'anthropic-messages',
         'medium',
-        `${DEFAULT_THINKING_MODEL_IDS[0]}[foo]`,
+        `${LEGACY_FAMILY_IDS_AT_PIN[0]}[foo]`,
       )?.requestPatch,
     ).toMatchObject({ thinking: { type: 'adaptive' } });
   });
@@ -651,8 +660,7 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
-      default_request_body_bytes: true,
+      max_request_body_bytes: 67_108_864,
       max_attachments_count: 4,
       thinking_mode: ThinkingMode.FORCED_ON,
     });
@@ -702,7 +710,7 @@ describe('model capability helpers', () => {
       support_files_api: false,
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
       max_attachments_count: 4,
     });
     expect(
@@ -712,7 +720,7 @@ describe('model capability helpers', () => {
     ).toMatchObject({
       support_video: true,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
     });
   });
 
@@ -731,7 +739,7 @@ describe('model capability helpers', () => {
       ).toMatchObject({
         max_image_bytes_inline: 10_485_760,
         max_video_bytes_inline: 52_428_800,
-        max_request_body_bytes: 18_874_368,
+        max_request_body_bytes: 67_108_864,
         max_attachments_count: 4,
       });
     },
@@ -830,7 +838,7 @@ describe('model capability helpers', () => {
     expect(capabilities).toMatchObject({
       max_image_bytes_inline: 10_485_760,
       max_video_bytes_inline: 52_428_800,
-      max_request_body_bytes: 18_874_368,
+      max_request_body_bytes: 67_108_864,
       max_attachments_count: 4,
     });
   });
@@ -846,3 +854,58 @@ function modelConfigWithThinking(
   Object.assign(thinkingConfig, patch);
   return { ...rest, thinking_config: thinkingConfig };
 }
+
+describe('isAdaptiveDefaultThinkingModelId (pin catalog metadata)', () => {
+  it('classifies exactly the pinned anthropic catalog entries with forceAdaptiveThinking', () => {
+    const catalog = getBuiltinModels('anthropic');
+    expect(catalog.length).toBeGreaterThan(0);
+    for (const model of catalog) {
+      expect(isAdaptiveDefaultThinkingModelId(model.id)).toBe(
+        model.compat?.forceAdaptiveThinking === true,
+      );
+    }
+  });
+
+  it('keeps the 0.79 family core that survives at the pin', () => {
+    for (const modelId of LEGACY_FAMILY_IDS_AT_PIN) {
+      expect(isAdaptiveDefaultThinkingModelId(modelId)).toBe(true);
+      expect(isAdaptiveDefaultThinkingModelId(`${modelId}[1m]`)).toBe(true);
+      expect(isAdaptiveDefaultThinkingModelId(` ${modelId.toUpperCase()} `)).toBe(true);
+    }
+  });
+
+  it('picks up catalog-only family members the 0.79 list never had', () => {
+    // Data-driven (registry PR-03 №37 "adapt"): classification follows pin
+    // metadata, so these adaptive-thinking Claude models match without a
+    // product-side list entry.
+    for (const modelId of [
+      'claude-opus-4-6',
+      'claude-opus-4-7',
+      'claude-opus-4-8',
+      'claude-sonnet-4-6',
+      'claude-haiku-5-5',
+      'claude-fable-5-1',
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+    ]) {
+      expect(isAdaptiveDefaultThinkingModelId(modelId)).toBe(true);
+    }
+  });
+
+  it('follows the pin for models removed from the catalog', () => {
+    // claude-mythos-5 / claude-mythos-preview were in the 0.79-era list but
+    // carry no catalog entry at the pin, so they take the generic adaptive
+    // path (documented behavior change of the metadata-based matcher).
+    expect(isAdaptiveDefaultThinkingModelId('claude-mythos-5')).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId('claude-mythos-preview')).toBe(false);
+  });
+
+  it('rejects non-family and non-string values', () => {
+    expect(isAdaptiveDefaultThinkingModelId('claude-haiku-4-5')).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId('gpt-5.6-sol')).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId('MiniMax-M3')).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId('')).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId(undefined)).toBe(false);
+    expect(isAdaptiveDefaultThinkingModelId(42)).toBe(false);
+  });
+});

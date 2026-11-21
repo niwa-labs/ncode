@@ -12,8 +12,6 @@ import type { AskUserToolInput } from '@mavis/shared/questionnaire';
 import type { BashOperations } from '@earendil-works/pi-coding-agent';
 import type { TSchema } from '@sinclair/typebox';
 
-import type { LocalPermissionExecutionPlan } from './permission-execution.js';
-
 import type {
   LocalBashToolInput,
   LocalTaskToolInput,
@@ -25,44 +23,14 @@ import type {
 } from './builtin-defs.js';
 import type { WebSearchInput } from '../shared/web-search.js';
 
-/**
- * Plugin subagent definition (official or LOCAL package) from the Turn
- * capability lease. Selectors use the Custom Agent encoding: `undefined`
- * inherits, `[]` explicitly disables.
- */
-export interface LocalPluginAgentDefinition {
-  /** Task target `<plugin>:<agent>`. */
-  readonly scopedName: string;
-  readonly pluginName: string;
-  readonly agentName: string;
-  readonly sourceFormat: 'minimax' | '\u0063\u006c\u0061\u0075\u0064\u0065';
-  /** Package origin; absent only for producers that predate official Plugin subagents. */
-  readonly origin?: 'official' | 'local';
-  readonly packageDigest: string;
-  readonly pluginRoot: string;
-  readonly description: string;
-  readonly displayName?: string;
-  readonly systemPrompt: string;
-  readonly model?: string;
-  readonly effort?: string;
-  readonly tools?: readonly string[];
-  readonly disallowedTools?: readonly string[];
-  readonly mcpServers?: readonly string[];
-  readonly skills?: readonly string[];
-  readonly extensionSkills?: readonly string[];
-  /** MCP server names this Plugin package declares, whether or not they published tools. */
-  readonly declaredMcpServers?: readonly string[];
-  readonly contextWindow?: number;
-  readonly maxOutputTokens?: number;
-}
-
-export interface LocalPluginAgentRoster {
-  list(): readonly LocalPluginAgentDefinition[];
-  /** Case-insensitive `<plugin>:<agent>` lookup. */
-  resolve(scopedName: string): LocalPluginAgentDefinition | undefined;
-}
-
 export interface LocalRuntimeToolContext extends ToolExecutionContext {
+  /**
+   * W4 (§4.4/R5): per-session tool-env snapshot from the daemon (window
+   * attach). Bash overlays `env` onto the spawn environment and `cwd` onto
+   * the working directory BEFORE the sanitizer — daemon-reserved names are
+   * stripped by the daemon at attach time and again at spawn.
+   */
+  readonly toolEnv?: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> };
   /** Frozen from the final Turn catalog; false keeps ordinary Bash synchronous. */
   readonly allowBashAutoPromotion?: boolean;
   /**
@@ -108,10 +76,11 @@ export interface LocalRuntimeToolContext extends ToolExecutionContext {
    */
   readonly loadedSkills?: Set<string>;
   /**
-   * Plugin subagents (official or LOCAL) frozen with this Turn's capability lease. Absent
-   * means no Plugin Agent target is admissible for `task`.
+   * Plugin-declared subagents available for task delegation this turn.
+   * Absent when no enabled local plugin declares agents or the surface has
+   * no task tool.
    */
-  readonly pluginAgents?: LocalPluginAgentRoster;
+  readonly pluginAgents?: PluginAgentsRegistry;
   /** Parent-turn Plugin Hook generation inherited by a user-visible child Agent. */
   readonly pluginSubagentLifecycle?: {
     start(
@@ -127,6 +96,34 @@ export interface LocalRuntimeToolContext extends ToolExecutionContext {
     ): Promise<string | undefined>;
     cancel(childSessionId: string): void;
   };
+}
+
+/** Plugin-declared subagent definition carried through turn capabilities. */
+export interface PluginAgentRuntimeDefinition {
+  readonly pluginName: string;
+  /** Plugin-scoped delegate name: "<plugin>:<agent>". */
+  readonly name: string;
+  readonly agentName: string;
+  readonly description: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly pluginRoot: string;
+  readonly packageDigest: string;
+  readonly sourceKind: 'local';
+}
+
+/** Immutable lookup of the turn's plugin-declared subagents. */
+export interface PluginAgentsRegistry {
+  list(): readonly PluginAgentRuntimeDefinition[];
+  /** Exact scoped-name lookup ("<plugin>:<agent>", normalization-insensitive). */
+  resolve(name: string): PluginAgentRuntimeDefinition | undefined;
+  /** Bare-name lookup; defined only when exactly one declaration matches. */
+  resolveByBareName(name: string): PluginAgentRuntimeDefinition | undefined;
 }
 
 export interface LocalBrowserAsset {
@@ -239,7 +236,6 @@ export type LocalBrowserToolAction =
   | 'click'
   | 'click_and_wait_for_navigation'
   | 'double_click'
-  | 'triple_click'
   | 'drag'
   | 'fill'
   | 'type'
@@ -319,6 +315,47 @@ export interface LocalTaskBackgroundStartResult {
   errorMessage?: string;
 }
 
+/**
+ * Why a foreground task wait ended as `backgrounded` (the wait outcome, NOT a
+ * child terminal status): the owner's accepted message released the wait
+ * (`owner_input`), the caller asked for immediate background execution
+ * (`run_in_background`), or a control-plane release decided it.
+ */
+export type LocalTaskBackgroundReason =
+  | 'owner_input'
+  | 'run_in_background'
+  | 'manual_background'
+  | 'timer';
+
+/**
+ * The single outcome of the `task` tool's foreground wait (verdict 09 §1.5
+ * item 6). `LocalTaskRunResult` keeps its exact shape: `backgrounded` is a
+ * result OF THE WAIT, never a terminal status of the child — the child keeps
+ * running under task-owned execution and its terminal arrives through the
+ * background delivery.
+ */
+export type LocalTaskForegroundWaitResult =
+  | {
+      /** The child reached terminal while the wait was foreground: inline result. */
+      readonly kind: 'completed';
+      readonly result: LocalTaskRunResult;
+    }
+  | {
+      /** The wait was released; the tool returns the background note instead. */
+      readonly kind: 'backgrounded';
+      readonly taskId: string;
+      readonly reason: LocalTaskBackgroundReason;
+      readonly subSessionId?: string;
+      readonly subTurnId?: string;
+      /**
+       * Actual task-row status when the wait released. A `queued`/`running`
+       * task keeps running; a terminal status means the release won the race
+       * against an already-finished child and only the completion notice is
+       * pending (the note must not claim "still running").
+       */
+      readonly taskStatus: string;
+    };
+
 export interface LocalBashBackgroundStartResult {
   status: 'started' | 'failed';
   taskId?: string;
@@ -356,8 +393,6 @@ export interface LocalSandboxBashOperationsFactory {
   create(input: {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
-    /** Permission decision snapshot carried across the execution boundary. */
-    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     /**
      * Runs once the invocation is admitted and wrapped, immediately before the
      * native spawn. Background callers persist `running`/`startedAt` here, so
@@ -371,6 +406,14 @@ export interface LocalBackgroundBashExecutorResult {
   text: string;
   details?: Record<string, unknown>;
   isError?: boolean;
+  /**
+   * W04 tool-contract funnel: the pin's bash result carries the machine
+   * channel (`BashToolOutput` incl. `exit_code`) and tool-owned usage —
+   * they must survive the desktop/local-runtime bash boundary like they do
+   * for read/write/edit.
+   */
+  structuredContent?: ToolResult['structuredContent'];
+  usage?: ToolResult['usage'];
 }
 
 export interface LocalBackgroundBashExecutor {
@@ -378,7 +421,6 @@ export interface LocalBackgroundBashExecutor {
     identity: LocalSandboxInvocationIdentity;
     workspaceRoot: string;
     command: string;
-    permissionExecutionPlan?: LocalPermissionExecutionPlan;
     timeout?: number;
     signal: AbortSignal;
     onPreflightComplete?: () => void | Promise<void>;
@@ -420,6 +462,19 @@ export interface LocalTaskAdapter {
     input: LocalTaskToolInput,
     signal?: AbortSignal,
   ): Promise<LocalTaskBackgroundStartResult>;
+  /**
+   * Reactive foreground (verdict 09 §1.5): the child execution is separated
+   * from the tool wait, so an accepted owner message can release the wait and
+   * move the admitted child to the background without cancelling it. Present
+   * only on runtimes that wired the native task-wait binding; when absent the
+   * tool falls back to {@link runForeground} and the wait always completes
+   * inline (the JSONL mode keeps exactly today's behaviour).
+   */
+  runReactiveForeground?(
+    ctx: LocalRuntimeToolContext,
+    input: LocalTaskToolInput,
+    signal?: AbortSignal,
+  ): Promise<LocalTaskForegroundWaitResult>;
 }
 
 /**
@@ -487,6 +542,13 @@ export interface LocalTaskOutputReadResult extends TaskOutputReadResult {
   /** Task facts from the same post-wait snapshot as status. */
   task?: BackgroundTask;
   timedOut?: boolean;
+  /**
+   * The bounded wait released early because a trusted owner input was accepted
+   * for the reading conversation mid-wait (the owner-input generation probe of
+   * the native task-wait binding). The task keeps running; its completion
+   * notice still arrives automatically. Absent on a normal wait or timeout.
+   */
+  releasedFromOwnerInput?: true;
 }
 
 export interface LocalTaskControlAdapter {
@@ -576,12 +638,7 @@ export interface LocalMemoryAdapter {
     ctx: LocalRuntimeToolContext,
     input: LocalMemoryToolInput,
     signal?: AbortSignal,
-  ): Promise<{
-    text: string;
-    details?: Record<string, unknown>;
-    /** Structured copy of the same result for PTC; never shown to the model. */
-    data?: Record<string, unknown>;
-  }>;
+  ): Promise<{ text: string; details?: Record<string, unknown> }>;
 }
 
 export interface LocalMavisAgentDetail {

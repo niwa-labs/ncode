@@ -1,3 +1,4 @@
+import { getCurrentSystemPrompt } from '@earendil-works/pi-ai';
 /**
  * count_tokens request-body builder + CJK-aware char fallback for
  * {@link RemoteTokenCounter}.
@@ -17,7 +18,7 @@
  * absorbed by the manager's `safetyMarginTokens` / `reserveTokens` headroom.
  */
 
-import { convertToLlm } from '@earendil-works/pi-coding-agent/messages';
+import { convertToLlm } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model, Tool } from '@earendil-works/pi-ai';
 
@@ -151,7 +152,8 @@ export function buildCountTokensRequestBody(
   tools?: Tool[],
 ): CountTokensRequestBody {
   const llm = convertToLlm(messages);
-  const turns = flattenToAlternatingText(llm);
+  const effectiveSystemPrompt = systemPrompt ?? getCurrentSystemPrompt(llm);
+  const turns = flattenToAlternatingText(llm.filter((message) => message.role !== 'system'));
   // Normalize rather than filter: real LLM requests include all registered tools, even with empty
   // descriptions or missing schemas. Silently dropping them would underestimate the payload. Only
   // discard invalid entries without a name, and fill missing fields with valid defaults.
@@ -168,7 +170,7 @@ export function buildCountTokensRequestBody(
     stream: false,
     temperature: COUNT_TOKENS_TEMPERATURE,
     messages: turns,
-    ...(systemPrompt?.trim() ? { system: [{ type: 'text', text: systemPrompt }] } : {}),
+    ...(effectiveSystemPrompt?.trim() ? { system: [{ type: 'text', text: effectiveSystemPrompt }] } : {}),
     ...(countTools && countTools.length > 0 ? { tools: countTools } : {}),
   };
 }

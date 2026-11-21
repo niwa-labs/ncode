@@ -121,6 +121,7 @@ export async function routeLocalPermissionApi(
           ruleContents: decision.ruleContents ?? buildLocalPermissionRuleContents(toolName, input),
           persistWholeToolRuleOnReply: true,
           reason: decision.reason,
+          ...(decision.bypassImmune ? { bypassImmune: true } : {}),
         });
         return json({
           behavior: 'ask',
@@ -155,7 +156,10 @@ export async function routeLocalPermissionApi(
     const decision = readPermissionDecision(body);
     if (!decision) {
       return json(
-        { error: 'Invalid permission decision; expected allowAlways, allowOnce, or deny.' },
+        {
+          error:
+            'Invalid permission decision; expected allowAlways, allowOnce, deny, or denyAlways.',
+        },
         { status: 400 },
       );
     }
@@ -196,6 +200,10 @@ export async function beforeLocalToolCall(
     input: toolArgs,
     agentName: session.agentName,
     sessionId: session.sessionId,
+    // The delete guard follows the Session, not the config: only the human's
+    // main window may relax it. A task Session runs unattended, so it keeps
+    // the recoverable-delete net no matter what the main window is set to.
+    sessionScope: session.sessionKind === 'task' ? 'subagent' : 'main',
     permissionModeOverride: permissionMode,
   });
   const executionPlan = readDecisionExecutionPlan(decision, toolArgs);
@@ -246,6 +254,7 @@ export async function beforeLocalToolCall(
       ...(decision.ruleMatchers ? { ruleMatchers: decision.ruleMatchers } : {}),
       persistWholeToolRuleOnReply: true,
       reason: decision.reason,
+      ...(decision.bypassImmune ? { bypassImmune: true } : {}),
     },
     signal,
   ).promise;

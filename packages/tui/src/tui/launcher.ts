@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { ProcessTerminal, setKeybindings, type Terminal, type TuiMode } from './engine/public.js';
+import { captureTuiStderr, type TuiStderrCapture } from './stderr-capture.js';
 import { detectProcessTerminalCapabilities } from './platform/terminal-capabilities.js';
 import {
   installTuiProcessGuards,
@@ -20,6 +21,7 @@ import {
   writeTuiKeybindingOverrides,
 } from '../host/tui-keybindings.js';
 import { createTuiApp, type CreateTuiAppOptions, type TuiApp } from './app.js';
+import { createTuiDaemonConnectionSurface } from './daemon-connection-surface.js';
 import type { CreatedTuiRuntime, CreateTuiRuntimeDependencies } from '../runtime/lifecycle.js';
 import { parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
@@ -56,7 +58,13 @@ import {
 import { resolveMcodeStartupUpdateNotice } from '../update/startup-notice.js';
 import type { McodeUpdateApplication } from '../update/application.js';
 import { tuiErrorDiagnostic } from '../user-facing-failure.js';
-import { getConfig, resetConfig, writeTuiStatusLineSetting, type MavisRegion } from '@mavis/config';
+import {
+  getConfig,
+  isValidProfileName,
+  resetConfig,
+  writeTuiStatusLineSetting,
+  type MavisRegion,
+} from '@mavis/config';
 import { markLoginRestartHandoff } from './login-restart-handoff.js';
 import {
   readTuiModeSetting,
@@ -74,6 +82,7 @@ import { startTuiStartupStatus, type TuiStartupStatus } from './startup-status.j
 import type { McodeContextMode } from '@mavis/protocol/local';
 
 const MINIMAX_CODE_EXIT_SLOGAN = 'Intelligence with everyone, bye~';
+const PROFILE_OPTION = '--profile';
 export interface LaunchTuiOptions {
   version: string;
   initialPrompt?: string;
@@ -91,9 +100,11 @@ export interface LaunchTuiOptions {
   externalEditorCommand?: string;
   resumeDraftAfterLogin?: boolean;
   contextMode?: McodeContextMode;
-  /** `--ptc`: Programmatic Tool Calling for new Sessions in this process only. */
-  ptc?: boolean;
   lane?: string;
+  /** Explicit `--profile <name>`; travels with the request into the daemon targets. */
+  profile?: string;
+  /** Explicit `--no-daemon`: the runtime is hosted in this process. */
+  noDaemon?: boolean;
   systemPromptOverrides?: SystemPromptOverrides;
 }
 
@@ -115,10 +126,11 @@ interface RuntimeLifecycleModule {
       workspaceDir: string;
       version: string;
       surface: 'tui';
-      ptcLaunchOverride?: boolean;
       observability: TuiObservability;
       contextMode?: McodeContextMode;
       lane?: string;
+      profile?: string;
+      noDaemon?: boolean;
       systemPromptOverrides?: SystemPromptOverrides;
     },
     dependencies?: Pick<CreateTuiRuntimeDependencies, 'sharedAuthCore'>,
@@ -139,6 +151,8 @@ export interface LaunchTuiDependencies {
   ) => Promise<Pick<McodeUpdateApplication, 'inspect' | 'apply'>>;
   writeExitMessage?: (message: string) => void;
   prepareDataDir?: typeof prepareTuiDataDir;
+  /** Installs the terminal-ownership stderr capture; tests override. */
+  captureStderr?: typeof captureTuiStderr;
   restartProcess?: (
     sessionId?: string,
     region?: MavisRegion,
@@ -186,13 +200,16 @@ export async function launchTui(
   const homeDirectory = options.homeDir ?? homedir();
   const workspaceDir = options.workspaceDir ?? process.cwd();
   const dataDir = options.dataDir ?? (await (dependencies.prepareDataDir ?? prepareTuiDataDir)());
+  // The TUI owns the terminal from here on: raw stderr writes (log lines) would
+  // splice painted frames and freeze transient rows into native scrollback —
+  // the doubled-welcome class. Captured to the observability log until the UI
+  // is released in the shutdown path below.
+  const stderrCapture: TuiStderrCapture = (dependencies.captureStderr ?? captureTuiStderr)(dataDir);
   const baseTerminal = options.terminal ?? new ProcessTerminal();
   const tuiMode = options.tuiMode ?? (dependencies.readTuiMode ?? readTuiModeSetting)(dataDir);
   const theme = options.theme ?? (dependencies.readTuiTheme ?? readTuiThemeSetting)(dataDir);
   const terminalCapabilities = detectProcessTerminalCapabilities();
-  const authEnvironment = resolveMcodeAuthEnvironment({
-    runtimeRegion: process.env.MAVIS_REGION === 'en' ? 'en' : 'cn',
-  });
+  const authEnvironment = resolveMcodeAuthEnvironment();
   const bedrockLane = resolveTuiManagedBackendLane(options.lane, authEnvironment.buildEnv);
   const routingContext = bedrockLane ? { bedrockLane } : undefined;
   const sharedAuthCore: MCodeOAuthCore = (
@@ -359,10 +376,11 @@ export async function launchTui(
           workspaceDir,
           version: options.version,
           surface: 'tui',
-          ...(options.ptc ? { ptcLaunchOverride: true } : {}),
           observability,
           ...(options.contextMode ? { contextMode: options.contextMode } : {}),
           ...(bedrockLane ? { lane: bedrockLane } : {}),
+          ...(options.profile ? { profile: options.profile } : {}),
+          ...(options.noDaemon ? { noDaemon: true } : {}),
           ...(options.systemPromptOverrides
             ? { systemPromptOverrides: options.systemPromptOverrides }
             : {}),
@@ -401,6 +419,10 @@ export async function launchTui(
       setKeybindings(keybindings.manager);
       app = (dependencies.createApp ?? createTuiApp)({
         runtime: createDeferredTuiRuntime(initializingRuntime.then((created) => created.adapter)),
+        // W4 (§4.6): the daemon connection surface (server mode only — the
+        // lifecycle leaves `connection` undefined on the off path, so the
+        // surface adopts nothing and the status line stays silent).
+        daemonConnection: createTuiDaemonConnectionSurface(initializingRuntime),
         dataDir,
         version: options.version,
         workspaceDir,
@@ -504,7 +526,9 @@ export async function launchTui(
       startupStatus = startTuiStartupStatus((status) => app?.setStartupStatus?.(status));
       removeProcessGuards = (dependencies.installProcessGuards ?? installTuiProcessGuards)({
         process,
-        stop: () => app?.stop() ?? Promise.resolve(),
+        // Process/terminal loss detaches a daemon window. Keyboard Stop
+        // still goes through the app's explicit user-stop path.
+        stop: () => app?.stop({ abortActiveTurn: runtime?.connection === undefined }) ?? Promise.resolve(),
         report: (error) => {
           try {
             process.stderr.write(
@@ -614,6 +638,9 @@ export async function launchTui(
     });
     throw error;
   } finally {
+    // Release the terminal first: from here the UI is going away, and any
+    // shutdown-time log lines are legitimate plain terminal output again.
+    stderrCapture.restore();
     incidentReporter.setPhase('shutdown');
     incidentReporter.breadcrumb('cli.shutdown.started');
     stopStartupStatus(startupStatus);
@@ -885,17 +912,59 @@ export function resolveRestartArguments(
   const userArgs = argv.slice(nodeExecutable ? 2 : 1);
   const startupEnvironment = resolveTuiStartupEnvironmentOption(userArgs, true);
   const environmentArgs = startupEnvironment ? ['--env', startupEnvironment] : [];
+  const profileArgs = resolveExplicitProfileArgs(userArgs);
   const resumeArgs = sessionId ? ['--session', sessionId] : [];
   const systemPromptArgs = systemPromptRestartArguments(userArgs);
   const promptArgs = initialPrompt ? [initialPrompt] : [];
   if (!nodeExecutable) {
-    return [...environmentArgs, ...systemPromptArgs, ...resumeArgs, ...promptArgs];
+    return [...profileArgs, ...environmentArgs, ...systemPromptArgs, ...resumeArgs, ...promptArgs];
   }
   const entryFile = argv[1];
   if (!entryFile || !isExistingFile(entryFile)) {
     throw new Error('Unable to restart MCode because its Node.js entry file is unavailable.');
   }
-  return [entryFile, ...environmentArgs, ...systemPromptArgs, ...resumeArgs, ...promptArgs];
+  return [entryFile, ...profileArgs, ...environmentArgs, ...systemPromptArgs, ...resumeArgs, ...promptArgs];
+}
+
+/**
+ * Re-emit an explicitly requested profile for the restarted process.
+ *
+ * The restart rebuilds argv from scratch, so without this a user who ran
+ * `mcode --profile work` would be dropped back into the default profile after
+ * signing in — pointed at the wrong account's credentials.
+ *
+ * Only an explicit flag is replayed. A profile that came from the environment or
+ * from git-branch auto-detection belongs to the old generation, and identity
+ * must travel through args rather than be inherited (see the runtime boundary
+ * rules in `@mavis/shared/runtime-boundary-env`). An unusable value is dropped
+ * instead of forwarded: validation already failed the run before a restart could
+ * happen, so re-emitting it would only produce a second, harder-to-read error.
+ *
+ * Both accepted spellings are normalised to `--profile <name>`, mirroring how
+ * `environmentArgs` is rebuilt rather than copied.
+ */
+function resolveExplicitProfileArgs(argv: readonly string[]): string[] {
+  let previousWasFlag = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === undefined) continue;
+    if (argument === '--') break;
+    if (argument === PROFILE_OPTION) {
+      const value = argv[index + 1];
+      // `mcode --profile --model x`: a following flag is not a profile name.
+      return isValidProfileName(value) ? [PROFILE_OPTION, value] : [];
+    }
+    if (argument.startsWith(`${PROFILE_OPTION}=`)) {
+      const value = argument.slice(PROFILE_OPTION.length + 1);
+      return isValidProfileName(value) ? [PROFILE_OPTION, value] : [];
+    }
+    // The prompt is the first bare token that does not belong to a preceding
+    // option, so `--env test --profile work` still resolves the profile. A
+    // following `--` already ended the option scan above.
+    if (!argument.startsWith('-') && !previousWasFlag) break;
+    previousWasFlag = argument.startsWith('-');
+  }
+  return [];
 }
 
 function isNodeExecutable(executable: string): boolean {

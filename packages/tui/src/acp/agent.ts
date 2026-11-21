@@ -1,3 +1,6 @@
+import { subscriptionWaitText } from '@mavis/shared/llm-retry-event';
+import { compactionProgressText } from '@mavis/shared/global-events';
+import { createLogger } from '@mavis/logging';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, resolve } from 'node:path';
 
@@ -5,19 +8,21 @@ import * as acp from '@agentclientprotocol/sdk';
 
 import { executeTuiInteractiveTurn } from '../application/interactive-turn-delivery.js';
 import { TuiLoginRequiredError, requireTuiAgentAccess } from '../application/login-gate.js';
-import type { TuiPermissionMode } from '../application/permission-mode.js';
 import { TuiRunCoordinator } from '../application/run-coordinator.js';
 import type { TuiRunResult } from '../application/run-coordinator.js';
 import { isTuiInternalSubagentSession } from '../runtime/delegation.js';
-import type {
-  TuiPlanClientIntent,
-  TuiRuntimeEvent,
-  TuiModel,
-  TuiSession,
-  TuiSessionMcpServer,
+import {
+  TuiSessionPermissionModeUnsupportedError,
+  type TuiPlanClientIntent,
+  type TuiRuntimeEvent,
+  type TuiModel,
+  type TuiSession,
+  type TuiSessionMcpServer,
+  type TuiSessionPermissionMode,
+  type TuiSessionPermissionModeOrigin,
 } from '../runtime/port.js';
 import { buildTuiMessageParts } from '../runtime/stream-events.js';
-import type { TuiMessage, TuiStreamEvent } from '../runtime/stream-events.js';
+import type { TuiMessage, TuiStreamEvent, TuiToolCall } from '../runtime/stream-events.js';
 import type { TuiAcpRuntime } from './runtime.js';
 import { availableSkillCommands, executeTuiAcpCommand, TUI_ACP_AVAILABLE_COMMANDS } from './commands.js';
 import {
@@ -38,19 +43,30 @@ import {
   tuiAcpExtensionCapabilities,
 } from './extensions.js';
 import { runTuiAcpInteractions, type TuiAcpRuntimeProjection } from './interactions.js';
+import {
+  LegacyHistoryUnsafeRootError,
+  readLegacySessionHistoryFromDataDir,
+} from './legacy-history.js';
 import { modelSupportsVariant } from './model-selection.js';
 import { TuiAcpPromptContinuation } from './prompt-continuation.js';
-import {
-  parseTuiAcpPrompt,
-  readTuiAcpHistoryImages,
-  writeTuiAcpPromptAttachments,
-  type TuiAcpPromptAttachments,
-} from './prompt-content.js';
+import { summarizeSessionHealth } from './session-history-health.js';
 import { TuiAcpUpdateProjector } from './updates.js';
 
 const AUTH_METHOD_ID = 'minimax-code-login';
+/** `_meta` key carrying the per-session permission mode (spec §2.2). */
+const ACP_PERMISSION_MODE_META_KEY = 'minimax-code/permissionMode';
+const ACP_PERMISSION_MODE_VALUES: readonly TuiSessionPermissionMode[] = [
+  'default',
+  'auto',
+  'bypassPermissions',
+];
+const acpLog = createLogger('mcode:acp');
 const AVAILABLE_COMMANDS_RETRY_DELAY_MS = 100;
 const ACP_HISTORY_PAGE_SIZE = 100;
+const ACP_HISTORY_MAX_PAGE_SIZE = 500;
+const ACP_SESSION_HISTORY_SNAPSHOT_LIMIT = 4;
+const ACP_SESSION_HISTORY_METHOD = 'session/history';
+const ACP_SESSION_HISTORY_NOT_FOUND_CODE = -32002;
 const MAX_DETACHED_LIFECYCLES_PER_SESSION = 2;
 const MAX_DETACHED_LIFECYCLES_TOTAL = 32;
 const MAX_ADMITTED_LIFECYCLES_PER_SESSION = 64;
@@ -64,12 +80,99 @@ interface AcpSession {
   coordinator: TuiRunCoordinator;
   readonly attachmentController: AbortController;
   pendingModeIntent?: TuiPlanClientIntent;
+  subscriptionWaitCallIds?: Set<string>;
   activePrompt?: {
     readonly controller: AbortController;
     readonly continuation: TuiAcpPromptContinuation;
     readonly targetModeId: typeof ACP_MODE_DEFAULT | typeof ACP_MODE_PLAN;
     steerableTurnId?: string;
+    cancellation?: Promise<boolean>;
   };
+}
+
+/**
+ * READ-ONLY Session history entry for the `session/history` extension method.
+ * Entries carry the durable history as stored; `custom` covers system markers
+ * (kinds such as `compaction_start`, `review_result`, guard reminders).
+ *
+ * Assistant entries keep the tool round-trip reconstructable: `content` holds
+ * `[{type:'thinking', thinking}, {type:'toolCall', id, name, arguments}]`
+ * parts, and every tool call that already carries its output/error yields a
+ * separate `{role:'toolResult', toolCallId, toolName, text, isError}` entry
+ * (canonical toolResult records map one-to-one).
+ */
+export interface TuiAcpHistoryEntry {
+  readonly role: 'user' | 'assistant' | 'toolResult' | 'custom' | 'compactionSummary';
+  readonly text?: string;
+  /** Structured content parts (thinking / toolCall) or custom payloads. */
+  readonly content?: unknown;
+  readonly toolName?: string;
+  readonly toolCallId?: string;
+  /** toolResult entries only: true when the tool reported an error. */
+  readonly isError?: boolean;
+  readonly timestamp?: number;
+  readonly customType?: string;
+}
+
+/**
+ * READ-ONLY context-health summary of the WHOLE Session (not just the page),
+ * attached as `sessionMeta.health` to every `session/history` response. See
+ * `session-history-health.ts` for the exact counting semantics.
+ */
+export interface TuiAcpSessionHealth {
+  readonly schemaVersion: 1;
+  /** 'durable' = full counters; 'legacy' = old messages.jsonl, per-Turn fields null. */
+  readonly source: 'durable' | 'legacy';
+  /** The Session is currently running a Turn (per `session.status`). */
+  readonly running: boolean;
+  readonly turns: number | null; // distinct turnIds; null when the source has none
+  readonly lastTurnId?: string; // turnId of the newest record
+  readonly llmCalls: number; // committed assistant records with usage
+  readonly compactions: { readonly done: number; readonly failed: number; readonly open: number };
+  readonly injections: {
+    readonly steers: number | null; // user records INSIDE a Turn after the first
+    readonly reminders: Readonly<Record<string, number>>; // hidden markers by customType
+  };
+  readonly resumedTurns: number | null; // Turns opened WITHOUT a user record
+  /** The same counters scoped to the newest Turn — "what happened in this run". */
+  readonly lastTurn?: {
+    readonly turnId: string;
+    readonly llmCalls: number;
+    readonly compactions: number;
+    readonly steers: number;
+    readonly reminders: Readonly<Record<string, number>>;
+    readonly resumed: boolean;
+  };
+}
+
+export interface TuiAcpHistorySessionMeta {
+  readonly sessionId: string;
+  readonly title?: string;
+  readonly createdAt?: string;
+  readonly model?: {
+    readonly providerId?: string;
+    readonly modelId?: string;
+    readonly variant?: string;
+  };
+  readonly health?: TuiAcpSessionHealth;
+}
+
+export interface TuiAcpSessionHistoryPage {
+  readonly entries: readonly TuiAcpHistoryEntry[];
+  /**
+   * Entry count across the WHOLE Session, not just this page — counted over
+   * the source the response was served from (durable history, or the legacy
+   * `messages.jsonl` for pre-durable Sessions).
+   */
+  readonly totalEntries: number;
+  readonly nextCursor?: string;
+  readonly sessionMeta?: TuiAcpHistorySessionMeta;
+}
+
+interface TuiAcpSessionHistoryParams {
+  readonly sessionId: string;
+  readonly cursor?: string;
+  readonly limit?: number;
 }
 
 export interface CreateTuiAcpAgentOptions {
@@ -97,6 +200,12 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   const runPermissionMutation = createKeyedSerialExecutor();
   const promptCancelEpochs = new Map<string, number>();
   const promptCancelLatches = new Set<string>();
+  // READ-ONLY `session/history` snapshots (see markSessionHistoryTurnStarted):
+  // one full traversal serves every later page request of the same Session
+  // until a history commit drops the entry. LRU-bounded, reset per Session on
+  // detach/close and wholesale when the connection closes.
+  const sessionHistorySnapshots = new Map<string, readonly TuiMessage[]>();
+  const sessionHistoryActiveTurns = new Set<string>();
   const createTurnId = options.createTurnId ?? randomUUID;
   let activeAcpSessionId: string | undefined;
   let activeNewOperations = 0;
@@ -245,6 +354,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     attachment.attachmentController.abort(new Error(reason));
     if (sessions.get(sessionId) !== attachment) return false;
     sessions.delete(sessionId);
+    resetSessionHistorySnapshot(sessionHistorySnapshots, sessionHistoryActiveTurns, sessionId);
     clearDetachedClientState(sessionId, client, attachment);
     return true;
   };
@@ -367,6 +477,14 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     }
     hasConnected = true;
     activeConnection = connection;
+    connection.signal.addEventListener(
+      'abort',
+      () => {
+        sessionHistorySnapshots.clear();
+        sessionHistoryActiveTurns.clear();
+      },
+      { once: true },
+    );
     void runTuiAcpInteractions({
       runtime: options.runtime,
       connection,
@@ -393,6 +511,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         } else if (event.type === 'session.deleted' && event.sessionId) {
           runtimeParentSessionIds.delete(event.sessionId);
         }
+        observeSessionHistoryCommitEvent(sessionHistorySnapshots, sessionHistoryActiveTurns, event);
         for (const session of sessions.values()) session.activePrompt?.continuation.observe(event);
       },
       createRuntimeEventProjections: (event) =>
@@ -451,7 +570,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           sse: true,
         },
         promptCapabilities: {
-          image: true,
+          image: false,
           audio: false,
           embeddedContext: false,
         },
@@ -562,11 +681,25 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         assertNoAdditionalDirectories(params.additionalDirectories);
         await assertAuthenticated(options.runtime);
         assertLifecycleActive(context.signal);
+        const permissionModeRequest = parseAcpPermissionModeMeta(params._meta);
+        assertAcpPermissionModeMetaValid(permissionModeRequest);
         const mcpServers = mapClientMcpServers(params.mcpServers);
         session = await options.runtime.createSession({
           workspaceDir: params.cwd,
           ...(mcpServers.length > 0 ? { mcpServers } : {}),
         });
+        // §2.2: bind BEFORE the Session is attached/answered — a Session the
+        // client cannot get in its requested mode is not created at all.
+        const requested =
+          permissionModeRequest.mode !== undefined
+            ? { mode: permissionModeRequest.mode, origin: 'new-explicit' as const }
+            : await resolveNewSessionPermissionMode(options.runtime);
+        await bindAcpSessionPermissionMode(
+          options.runtime,
+          session.sessionId,
+          requested.mode,
+          requested.origin,
+        );
         const provisionalToken = Symbol(session.sessionId);
         let resolveProvisional!: () => void;
         const provisionalSettled = new Promise<void>((settle) => {
@@ -643,6 +776,78 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
     };
   });
+
+  // Read-only history lookup.
+  // never attaches the Session, never mutates state. Primary source is the
+  // durable history of the daemon that owns the Session; Sessions that predate
+  // the durable store fall back to the old-format v2 `messages.jsonl` of THIS
+  // profile's dataDir (never a symlinked root). Remote-safe: it only calls
+  // `getSession`/`getMessages`/`getRuntimeDiagnostics`, all already allowlisted
+  // thin-client methods.
+  // Paging readers issue one request per page; each snapshot below is the ONE
+  // full traversal they all serve from (read-only — entries are sliced out,
+  // the history itself is never mutated).
+  const loadSessionHistorySnapshot = async (
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<readonly TuiMessage[]> => {
+    const cached = readSessionHistorySnapshot(sessionHistorySnapshots, sessionId);
+    if (cached) return cached;
+    const messages = await loadCompleteHistory(
+      options.runtime,
+      sessionId,
+      signal,
+      ACP_HISTORY_MAX_PAGE_SIZE,
+    );
+    storeSessionHistorySnapshot(
+      sessionHistorySnapshots,
+      sessionHistoryActiveTurns,
+      sessionId,
+      messages,
+    );
+    return messages;
+  };
+
+  app.onRequest(
+    ACP_SESSION_HISTORY_METHOD,
+    parseSessionHistoryRequest,
+    async ({ params, signal }) => {
+      await assertAuthenticated(options.runtime);
+      let session: TuiSession | undefined;
+      try {
+        session = await options.runtime.getSession(params.sessionId);
+      } catch (error) {
+        if (!isSessionMissingError(error)) {
+          // An unreachable daemon is NOT "no such Session": surface the real
+          // failure instead of masquerading it as session_not_found.
+          throw acp.RequestError.internalError(
+            undefined,
+            `Session history is unavailable: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        session = undefined;
+      }
+      if (session) {
+        const messages = await loadSessionHistorySnapshot(params.sessionId, signal);
+        // `running` mirrors the serving daemon's `session.status` ('started'
+        // while a Turn runs; every other value is a settled Session).
+        return sessionHistoryPage(params, session, messages, {
+          source: 'durable',
+          running: session.status === 'started',
+        });
+      }
+      const legacyMessages = await readLegacySessionHistory(options.runtime, params.sessionId);
+      if (!legacyMessages) throw sessionHistoryNotFound(params.sessionId);
+      // The legacy branch answered only because `getSession` saw no Session:
+      // no daemon status exists to consult, so `running` is false.
+      return sessionHistoryPage(params, { sessionId: params.sessionId }, legacyMessages, {
+        source: 'legacy',
+        running: false,
+      });
+    },
+  );
 
   app.onRequest(acp.methods.agent.session.fork, async (context) => {
     if (activeForkOperations >= MAX_ACTIVE_FORK_OPERATIONS) {
@@ -767,6 +972,8 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.session.load, async (context) => {
+    const permissionModeRequest = parseAcpPermissionModeMeta(context.params._meta);
+    assertAcpPermissionModeMetaValid(permissionModeRequest);
     return runSessionLifecycle(context.params.sessionId, async (signal) => {
       const requestSignal = AbortSignal.any([signal, context.signal]);
       let active: AcpSession | undefined;
@@ -813,6 +1020,15 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               },
             );
             runtimeSessionId = active.session.sessionId;
+            // §2.2: load re-binds the mode (explicit `_meta` or `default`)
+            // and lifts the lock; the lock re-arms on the first prompt after
+            // the load.
+            await bindAcpSessionPermissionMode(
+              options.runtime,
+              runtimeSessionId,
+              permissionModeRequest.mode ?? 'default',
+              permissionModeRequest.mode !== undefined ? 'load-explicit' : 'load-default',
+            );
             const attachment = active;
             const messages = await loadCompleteHistory(
               options.runtime,
@@ -841,6 +1057,8 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.session.resume, async (context) => {
+    const permissionModeRequest = parseAcpPermissionModeMeta(context.params._meta);
+    assertAcpPermissionModeMetaValid(permissionModeRequest);
     return runSessionLifecycle(context.params.sessionId, async (signal) => {
       const requestSignal = AbortSignal.any([signal, context.signal]);
       let active: AcpSession | undefined;
@@ -887,6 +1105,13 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               },
             );
             runtimeSessionId = active.session.sessionId;
+            // §2.2: resume re-binds exactly like load.
+            await bindAcpSessionPermissionMode(
+              options.runtime,
+              runtimeSessionId,
+              permissionModeRequest.mode ?? 'default',
+              permissionModeRequest.mode !== undefined ? 'load-explicit' : 'load-default',
+            );
             advertiseAvailableCommands(context.client, context.params.sessionId);
             const control = await getTuiAcpSessionControlState(options.runtime, active.session);
             assertLifecycleActive(requestSignal);
@@ -904,6 +1129,11 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   });
 
   app.onRequest(acp.methods.agent.session.close, async ({ params, client }) => {
+    resetSessionHistorySnapshot(
+      sessionHistorySnapshots,
+      sessionHistoryActiveTurns,
+      params.sessionId,
+    );
     const reason = new Error('ACP Session attachment closed.');
     const hadLifecycleWork = runSessionLifecycle.reset(params.sessionId, reason);
     const active = sessions.get(params.sessionId);
@@ -972,11 +1202,26 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       }
 
       if (params.configId === ACP_CONFIG_PERMISSION_MODE) {
+        // §6.6: parsePermissionMode admits only the three ACP modes — `off`
+        // is rejected there, so an ACP Session never runs in it.
         const permissionMode = parsePermissionMode(params.value);
         await runPermissionMutation('permission-mode', async (mutationSignal) => {
           assertLifecycleActive(signal);
           assertLifecycleActive(mutationSignal);
-          await options.runtime.setPermissionMode(permissionMode);
+          // §2.2: the option is Session-scoped — the process mode is not
+          // touched, and the change is refused once the first prompt locked it.
+          const result = await callAcpSessionPermissionMode(options.runtime, (port) => {
+            if (typeof port.setSessionPermissionMode !== 'function') {
+              throw new TuiSessionPermissionModeUnsupportedError();
+            }
+            return port.setSessionPermissionMode(active.session.sessionId, permissionMode);
+          });
+          if (!result.ok) {
+            throw acp.RequestError.invalidParams(
+              { currentValue: result.error.currentValue },
+              'permissionMode is fixed for the session after the first prompt',
+            );
+          }
         });
         schedulePermissionBroadcast(context.client, [...sessions.entries()]);
         assertLifecycleActive(signal);
@@ -1075,7 +1320,6 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     if (promptCancelLatches.delete(context.params.sessionId)) {
       return { stopReason: 'cancelled' };
     }
-    const prompt = parseTuiAcpPrompt(context.params.prompt);
     const admissionCancelEpoch = promptCancelEpochs.get(context.params.sessionId) ?? 0;
     const admission = await runSessionLifecycle(context.params.sessionId, async (signal) => {
       const isCancelled = () =>
@@ -1129,6 +1373,13 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               : previousMode,
       };
       active.activePrompt = activePrompt;
+      // This Prompt's Turn commits history without per-commit events; mark the
+      // Session live so history reads stay per-request fresh until it settles.
+      markSessionHistoryTurnStarted(
+        sessionHistorySnapshots,
+        sessionHistoryActiveTurns,
+        context.params.sessionId,
+      );
       return {
         handled: false as const,
         active,
@@ -1151,7 +1402,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
     let modeIntentAccepted = false;
     const cancel = () => {
       promptController.abort(context.signal.reason);
-      void active.coordinator.abort();
+      activePrompt.cancellation ??= active.coordinator.abort();
     };
     context.signal.addEventListener('abort', cancel, { once: true });
     if (context.signal.aborted) cancel();
@@ -1168,19 +1419,13 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       }
     };
 
-    let promptAttachments: TuiAcpPromptAttachments | undefined;
     try {
-      if (promptController.signal.aborted) return { stopReason: 'cancelled' };
-      promptAttachments = await writeTuiAcpPromptAttachments(prompt);
       if (promptController.signal.aborted) return { stopReason: 'cancelled' };
       const result = await executeTuiInteractiveTurn({
         request: {
           turnId,
           session: Promise.resolve(active.session),
-          content: prompt.content,
-          ...(promptAttachments.attachments.length > 0
-            ? { attachments: promptAttachments.attachments }
-            : {}),
+          content: promptToText(context.params.prompt),
           workspace: active.session.workspaceDir ?? process.cwd(),
           version: options.version,
           ...(submittedModeIntent ? { clientIntent: submittedModeIntent } : {}),
@@ -1220,6 +1465,34 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       if (result.status === 'succeeded') return { stopReason: 'end_turn' };
       if (result.status === 'cancelled') return { stopReason: 'cancelled' };
       if (result.status === 'limit_exceeded') return { stopReason: 'max_turn_requests' };
+      const failure = result.outcome.error;
+      // Wave 2 (incident 2026-11-05, verdict §2.2в): the turn window closed
+      // before the turn ended and the reattach failed. The turn may STILL be
+      // running — this is NEVER `end_turn` and never a plain runtime failure:
+      // a structured `turn_detached` error lets the client decide (wait, read
+      // history, retry).
+      if (failure?.code === 'TURN_DETACHED') {
+        throw acp.RequestError.internalError(
+          {
+            code: 'turn_detached',
+            sessionId: context.params.sessionId,
+            resumable: true,
+          },
+          `MiniMax Code lost the turn window (turn may still be running): ${
+            result.error ?? failure.message
+          }`,
+        );
+      }
+      // Structured reason (incident 2026-11-05): an admission-class refusal
+      // (e.g. a busy session, `code: 'local_session_busy'`) is NOT a runtime
+      // failure — surface its code in `data` and say "refused", keeping the
+      // old prefix only for codeless runtime failures.
+      if (failure?.code !== undefined) {
+        throw acp.RequestError.internalError(
+          { code: failure.code, retryable: failure.retryable === true },
+          `MiniMax Code refused the prompt (${failure.code}): ${result.error ?? failure.message}`,
+        );
+      }
       throw acp.RequestError.internalError(
         undefined,
         result.error
@@ -1227,12 +1500,19 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           : 'MiniMax Code Runtime failed.',
       );
     } finally {
+      // The local reader can close before the daemon has released its Turn.
+      // A cancelled response must not invite the next prompt into that gap.
+      await activePrompt.cancellation;
       context.signal.removeEventListener('abort', cancel);
+      markSessionHistoryTurnSettled(
+        sessionHistorySnapshots,
+        sessionHistoryActiveTurns,
+        context.params.sessionId,
+      );
       if (active.activePrompt === activePrompt) active.activePrompt = undefined;
       if (modeIntentAccepted && active.pendingModeIntent === submittedModeIntent) {
         active.pendingModeIntent = undefined;
       }
-      await promptAttachments?.dispose().catch(() => undefined);
       try {
         const refreshed = await options.runtime.getSession(active.session.sessionId);
         const isCurrent = () => sessions.get(context.params.sessionId) === active;
@@ -1267,8 +1547,10 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       clear.unref();
       return;
     }
-    active.activePrompt.controller.abort(new Error('ACP session cancelled.'));
-    await active.coordinator.abort();
+    const prompt = active.activePrompt;
+    prompt.cancellation ??= active.coordinator.abort();
+    prompt.controller.abort(new Error('ACP session cancelled.'));
+    await prompt.cancellation;
   });
 
   return app;
@@ -1291,6 +1573,43 @@ function createRuntimeControlProjections(options: {
   const resolved = resolveAttachedRuntimeSession(options.sessions, options.event.sessionId);
   if (resolved) {
     const [acpSessionId, active] = resolved;
+    if (options.event.type === 'session.llm_retry' &&
+      ((options.event.status === 'waiting' && options.event.error?.reason === 'usage_limit') || active.subscriptionWaitCallIds?.has(options.event.callId))) {
+      const event = options.event;
+      active.subscriptionWaitCallIds ??= new Set();
+      if (event.status === 'waiting') active.subscriptionWaitCallIds.add(event.callId);
+      else active.subscriptionWaitCallIds.delete(event.callId);
+      projections.push({
+        key: `${acpSessionId}\0subscription-wait:${event.callId}:${event.status}`,
+        run: async (signal) => {
+          if (!isCurrentAttachment(options.sessions, acpSessionId, active, signal)) return;
+          await options.client.notify(acp.methods.client.session.update, {
+            sessionId: acpSessionId,
+            update: { sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `\n${subscriptionWaitText(event)}\n` },
+              _meta: { informational: true, severity: event.status === 'waiting' ? 'warning' : 'info',
+                subscriptionStatus: event.status, nextRetryAtMs: event.nextRetryAtMs } },
+          });
+        },
+      });
+    }
+    if (options.event.type === 'session.compaction.progress') {
+      const event = options.event;
+      projections.push({
+        key: `${acpSessionId}\0compaction-progress:${event.progressId}`,
+        run: async (signal) => {
+          if (!isCurrentAttachment(options.sessions, acpSessionId, active, signal)) return;
+          await options.client.notify(acp.methods.client.session.update, {
+            sessionId: acpSessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `\n${compactionProgressText(event.stage)}\n` },
+              _meta: { compactionStage: event.stage, informational: true },
+            },
+          });
+        },
+      });
+    }
     if (options.event.type === 'session.title_updated' || isSessionActivityEvent(options.event)) {
       const event = options.event;
       projections.push({
@@ -1651,9 +1970,86 @@ function requireAttachedSession(
   return active;
 }
 
-function parsePermissionMode(value: string): TuiPermissionMode {
+function parsePermissionMode(value: string): TuiSessionPermissionMode {
   if (value === 'default' || value === 'auto' || value === 'bypassPermissions') return value;
   throw acp.RequestError.invalidParams(undefined, `Unsupported permission mode: ${value}`);
+}
+
+/** `_meta["minimax-code/permissionMode"]` — absent, valid, or invalid (spec §2.2). */
+function parseAcpPermissionModeMeta(
+  meta: unknown,
+): { readonly mode?: TuiSessionPermissionMode; readonly invalid?: unknown } {
+  const raw =
+    typeof meta === 'object' && meta !== null && !Array.isArray(meta)
+      ? (meta as Record<string, unknown>)[ACP_PERMISSION_MODE_META_KEY]
+      : undefined;
+  if (raw === undefined) return {};
+  const mode = ACP_PERMISSION_MODE_VALUES.find((candidate) => candidate === raw);
+  return mode ? { mode } : { invalid: raw };
+}
+
+function assertAcpPermissionModeMetaValid(
+  request: ReturnType<typeof parseAcpPermissionModeMeta>,
+): void {
+  if (request.invalid === undefined) return;
+  throw acp.RequestError.invalidParams(
+    { allowed: [...ACP_PERMISSION_MODE_VALUES] },
+    `invalid ${ACP_PERMISSION_MODE_META_KEY}`,
+  );
+}
+
+/** `session/new` without `_meta` snapshots the process mode (§2.2). */
+async function resolveNewSessionPermissionMode(
+  runtime: TuiAcpRuntime,
+): Promise<{ readonly mode: TuiSessionPermissionMode; readonly origin: 'new-default' }> {
+  const processMode = await runtime.getPermissionMode().catch(() => undefined);
+  if (processMode === 'off') {
+    // §6.6: an ACP Session can never run in `off`; the operator's "checks
+    // off" intent maps to `bypassPermissions`.
+    acpLog.info('permission.mode_snapshot_mapped', { from: 'off', to: 'bypassPermissions' });
+    return { mode: 'bypassPermissions', origin: 'new-default' };
+  }
+  return {
+    mode: processMode === 'auto' || processMode === 'bypassPermissions' ? processMode : 'default',
+    origin: 'new-default',
+  };
+}
+
+/** Binds the Session's permission mode; maps registry/runtime errors onto ACP errors. */
+async function bindAcpSessionPermissionMode(
+  runtime: TuiAcpRuntime,
+  sessionId: string,
+  mode: TuiSessionPermissionMode,
+  origin: TuiSessionPermissionModeOrigin,
+): Promise<void> {
+  const result = await callAcpSessionPermissionMode(runtime, (port) => {
+    if (typeof port.bindSessionPermissionMode !== 'function') {
+      throw new TuiSessionPermissionModeUnsupportedError();
+    }
+    return port.bindSessionPermissionMode(sessionId, mode, origin);
+  });
+  if (!result.ok) {
+    throw acp.RequestError.invalidParams(
+      { currentValue: result.error.currentValue },
+      result.error.code === 'turn_active'
+        ? 'a turn is active in this session; retry with its current permissionMode or after the turn ends'
+        : 'permissionMode is fixed for this session',
+    );
+  }
+}
+
+async function callAcpSessionPermissionMode<T>(
+  runtime: TuiAcpRuntime,
+  call: (port: TuiAcpRuntime) => Promise<T>,
+): Promise<T> {
+  try {
+    return await call(runtime);
+  } catch (error) {
+    if (error instanceof TuiSessionPermissionModeUnsupportedError) {
+      throw acp.RequestError.internalError(undefined, error.message);
+    }
+    throw error;
+  }
 }
 
 function isAdvertisedModelSelection(
@@ -1723,15 +2119,27 @@ async function getPersistedSession(runtime: TuiAcpRuntime, sessionId: string): P
 }
 
 function assertMatchingCwd(session: TuiSession, requestedCwd: string): void {
-  const storedCwd = session.workspaceDir;
-  if (
-    !isAbsolute(requestedCwd) ||
-    !storedCwd ||
-    normalizeComparablePath(storedCwd) !== normalizeComparablePath(requestedCwd)
-  ) {
+  if (!isAbsolute(requestedCwd)) {
     throw acp.RequestError.invalidParams(
       undefined,
-      `Requested cwd does not match the persisted session workspace: ${requestedCwd}.`,
+      `Requested cwd must be an absolute path: ${requestedCwd}.`,
+    );
+  }
+  const persistedCwd = session.workspaceDir;
+  if (!persistedCwd) {
+    throw acp.RequestError.invalidParams(
+      undefined,
+      `Session ${session.sessionId} has no persisted workspace; cannot verify the requested cwd ${requestedCwd}.`,
+    );
+  }
+  if (normalizeComparablePath(persistedCwd) !== normalizeComparablePath(requestedCwd)) {
+    // Direct constructor (not invalidParams) so the wire message is exactly the
+    // guidance text; invalidParams would prefix it with "Invalid params: ".
+    throw new acp.RequestError(
+      -32602,
+      `Requested cwd ${requestedCwd} does not match the persisted session workspace ${persistedCwd}. ` +
+        `Resume with cwd: "${persistedCwd}" or omit cwd.`,
+      { code: 'session_cwd_mismatch', requestedCwd, persistedCwd },
     );
   }
 }
@@ -1777,6 +2185,7 @@ async function loadCompleteHistory(
   runtime: TuiAcpRuntime,
   sessionId: string,
   signal: AbortSignal,
+  pageSize = ACP_HISTORY_PAGE_SIZE,
 ): Promise<TuiMessage[]> {
   const pages: TuiMessage[][] = [];
   const seenCursors = new Set<string>();
@@ -1784,7 +2193,7 @@ async function loadCompleteHistory(
   for (;;) {
     assertLifecycleActive(signal);
     const page = await runtime.listMessagePage(sessionId, {
-      limit: ACP_HISTORY_PAGE_SIZE,
+      limit: pageSize,
       ...(before ? { before } : {}),
     });
     assertLifecycleActive(signal);
@@ -1794,6 +2203,430 @@ async function loadCompleteHistory(
     before = page.nextCursor;
   }
   return pages.flat();
+}
+
+/**
+ * READ-ONLY snapshot cache for `session/history` page requests: one full
+ * traversal per Session serves every later page of the same read, so paging a
+ * whole Session costs one walk instead of one walk per page request.
+ *
+ * Coherence is publish-driven, never time-driven (no TTL): a snapshot is
+ * dropped the moment the Runtime event stream reports a history-affecting
+ * commit for the Session — Turn start/terminal, rewind, compaction, delete —
+ * plus per-Session reset on detach/close. While a Turn runs, message commits
+ * publish no events, so such Sessions are marked active and simply not
+ * cached: live readers keep today's per-request freshness and pay today's
+ * per-request traversal only for the Turn's duration.
+ */
+function observeSessionHistoryCommitEvent(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  activeTurns: Set<string>,
+  event: TuiRuntimeEvent,
+): void {
+  if (event.type === 'session.start') {
+    markSessionHistoryTurnStarted(snapshots, activeTurns, event.sessionId);
+  } else if (
+    event.type === 'session.finish' ||
+    event.type === 'session.error' ||
+    event.type === 'session.abort'
+  ) {
+    markSessionHistoryTurnSettled(snapshots, activeTurns, event.sessionId);
+  } else if (event.type === 'session.deleted') {
+    resetSessionHistorySnapshot(snapshots, activeTurns, event.sessionId);
+  } else if (event.type === 'message.rewind' || event.type === 'session.compaction.completed') {
+    invalidateSessionHistorySnapshot(snapshots, event.sessionId);
+  }
+}
+
+function markSessionHistoryTurnStarted(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  activeTurns: Set<string>,
+  sessionId: string | undefined,
+): void {
+  if (!sessionId) return;
+  snapshots.delete(sessionId);
+  activeTurns.add(sessionId);
+}
+
+function markSessionHistoryTurnSettled(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  activeTurns: Set<string>,
+  sessionId: string | undefined,
+): void {
+  if (!sessionId) return;
+  snapshots.delete(sessionId);
+  activeTurns.delete(sessionId);
+}
+
+function invalidateSessionHistorySnapshot(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  sessionId: string | undefined,
+): void {
+  if (sessionId) snapshots.delete(sessionId);
+}
+
+function resetSessionHistorySnapshot(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  activeTurns: Set<string>,
+  sessionId: string | undefined,
+): void {
+  if (!sessionId) return;
+  snapshots.delete(sessionId);
+  activeTurns.delete(sessionId);
+}
+
+function readSessionHistorySnapshot(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  sessionId: string,
+): readonly TuiMessage[] | undefined {
+  const cached = snapshots.get(sessionId);
+  if (cached === undefined) return undefined;
+  // LRU refresh: re-insertion moves the Session to the most-recent end.
+  snapshots.delete(sessionId);
+  snapshots.set(sessionId, cached);
+  return cached;
+}
+
+function storeSessionHistorySnapshot(
+  snapshots: Map<string, readonly TuiMessage[]>,
+  activeTurns: ReadonlySet<string>,
+  sessionId: string,
+  messages: readonly TuiMessage[],
+): void {
+  // A Session with a running Turn stays uncached (see the docblock above).
+  if (activeTurns.has(sessionId)) return;
+  snapshots.set(sessionId, messages);
+  while (snapshots.size > ACP_SESSION_HISTORY_SNAPSHOT_LIMIT) {
+    const oldest = snapshots.keys().next().value;
+    if (oldest === undefined) break;
+    snapshots.delete(oldest);
+  }
+}
+
+function sessionHistoryNotFound(sessionId: string): acp.RequestError {
+  return new acp.RequestError(
+    ACP_SESSION_HISTORY_NOT_FOUND_CODE,
+    `Session not found: ${sessionId}.`,
+    { code: 'session_not_found', sessionId },
+  );
+}
+
+/**
+ * True when the runtime itself answered that no such Session exists — as
+ * opposed to the daemon being unreachable (a transport failure must not be
+ * reported as `session_not_found`). Covers the daemon's `SESSION_NOT_FOUND`
+ * AppError (key survives locally, message text survives the remote bridge)
+ * and the thin client's belt for an empty-but-successful response.
+ */
+function isSessionMissingError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  // Connection-level failures never mean "absent".
+  if (error.name === 'McodedConnectionError') return false;
+  const code = (error as { code?: unknown }).code;
+  const key = (error as { key?: unknown }).key;
+  if (code === 'SESSION_NOT_FOUND' || key === 'SESSION_NOT_FOUND') return true;
+  return (
+    /^session not found:/i.test(error.message) || /did not return session/i.test(error.message)
+  );
+}
+
+/**
+ * Legacy (pre-durable) history of one Session, read from THIS runtime's
+ * dataDir. `undefined` = no legacy session on disk (the caller reports
+ * `session_not_found`).
+ */
+async function readLegacySessionHistory(
+  runtime: TuiAcpRuntime,
+  sessionId: string,
+): Promise<TuiMessage[] | undefined> {
+  let dataDir: string | undefined;
+  try {
+    dataDir = (await runtime.getRuntimeDiagnostics()).dataDir;
+  } catch {
+    dataDir = undefined;
+  }
+  if (!dataDir) return undefined;
+  try {
+    return readLegacySessionHistoryFromDataDir(dataDir, sessionId);
+  } catch (error) {
+    if (error instanceof LegacyHistoryUnsafeRootError) {
+      throw acp.RequestError.internalError(
+        { code: 'unsafe_history_root', root: error.root },
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
+
+/**
+ * Slices the requested page out of the complete chronological history,
+ * reproducing the durable repository's bounded-page semantics: a page is the
+ * newest `limit` entries strictly before the cursor's anchor, presented
+ * chronologically, with `nextCursor` pointing at the page's oldest entry.
+ *
+ * `sessionMeta.health` summarizes the WHOLE snapshot (one O(n) pass over the
+ * already-loaded history), so every page of one read reports the same
+ * Session-wide counters — identical on all pages by construction.
+ */
+function sessionHistoryPage(
+  params: TuiAcpSessionHistoryParams,
+  session: TuiSession,
+  messages: readonly TuiMessage[],
+  health: { readonly source: 'durable' | 'legacy'; readonly running: boolean },
+): TuiAcpSessionHistoryPage {
+  const limit = sessionHistoryPageLimit(params.limit);
+  const cursor = decodeHistoryCursor(params.cursor);
+  const anchorIndex =
+    cursor === undefined
+      ? messages.length
+      : messages.findIndex((message) => message.id === cursor.before);
+  if (cursor !== undefined && anchorIndex < 0) {
+    throw acp.RequestError.invalidParams(
+      undefined,
+      'Session history cursor does not match the Session history.',
+    );
+  }
+  const page = messages.slice(Math.max(0, anchorIndex - limit), anchorIndex);
+  const hasMore = anchorIndex - page.length > 0;
+  const oldestId = page[0]?.id;
+  return {
+    entries: page.flatMap(toAcpHistoryEntries),
+    // Source-record count: derived toolResult entries split out of assistant
+    // records do not inflate it (canonical toolResult records count as records).
+    totalEntries: messages.length,
+    ...(hasMore && oldestId ? { nextCursor: encodeHistoryCursor(oldestId) } : {}),
+    sessionMeta: {
+      ...toAcpHistorySessionMeta(session),
+      health: summarizeSessionHealth(messages, health),
+    },
+  };
+}
+
+function sessionHistoryPageLimit(limit: number | undefined): number {
+  if (limit === undefined) return ACP_HISTORY_PAGE_SIZE;
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw acp.RequestError.invalidParams(
+      undefined,
+      'Session history limit must be a positive integer.',
+    );
+  }
+  return Math.min(limit, ACP_HISTORY_MAX_PAGE_SIZE);
+}
+
+/**
+ * Maps one source record onto its wire entries: the record's own entry plus,
+ * for assistant records whose tool calls carry their output/error inline
+ * (the durable projection stores them inside `toolCalls`), one separate
+ * `toolResult` entry per resolved call — readers glue the round-trip by
+ * `toolCallId`.
+ */
+function toAcpHistoryEntries(message: TuiMessage): TuiAcpHistoryEntry[] {
+  const timestamp = typeof message.timestamp === 'number' ? message.timestamp : undefined;
+  const text = message.content ? { text: message.content } : {};
+  const at = timestamp !== undefined ? { timestamp } : {};
+  if (message.toolResult) {
+    return [
+      {
+        role: 'toolResult',
+        toolCallId: message.toolResult.toolCallId,
+        ...(message.toolResult.toolName ? { toolName: message.toolResult.toolName } : {}),
+        ...(message.toolResult.isError === true ? { isError: true } : {}),
+        ...text,
+        ...at,
+      },
+    ];
+  }
+  if (message.kind === 'compaction') {
+    return [{ role: 'compactionSummary', ...text, ...at }];
+  }
+  if (message.role === 'user' || message.role === 'assistant') {
+    const parts = assistantHistoryContentParts(message);
+    const entry: TuiAcpHistoryEntry = {
+      role: message.role,
+      ...(parts.length > 0 ? { content: parts } : {}),
+      ...text,
+      ...at,
+    };
+    const toolResults = resolvedToolResultEntries(message, timestamp);
+    return toolResults.length > 0 ? [entry, ...toolResults] : [entry];
+  }
+  const customType =
+    message.customType ??
+    message.kind ??
+    (message.role !== 'unknown' ? message.role : undefined);
+  return [
+    {
+      role: 'custom',
+      ...(customType ? { customType } : {}),
+      ...text,
+      ...at,
+    },
+  ];
+}
+
+/**
+ * Structured assistant content parts in the canonical block vocabulary:
+ * thinking text as `{type:'thinking', thinking}` and every tool call as
+ * `{type:'toolCall', id, name, arguments}` — collected from `toolCalls` and
+ * `parts` tool blocks (deduplicated by call id).
+ */
+function assistantHistoryContentParts(message: TuiMessage): unknown[] {
+  const thinkingTexts = new Set<string>();
+  const parts: unknown[] = [];
+  const addThinking = (value: string | undefined): void => {
+    const trimmed = value?.trim();
+    if (!trimmed || thinkingTexts.has(trimmed)) return;
+    thinkingTexts.add(trimmed);
+    parts.push({ type: 'thinking', thinking: value });
+  };
+  const seenCallIds = new Set<string>();
+  const calls: TuiToolCall[] = [];
+  const addCall = (toolCall: TuiToolCall | undefined): void => {
+    if (!toolCall?.name) return;
+    if (toolCall.id !== undefined && seenCallIds.has(toolCall.id)) return;
+    if (toolCall.id !== undefined) seenCallIds.add(toolCall.id);
+    calls.push(toolCall);
+  };
+  addThinking(message.thinking);
+  for (const part of message.parts ?? []) {
+    if (part.type === 'thinking') addThinking(part.content);
+  }
+  for (const toolCall of message.toolCalls ?? []) addCall(toolCall);
+  for (const part of message.parts ?? []) {
+    if (part.type === 'tool') addCall(part.toolCall);
+  }
+  for (const toolCall of calls) {
+    parts.push({
+      type: 'toolCall',
+      ...(toolCall.id !== undefined ? { id: toolCall.id } : {}),
+      name: toolCall.name,
+      arguments: toolCall.input ?? {},
+    });
+  }
+  return parts;
+}
+
+/** Tool result text: strings pass through, everything else is JSON-encoded. */
+function toolResultText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return String(value);
+  }
+}
+
+/** Separate `toolResult` entries for calls whose output/error is inline. */
+function resolvedToolResultEntries(
+  message: TuiMessage,
+  timestamp: number | undefined,
+): TuiAcpHistoryEntry[] {
+  if (message.role !== 'assistant') return [];
+  const entries: TuiAcpHistoryEntry[] = [];
+  for (const toolCall of assistantHistoryToolCalls(message)) {
+    if (!toolCall.id) continue;
+    const hasError = toolCall.error !== undefined;
+    const output = hasError ? toolCall.error : toolCall.output;
+    if (output === undefined) continue;
+    entries.push({
+      role: 'toolResult',
+      toolCallId: toolCall.id,
+      ...(toolCall.name ? { toolName: toolCall.name } : {}),
+      text: toolResultText(output),
+      ...(hasError ? { isError: true } : {}),
+      ...(timestamp !== undefined ? { timestamp } : {}),
+    });
+  }
+  return entries;
+}
+
+/** Every tool call of the record: `toolCalls` plus `parts` tool blocks. */
+function assistantHistoryToolCalls(message: TuiMessage): TuiToolCall[] {
+  const calls: TuiToolCall[] = [];
+  const seen = new Set<string>();
+  for (const toolCall of [...(message.toolCalls ?? []), ...assistantPartToolCalls(message)]) {
+    if (toolCall.id !== undefined) {
+      if (seen.has(toolCall.id)) continue;
+      seen.add(toolCall.id);
+    }
+    calls.push(toolCall);
+  }
+  return calls;
+}
+
+function assistantPartToolCalls(message: TuiMessage): TuiToolCall[] {
+  return (message.parts ?? []).flatMap((part) => (part.type === 'tool' ? [part.toolCall] : []));
+}
+
+function toAcpHistorySessionMeta(session: TuiSession): TuiAcpHistorySessionMeta {
+  const createdAt = toIsoTimestamp(session.createdAt);
+  return {
+    sessionId: session.sessionId,
+    ...(session.title ? { title: session.title } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(session.model?.providerId && session.model?.modelId
+      ? {
+          model: {
+            providerId: session.model.providerId,
+            modelId: session.model.modelId,
+            ...(session.model.variant !== undefined ? { variant: session.model.variant } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function parseSessionHistoryRequest(value: unknown): TuiAcpSessionHistoryParams {
+  const record =
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  if (!record || typeof record.sessionId !== 'string' || !record.sessionId.trim()) {
+    throw acp.RequestError.invalidParams(undefined, 'sessionId must be a non-empty string.');
+  }
+  if (record.cursor !== undefined && typeof record.cursor !== 'string') {
+    throw acp.RequestError.invalidParams(undefined, 'cursor must be a string.');
+  }
+  if (record.limit !== undefined && typeof record.limit !== 'number') {
+    throw acp.RequestError.invalidParams(undefined, 'limit must be a number.');
+  }
+  return {
+    sessionId: record.sessionId,
+    ...(record.cursor ? { cursor: record.cursor } : {}),
+    ...(record.limit !== undefined ? { limit: record.limit } : {}),
+  };
+}
+
+interface TuiAcpHistoryCursor {
+  readonly before: string;
+}
+
+/** Opaque page cursor; the envelope mirrors the Session list cursor style. */
+function encodeHistoryCursor(before: string): string {
+  return Buffer.from(JSON.stringify({ v: 1, k: 'session-history', before })).toString('base64url');
+}
+
+function decodeHistoryCursor(value: string | undefined): TuiAcpHistoryCursor | undefined {
+  if (!value) return undefined;
+  let before: unknown;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString());
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Not a session history cursor.');
+    }
+    const record = parsed as Record<string, unknown>;
+    if (record.v !== 1 || record.k !== 'session-history') {
+      throw new Error('Not a session history cursor.');
+    }
+    before = record.before;
+  } catch {
+    throw acp.RequestError.invalidParams(undefined, 'Session history cursor is not valid.');
+  }
+  if (typeof before !== 'string' || !before) {
+    throw acp.RequestError.invalidParams(undefined, 'Session history cursor is not valid.');
+  }
+  return { before };
 }
 
 async function replayHistory(
@@ -1806,17 +2639,16 @@ async function replayHistory(
   for (const message of messages) {
     const updates =
       message.role === 'user'
-        ? [
-            ...buildTuiMessageParts(message).flatMap((part): acp.ContentBlock[] =>
-              part.type === 'text' ? [{ type: 'text', text: part.content }] : [],
-            ),
-            ...(await readTuiAcpHistoryImages(message.attachments)),
-          ].map(
-            (content): acp.SessionUpdate => ({
-              sessionUpdate: 'user_message_chunk',
-              ...(message.id ? { messageId: message.id } : {}),
-              content,
-            }),
+        ? buildTuiMessageParts(message).flatMap((part): acp.SessionUpdate[] =>
+            part.type === 'text'
+              ? [
+                  {
+                    sessionUpdate: 'user_message_chunk',
+                    ...(message.id ? { messageId: message.id } : {}),
+                    content: { type: 'text', text: part.content },
+                  },
+                ]
+              : [],
           )
         : projector.project({ type: 'message', message });
     for (const update of updates) {
@@ -2131,4 +2963,19 @@ async function assertAuthenticated(runtime: TuiAcpRuntime): Promise<void> {
     }
     throw error;
   }
+}
+
+function promptToText(blocks: readonly acp.ContentBlock[]): string {
+  return blocks
+    .map((block) => {
+      if (block.type === 'text') return block.text;
+      if (block.type === 'resource_link') {
+        return `Referenced resource: ${block.title ?? block.name} (${block.uri})`;
+      }
+      throw acp.RequestError.invalidParams(
+        undefined,
+        `Prompt content type ${block.type} is not supported in ACP P0.`,
+      );
+    })
+    .join('\n\n');
 }

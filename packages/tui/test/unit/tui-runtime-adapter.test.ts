@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { TuiRuntimeAdapter } from "../../src/runtime/adapter.js";
-import { LIGHTWEIGHT_SESSION_PURPOSE } from "@mavis/protocol/local";
+import { LIGHTWEIGHT_SESSION_PURPOSE, PermissionReply } from "@mavis/protocol/local";
 
 describe("TuiRuntimeAdapter process-local facades", () => {
   it("marks only newly created root Sessions as lightweight", async () => {
@@ -65,9 +65,7 @@ describe("TuiRuntimeAdapter process-local facades", () => {
       { contextMode: "lightweight" },
     );
 
-    await expect(
-      reopenedLightweight.getSession("lightweight"),
-    ).resolves.toMatchObject({
+    await expect(reopenedLightweight.getSession("lightweight")).resolves.toMatchObject({
       purpose: LIGHTWEIGHT_SESSION_PURPOSE,
     });
     await expect(
@@ -113,13 +111,21 @@ describe("TuiRuntimeAdapter process-local facades", () => {
                 status: "running" as const,
                 ownerSessionId: "session-1",
                 description: "pnpm test",
-                metadata: {
-                  command: "pnpm test",
-                  executionMode: "managed_foreground",
-                },
+                metadata: { command: "pnpm test", executionMode: "managed_foreground" },
                 createdAt: 100,
                 updatedAt: 200,
                 startedAt: 110,
+              },
+              {
+                taskId: "bg-promoted",
+                kind: "subagent" as const,
+                status: "running" as const,
+                ownerSessionId: "session-1",
+                description: "Long child",
+                metadata: { executionMode: "background" },
+                createdAt: 150,
+                updatedAt: 210,
+                startedAt: 160,
               },
             ],
     );
@@ -152,6 +158,16 @@ describe("TuiRuntimeAdapter process-local facades", () => {
         deliveredAtMs: 250,
       },
       {
+        taskId: "bg-promoted",
+        kind: "subagent",
+        status: "running",
+        ownerSessionId: "session-1",
+        description: "Long child",
+        createdAtMs: 150,
+        updatedAtMs: 210,
+        startedAtMs: 160,
+      },
+      {
         taskId: "bg-running",
         kind: "bash",
         status: "running",
@@ -167,13 +183,13 @@ describe("TuiRuntimeAdapter process-local facades", () => {
     expect(listBackgroundTasks).toHaveBeenNthCalledWith(1, {
       ownerSessionId: "session-1",
       statuses: ["queued", "running", "stopping"],
-      kinds: ["bash", "workflow", "custom"],
+      kinds: ["bash", "workflow", "custom", "subagent"],
       limit: 100,
     });
     expect(listBackgroundTasks).toHaveBeenNthCalledWith(2, {
       ownerSessionId: "session-1",
       statuses: ["succeeded", "failed", "canceled", "lost"],
-      kinds: ["bash", "workflow", "custom"],
+      kinds: ["bash", "workflow", "custom", "subagent"],
       limit: 100,
     });
   });
@@ -375,6 +391,53 @@ describe("TuiRuntimeAdapter process-local facades", () => {
     });
   });
 
+  it("tui-deny-no-rule", async () => {
+    // The TUI picker's one-time decisions cross the wire as the plain reply
+    // enum and nothing else — the call carries no rule payload, and rule
+    // persistence happens only Runtime-side on allowAlways/denyAlways replies
+    // (pinned in local-permission-approval-reply.test.ts).
+    const cliService = {
+      replyPermission: vi.fn(async () => ({ success: true })),
+    };
+    const adapter = new TuiRuntimeAdapter(cliService as never);
+
+    await expect(
+      adapter.replyPermission("mavis", "permission-deny", "deny"),
+    ).resolves.toBe(true);
+    await expect(
+      adapter.replyPermission("mavis", "permission-once", "allowOnce"),
+    ).resolves.toBe(true);
+
+    expect(cliService.replyPermission).toHaveBeenNthCalledWith(1, {
+      name: "mavis",
+      requestId: "permission-deny",
+      reply: PermissionReply.Deny,
+    });
+    expect(cliService.replyPermission).toHaveBeenNthCalledWith(2, {
+      name: "mavis",
+      requestId: "permission-once",
+      reply: PermissionReply.AllowOnce,
+    });
+  });
+
+  it("maps denyAlways onto its own wire reply", async () => {
+    const cliService = {
+      replyPermission: vi.fn(async () => ({ success: true })),
+    };
+    const adapter = new TuiRuntimeAdapter(cliService as never);
+
+    await expect(
+      adapter.replyPermission("mavis", "permission-deny-always", "denyAlways"),
+    ).resolves.toBe(true);
+
+    expect(cliService.replyPermission).toHaveBeenCalledWith({
+      name: "mavis",
+      requestId: "permission-deny-always",
+      reply: PermissionReply.DenyAlways,
+    });
+    expect(PermissionReply.DenyAlways).toBe(3);
+  });
+
   it("uses process-local product capability facades", async () => {
     const cliService = {
       listRuntimeSkills: vi.fn(async () => ({
@@ -464,7 +527,7 @@ describe("TuiRuntimeAdapter process-local facades", () => {
             displayName: "Calendar",
             installExists: false,
             enabled: false,
-            capabilities: { appCount: 1, mcpServerCount: 0, skillCount: 0, agentCount: 2 },
+            capabilities: { appCount: 1, mcpServerCount: 0, skillCount: 0 },
           },
         ],
         hasMore: false,
@@ -495,7 +558,7 @@ describe("TuiRuntimeAdapter process-local facades", () => {
         marketplace: "local",
         installed: false,
         enabled: false,
-        capabilities: { appCount: 1, mcpServerCount: 0, skillCount: 0, agentCount: 2 },
+        capabilities: { appCount: 1, mcpServerCount: 0, skillCount: 0 },
       },
     ]);
     expect(cliService.listInstalledPlugins).toHaveBeenCalledWith({
@@ -873,158 +936,4 @@ describe("TuiRuntimeAdapter process-local facades", () => {
       });
     },
   );
-
-  it("projects active and recent terminal Runtime background work for the [V] machine status", async () => {
-    const listBackgroundTasks = vi.fn(
-      async (input: { statuses?: readonly string[] }) =>
-        input.statuses?.includes("succeeded")
-          ? [
-              {
-                taskId: "bg-failed",
-                kind: "bash" as const,
-                status: "failed" as const,
-                ownerSessionId: "session-1",
-                description: "build docs",
-                metadata: { command: "pnpm build\necho complete" },
-                createdAt: 100,
-                updatedAt: 300,
-                startedAt: 120,
-                endedAt: 280,
-                lastError: { message: "exit code 1" },
-                notification: { state: "pending" as const },
-              },
-              {
-                taskId: "agent-finished",
-                kind: "subagent" as const,
-                status: "succeeded" as const,
-                ownerSessionId: "session-1",
-                description: "review changes",
-                metadata: {
-                  childSessionId: "child-1",
-                  subTurnId: "turn-child",
-                },
-                createdAt: 95,
-                updatedAt: 260,
-                endedAt: 260,
-                notification: {
-                  state: "settled" as const,
-                  turnId: "turn-delivery",
-                },
-              },
-              {
-                taskId: "bg-delivered",
-                kind: "bash" as const,
-                status: "succeeded" as const,
-                ownerSessionId: "session-1",
-                description: "build docs successfully",
-                createdAt: 90,
-                updatedAt: 250,
-                startedAt: 100,
-                endedAt: 220,
-                deliveredAt: 250,
-              },
-            ]
-          : [
-              {
-                taskId: "bg-running",
-                kind: "bash" as const,
-                status: "running" as const,
-                ownerSessionId: "session-1",
-                description: "pnpm test",
-                metadata: {
-                  command: "pnpm test",
-                  executionMode: "managed_foreground",
-                },
-                createdAt: 100,
-                updatedAt: 200,
-                startedAt: 110,
-              },
-            ],
-    );
-    const adapter = new TuiRuntimeAdapter({ listBackgroundTasks } as never);
-
-    await expect(
-      adapter.listBackgroundTasks("session-1", { machineStatus: true }),
-    ).resolves.toEqual([
-      {
-        taskId: "bg-failed",
-        kind: "bash",
-        status: "failed",
-        ownerSessionId: "session-1",
-        description: "build docs",
-        command: "pnpm build\necho complete",
-        createdAtMs: 100,
-        updatedAtMs: 300,
-        startedAtMs: 120,
-        endedAtMs: 280,
-        lastError: "exit code 1",
-        notification: { state: "pending" },
-      },
-      {
-        taskId: "agent-finished",
-        kind: "subagent",
-        status: "succeeded",
-        ownerSessionId: "session-1",
-        description: "review changes",
-        createdAtMs: 95,
-        updatedAtMs: 260,
-        endedAtMs: 260,
-        childSessionId: "child-1",
-        notification: { state: "settled", turnId: "turn-delivery" },
-      },
-      {
-        taskId: "bg-delivered",
-        kind: "bash",
-        status: "succeeded",
-        ownerSessionId: "session-1",
-        description: "build docs successfully",
-        createdAtMs: 90,
-        updatedAtMs: 250,
-        startedAtMs: 100,
-        endedAtMs: 220,
-        deliveredAtMs: 250,
-      },
-      {
-        taskId: "bg-running",
-        kind: "bash",
-        status: "running",
-        ownerSessionId: "session-1",
-        description: "pnpm test",
-        command: "pnpm test",
-        createdAtMs: 100,
-        updatedAtMs: 200,
-        startedAtMs: 110,
-        foreground: true,
-      },
-    ]);
-    expect(listBackgroundTasks).toHaveBeenNthCalledWith(1, {
-      ownerSessionId: "session-1",
-      statuses: ["queued", "running", "stopping"],
-      kinds: ["bash", "subagent", "workflow", "custom"],
-      includeNotification: true,
-      limit: 100,
-    });
-    expect(listBackgroundTasks).toHaveBeenNthCalledWith(2, {
-      ownerSessionId: "session-1",
-      statuses: ["succeeded", "failed", "canceled", "lost"],
-      kinds: ["bash", "subagent", "workflow", "custom"],
-      includeNotification: true,
-      limit: 100,
-    });
-  });
-
-  it("lists only bash/workflow/custom Tasks without notification receipts outside the [V] machine status", async () => {
-    const listBackgroundTasks = vi.fn(async () => []);
-    const adapter = new TuiRuntimeAdapter({ listBackgroundTasks } as never);
-
-    await adapter.listBackgroundTasks("session-1");
-
-    for (const [query] of listBackgroundTasks.mock.calls as unknown as [
-      Record<string, unknown>,
-    ][]) {
-      expect(query).toMatchObject({ kinds: ["bash", "workflow", "custom"] });
-      expect(query).not.toHaveProperty("includeNotification");
-    }
-    expect(listBackgroundTasks).toHaveBeenCalledTimes(2);
-  });
 });

@@ -39,7 +39,6 @@ export * from './browser-keyboard.js';
 export * from './clipboard.js';
 export * from './browser-query.js';
 export * from './browser-snapshot-helpers.js';
-export * from './browser-script.js';
 export * from './cdp-file-upload.js';
 export * from './cdp-helper.js';
 export * from './cdp-helper-contracts.js';
@@ -60,9 +59,7 @@ export {
   type PageSummary,
   type Rect,
   type Snapshot,
-  type CdpExceptionDetails,
   cdp,
-  describeCdpException,
   evaluate,
   asNumber,
   asString,
@@ -82,3 +79,12 @@ export type {
   BrowserTransportEventListener as CoreBrowserTransportEventListener,
   CdpTransport,
 } from './browser-transport.js';
+export * from './browser-script-runner.js';
+export {
+  BROWSER_SCRIPT_BOOTSTRAP_SOURCE,
+  BROWSER_SCRIPT_LOG_ENTRY_MAX_CHARS,
+  BROWSER_SCRIPT_LOG_MAX_BYTES,
+  BROWSER_SCRIPT_LOG_MAX_ENTRIES,
+  BROWSER_SCRIPT_RUNTIME_FILENAME,
+  browserScriptWorkerSource,
+} from './browser-script-templates.js';

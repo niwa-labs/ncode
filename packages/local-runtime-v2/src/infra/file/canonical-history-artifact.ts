@@ -4,7 +4,13 @@ const PARENT_SNAPSHOT_KEYS = new Set(['generation', 'compactionId', 'revision'])
 export interface CanonicalHistoryArtifact {
   readonly schemaVersion: 1;
   readonly generation: number;
-  readonly producedBy: 'tool_archive' | 'tool_trim' | 'llm_checkpoint';
+  /**
+   * Wave 3 (canon 05 §2.2, item 3.2): `deterministic_fallback` — the
+   * breaker-open compaction produced WITHOUT a provider call (the cline
+   * `basic` shape). Same cut shape as `llm_checkpoint`; only the producer is
+   * honest about the summary's origin.
+   */
+  readonly producedBy: 'tool_archive' | 'tool_trim' | 'llm_checkpoint' | 'deterministic_fallback';
   readonly parentSnapshot: {
     readonly generation: number;
     readonly compactionId: string;
@@ -71,7 +77,12 @@ function requireGeneration(value: unknown, minimum: number): number {
 }
 
 function requireProducer(value: unknown): CanonicalHistoryArtifact['producedBy'] {
-  if (value !== 'tool_archive' && value !== 'tool_trim' && value !== 'llm_checkpoint') {
+  if (
+    value !== 'tool_archive' &&
+    value !== 'tool_trim' &&
+    value !== 'llm_checkpoint' &&
+    value !== 'deterministic_fallback'
+  ) {
     invalidArtifact();
   }
   return value;

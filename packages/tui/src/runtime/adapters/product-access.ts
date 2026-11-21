@@ -1,8 +1,13 @@
 import { isLegacyManagedMinimaxProvider } from "@mavis/config";
 import {
+  normalizeDangerousCommandGateEnabled,
   normalizeTuiPermissionMode,
   type TuiPermissionMode,
 } from "../../application/permission-mode.js";
+import {
+  normalizeTuiSandboxFilesystemMode,
+  type TuiSandboxFilesystemMode,
+} from "../../application/sandbox-mode.js";
 import type {
   TuiAccountStatus,
   TuiAccountStatusOptions,
@@ -90,26 +95,52 @@ export class TuiProductAccess {
     );
   }
 
-  /** Undefined when this Runtime cannot read the switch. */
-  async getPromptSuggestionEnabled(): Promise<boolean | undefined> {
-    return this.context.service('config.prompt-suggestion.read').getPromptSuggestionEnabled();
+  /**
+   * The runtime owns this setting, not the TUI: an `undefined` read means the
+   * host does not expose it, and the UI reports that instead of implying the
+   * guard is on or off.
+   */
+  async getDangerousCommandGateEnabled(): Promise<boolean | undefined> {
+    return normalizeDangerousCommandGateEnabled(
+      await this.context
+        .service("config.permission.read")
+        .getDangerousCommandGateEnabled(),
+    );
   }
 
-  /** Undefined when this Runtime cannot persist the switch. */
-  async setPromptSuggestionEnabled(enabled: boolean): Promise<boolean | undefined> {
-    return this.context
-      .service('config.prompt-suggestion.write')
-      .setPromptSuggestionEnabled(enabled);
+  async setDangerousCommandGateEnabled(enabled: boolean): Promise<boolean> {
+    return (
+      normalizeDangerousCommandGateEnabled(
+        await this.context
+          .service("config.permission.write")
+          .setDangerousCommandGateEnabled({ enabled }),
+      ) ?? enabled
+    );
   }
 
-  /** Undefined when this Runtime cannot read the switch. */
-  async getPtcEnabled(): Promise<boolean | undefined> {
-    return this.context.service('config.ptc.read').getPtcEnabled();
+  /**
+   * The runtime owns the sandbox level, not the TUI: an `undefined` read means
+   * the host runs no sandbox, and the UI reports that instead of implying a
+   * filesystem policy that is not being enforced.
+   */
+  async getSandboxFilesystemMode(): Promise<TuiSandboxFilesystemMode | undefined> {
+    return normalizeTuiSandboxFilesystemMode(
+      await this.context
+        .service("config.permission.read")
+        .getSandboxFilesystemMode(),
+    );
   }
 
-  /** Undefined when this Runtime cannot persist the switch. */
-  async setPtcEnabled(enabled: boolean): Promise<boolean | undefined> {
-    return this.context.service('config.ptc.write').setPtcEnabled(enabled);
+  async setSandboxFilesystemMode(
+    mode: TuiSandboxFilesystemMode,
+  ): Promise<TuiSandboxFilesystemMode> {
+    return (
+      normalizeTuiSandboxFilesystemMode(
+        await this.context
+          .service("config.permission.write")
+          .setSandboxFilesystemMode({ mode }),
+      ) ?? mode
+    );
   }
 
   async listModels(sessionId?: string): Promise<TuiModel[]> {
@@ -313,6 +344,12 @@ export class TuiProductAccess {
       .getSessionUsageSummary({ id: sessionId })) as TuiSessionUsageSummary;
   }
 
+  async getSessionCacheWarmingStatus(sessionId: string): Promise<string | undefined> {
+    return this.context
+      .service("session.cache-warming-status")
+      .getSessionCacheWarmingStatus(sessionId);
+  }
+
   async requestCompaction(
     sessionId: string,
     agentName = this.defaultAgentName,
@@ -404,7 +441,6 @@ export class TuiProductAccess {
           : "idle",
       ...(turnId ? { turnId } : {}),
       actions: { steer: steerable },
-      ...(started && activeTurn?.ownedByOtherRuntime ? { runningElsewhere: true as const } : {}),
     };
   }
 

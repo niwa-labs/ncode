@@ -10,6 +10,8 @@ import {
   readLocalPermissionMode,
   safeJsonStringify,
 } from './host-helpers.js';
+import { isStricterPermissionMode } from '../permissions/mode-strictness.js';
+import type { LocalSessionPermissionMode } from '../permissions/session-permission-mode-port.js';
 import { buildPermissionToolDescription } from './routes/permission-request-helpers.js';
 import {
   requestLocalPermissionApproval,
@@ -19,6 +21,13 @@ import {
 interface HostedAgentPermissionCapabilitiesHost {
   permissionRouteContext(): LocalPermissionRouteContext;
   supportsInteraction(capability: 'permissionPrompt'): boolean;
+  /**
+   * Per-session permission-mode registry (spec §2.4), late-bound by the V2
+   * runtime. Sessions without an entry keep the process-mode chain.
+   */
+  sessionPermissionModes?: {
+    get(sessionId: string): { mode: LocalSessionPermissionMode } | undefined;
+  };
 }
 
 export interface HostedPermissionChannelContext {
@@ -49,27 +58,52 @@ export function createHostedAgentPermissionCapabilities(
         readonly nativeDeleteSnapshot?: boolean;
       }) => {
         const ctx = host.permissionRouteContext();
+        // §2.4: the Session's bound mode wins over the process config; an
+        // explicit caller override still applies only when it is stricter,
+        // so nothing can silently relax a Session's negotiated mode.
+        const sessionMode = host.sessionPermissionModes?.get(input.sessionId)?.mode;
         const decision = await ctx.permissionService.checkPermission({
           toolName: input.toolName,
           input: { ...input.toolInput },
           agentName: input.agentName,
           sessionId: input.sessionId,
           permissionModeOverride:
-            input.permissionMode ?? readLocalPermissionMode(ctx.configGetter().permissionMode),
+            input.permissionMode !== undefined &&
+            sessionMode !== undefined &&
+            !isStricterPermissionMode(input.permissionMode, sessionMode)
+              ? sessionMode
+              : input.permissionMode ?? sessionMode ?? readLocalPermissionMode(ctx.configGetter().permissionMode),
+          ...(sessionMode !== undefined ? { sessionPermissionMode: sessionMode } : {}),
           trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
           sessionOwnedReadablePaths: [...(input.sessionOwnedReadablePaths ?? [])],
           ...(input.nativeDeleteSnapshot !== undefined
             ? { nativeDeleteSnapshot: input.nativeDeleteSnapshot }
             : {}),
         });
+        // §4 attribution travels on the decision itself (the primary path);
+        // the gate's verdict-ledger stays as the fallback for adapters that
+        // still strip these fields.
+        const markAttribution =
+          decision.decidedBy !== undefined && decision.mode !== undefined
+            ? {
+                decidedBy: decision.decidedBy,
+                ruleKind: decision.ruleKind,
+                mode: decision.mode,
+              }
+            : undefined;
         if (decision.behavior === 'deny') {
-          return { behavior: 'deny' as const, reason: decision.reason };
+          return {
+            behavior: 'deny' as const,
+            reason: decision.reason,
+            ...(markAttribution ? { ...markAttribution } : {}),
+          };
         }
         if (decision.behavior === 'allow') {
           return {
             behavior: 'allow' as const,
             reason: decision.reason,
             ...(decision.executionPlan ? { executionPlan: decision.executionPlan } : {}),
+            ...(markAttribution ? { ...markAttribution } : {}),
           };
         }
         const ruleMatchers = normalizeHostedPermissionRuleMatchers(decision.ruleMatchers);
@@ -80,6 +114,8 @@ export function createHostedAgentPermissionCapabilities(
           ...(ruleMatchers ? { ruleMatchers } : {}),
           ...(decision.executionPlan ? { executionPlan: decision.executionPlan } : {}),
           ...(decision.hookAutoApprovalEligible === true ? { hookAutoApprovalEligible: true } : {}),
+          ...(decision.bypassImmune === true ? { bypassImmune: true as const } : {}),
+          ...(markAttribution ? { ...markAttribution } : {}),
         };
       },
     },
@@ -99,6 +135,8 @@ export function createHostedAgentPermissionCapabilities(
         readonly parentToolDescription?: string;
         /** A deny ends this PTC program, never the whole Turn. */
         readonly stopPtcOnDeny?: boolean;
+        /** A bypass-immune ask: no always-options, hooks cannot approve it. */
+        readonly bypassImmune?: boolean;
         readonly signal?: AbortSignal;
         readonly channelContext?: HostedPermissionChannelContext;
       }) => {
@@ -131,6 +169,7 @@ export function createHostedAgentPermissionCapabilities(
               ? { parentToolDescription: input.parentToolDescription }
               : {}),
             ...(input.stopPtcOnDeny ? { stopPtcOnDeny: true } : {}),
+            ...(input.bypassImmune === true ? { bypassImmune: true } : {}),
             ...(origin ? { origin } : {}),
           },
           input.signal,

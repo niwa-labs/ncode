@@ -1,4 +1,9 @@
-import { isDefaultThinkingModelId, type Api, type ThinkingLevelMap } from '@earendil-works/pi-ai';
+// W06 (PORT-PI-1.3): the default/adaptive-thinking family matcher is
+// classified by the pinned catalog's `compat.forceAdaptiveThinking` metadata
+// (see adaptive-thinking-models.ts); the 0.79-era hardcoded list copy was
+// removed per its W02-round-2 removal condition.
+import { isAdaptiveDefaultThinkingModelId } from './adaptive-thinking-models.js';
+import type { Api, ThinkingLevelMap } from '@earendil-works/pi-ai';
 import type { ThinkingLevel as PiThinkingLevel } from '@earendil-works/pi-agent-core';
 import { normalizeMaxImagesPerRequest } from '@mavis/agent-core/pi-turn-runner';
 import {
@@ -469,7 +474,7 @@ export function resolveModelThinkingProtocol(
   } satisfies Omit<ModelThinkingProtocolConfig, 'requestPatch'>;
 
   if (api === 'anthropic-messages') {
-    const usesDefaultThinking = isDefaultThinkingModelId(modelId);
+    const usesDefaultThinking = isAdaptiveDefaultThinkingModelId(modelId);
     return {
       ...base,
       forceAdaptiveThinking: true,

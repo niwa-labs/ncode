@@ -52,7 +52,7 @@ export function readErrorResult(toolName: string, message: string): ToolResult {
 export function piReadResultToToolResult(
   toolName: string,
   res: AgentToolResult<Record<string, unknown>>,
-  opts: { offset?: number; maxLineChars?: number } = {},
+  opts: { offset?: number } = {},
 ): ToolResult {
   const content = res.content as ToolResultContent[];
   const details = { ...((res.details ?? {}) as Record<string, unknown>) };
@@ -93,7 +93,12 @@ export function piReadResultToToolResult(
       .join('\n'),
     content: outContent,
     details,
+    // W04 tool-contract funnel: preserve the pin result fields programmatic
+    // callers and the agent loop consume (structuredContent/usage/isError).
+    ...(res.isError !== undefined ? { isError: res.isError } : {}),
     ...(res.terminate !== undefined ? { terminate: res.terminate } : {}),
+    ...(res.structuredContent !== undefined ? { structuredContent: res.structuredContent } : {}),
+    ...(res.usage !== undefined ? { usage: res.usage } : {}),
   };
   const compatibleResponse = compatibleReadToolResponseFromPiDetails(res.details);
   return compatibleResponse

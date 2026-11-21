@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024"],
+    "target": "ES2024",
+    // The paths entries compile neighbor-package SOURCES (same resolution the
+    // standalone typecheck derives); vendored pi/chord sources are written
+    // under the upstream flag set, so mirror the standalone overrides:
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@mavis/logging": ["../packages/logging/src/index.ts"],
+      "@mavis/goal": ["../packages/agent-modules/goal/src/index.ts"],
+      "@mavis/background-task": ["../packages/agent-modules/background-task/src/index.ts"],
+      "@mavis/durable-backend-sqlite-zstd": ["../packages/durable-backend-sqlite-zstd/src/index.ts"],
+      "@earendil-works/chord": ["../../third_party/chord/src/index.ts"],
+      "@earendil-works/chord/context": ["../../third_party/chord/src/context/index.ts"],
+      "@earendil-works/chord/delta": ["../../third_party/chord/src/delta/index.ts"],
+      "@earendil-works/pi-ai": ["../../third_party/pi-mono/packages/ai/src/index.ts"],
+      "@earendil-works/pi-ai/models": ["../../third_party/pi-mono/packages/ai/src/models.ts"],
+      "@earendil-works/pi-durable": ["../../third_party/pi-durable/src/index.ts"]
+    }
+  },
+  "include": ["src", "test"]
+}

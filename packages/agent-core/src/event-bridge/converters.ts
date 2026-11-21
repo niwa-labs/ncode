@@ -177,7 +177,7 @@ export function toolCallFromRuntime(tc: RuntimeToolCall): ToolCall {
   return {
     tool_name: displayTc.tool_name,
     tool_call_id: displayTc.tool_call_id,
-    ...(displayTc.parent_tool_call_id
+    ...(displayTc.parent_tool_call_id !== undefined
       ? { parent_tool_call_id: displayTc.parent_tool_call_id }
       : {}),
     tool_call_status: toLegacyToolCallStatus(displayTc.status),
@@ -190,6 +190,10 @@ export function toolCallFromRuntime(tc: RuntimeToolCall): ToolCall {
     ...(tc.plugin_provenances?.length
       ? { plugin_provenances: tc.plugin_provenances.map((item) => ({ ...item })) }
       : {}),
+    // §4 `decidedBy`: the mark rides every status event of the call once the
+    // permission gate resolved it (final Finished/Failed at minimum), and the
+    // completed-message path persists it so replay keeps the attribution.
+    ...(tc.permission !== undefined ? { permission: tc.permission } : {}),
   };
 }
 
@@ -405,6 +409,17 @@ export function extractAssistantStopReason(message: unknown): string | undefined
   if (!message || typeof message !== 'object') return undefined;
   const stopReason = (message as Record<string, unknown>).stopReason;
   return typeof stopReason === 'string' && stopReason ? stopReason : undefined;
+}
+
+/**
+ * Pull the provider's raw stop reason off a pi assistant message — the
+ * pinned adapters' structural refusal/safety signal (`AssistantMessage.rawStopReason`),
+ * preserved before the adapter maps `refusal`/`sensitive` to `stopReason:"error"`.
+ */
+export function extractAssistantRawStopReason(message: unknown): string | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const rawStopReason = (message as Record<string, unknown>).rawStopReason;
+  return typeof rawStopReason === 'string' && rawStopReason ? rawStopReason : undefined;
 }
 
 /**

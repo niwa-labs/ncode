@@ -29,8 +29,12 @@ import type {
   UserMessageCommitInput,
   UserMessageCommitResult,
 } from './contract.js';
-import { UserMessageCommitAdmissionError, UserMessageCommitConflictError } from './contract.js';
-import { ensureMessageRowsReadyInTransaction } from './readiness.js';
+import { MessageCursorNotFoundError, UserMessageCommitAdmissionError, UserMessageCommitConflictError } from './contract.js';
+import {
+  ensureMessageRowsReadyInOpenedTransaction,
+  ensureMessageRowsReadyStaged,
+  type LegacyDisplayWriteSink,
+} from './readiness.js';
 import { syncMessageSourceProjection } from './source-projection.js';
 
 export function createMessageRepository(options: MessageRepositoryOptions): MessageRepository {
@@ -88,6 +92,7 @@ class DrizzleMessageRepository implements MessageRepository {
   async list(sessionId: string, options: ListMessagesOptions = {}): Promise<ListMessagesResult> {
     this.ensureReady(sessionId);
     const anchorId = options.before ? this.messageRowId(sessionId, options.before) : undefined;
+    if (options.before && anchorId === undefined) throw new MessageCursorNotFoundError(sessionId);
     const limit = normalizeLimit(options.limit, 0);
     const query = this.options.db
       .select()
@@ -101,11 +106,24 @@ class DrizzleMessageRepository implements MessageRepository {
       .orderBy(desc(messageRows.id));
     const rows = limit > 0 ? query.limit(limit + 1).all() : query.all();
     const hasMore = limit > 0 && rows.length > limit;
-    const selected = (hasMore ? rows.slice(0, limit) : rows).reverse();
+    if (limit > 0) {
+      // R7: a bounded page is the newest slice in newest-first order — the
+      // staged backfill's first read serves exactly the activation tail this
+      // way, before any older row exists. `nextCursor` stays the page's oldest
+      // message so `before` paging continues to walk strictly backwards; the
+      // query layer re-orders bounded pages for chronological presentation.
+      const selected = hasMore ? rows.slice(0, limit) : rows;
+      const oldest = selected.at(-1);
+      return {
+        messages: selected.map(decodeDisplayMessage),
+        hasMore,
+        ...(hasMore && oldest ? { nextCursor: oldest.messageId } : {}),
+      };
+    }
+    const selected = rows.reverse();
     return {
       messages: selected.map(decodeDisplayMessage),
       hasMore,
-      ...(hasMore && selected[0] ? { nextCursor: selected[0].messageId } : {}),
     };
   }
 
@@ -574,7 +592,10 @@ class DrizzleMessageRepository implements MessageRepository {
       .where(eq(messageRowMigrations.sessionId, sessionId))
       .get();
     if (marker) return;
-    this.mutationTransaction(sessionId, () => undefined);
+    // R7: staged display backfill — the read path activates on the newest tail
+    // and leaves older portions to the background instead of freezing inside
+    // one whole-history transaction.
+    ensureMessageRowsReadyStaged(this.options.db, sessionId, this.nowMs, this.legacyDisplaySink(sessionId));
   }
   private mutationTransaction<T>(sessionId: string, mutation: (db: AppDb) => T): T {
     return this.options.db.transaction(
@@ -586,19 +607,30 @@ class DrizzleMessageRepository implements MessageRepository {
     );
   }
   private ensureReadyInTransaction(db: AppDb, sessionId: string): void {
-    ensureMessageRowsReadyInTransaction(db, sessionId, this.nowMs(), (message, index) => {
+    // topDb keys the staged backfill registry; `db` is the caller's transaction.
+    ensureMessageRowsReadyInOpenedTransaction(
+      this.options.db,
+      db,
+      sessionId,
+      this.nowMs(),
+      this.legacyDisplaySink(sessionId),
+    );
+  }
+  private legacyDisplaySink(sessionId: string): LegacyDisplayWriteSink {
+    return (db, message, index, rowId) => {
       const normalized = normalizeDisplayMessage(message, {
         generatedIdDiscriminator: `legacy:${index}`,
         nowMs: this.nowMs,
       });
-      this.write(db, sessionId, normalized);
-    });
+      this.write(db, sessionId, normalized, true, rowId);
+    };
   }
   private write(
     db: AppDb,
     sessionId: string,
     message: NormalizedDisplayMessage,
     replaceProvenance = true,
+    rowId?: number,
   ): void {
     const existing = replaceProvenance
       ? undefined
@@ -616,6 +648,7 @@ class DrizzleMessageRepository implements MessageRepository {
     const sourceContextJson = existing?.sourceContextJson ?? message.sourceContextJson;
     db.insert(messageRows)
       .values({
+        ...(rowId === undefined ? {} : { id: rowId }),
         sessionId,
         messageId: message.msgId,
         role: message.role,

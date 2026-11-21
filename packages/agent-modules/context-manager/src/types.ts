@@ -1,12 +1,20 @@
-import type {
-  AgentMessage,
-  CompactionSummaryMessage,
-  StreamFn,
-  ThinkingLevel,
-} from '@earendil-works/pi-agent-core';
+import type { AgentMessage, StreamFn, ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { Api, Model, Tool } from '@earendil-works/pi-ai';
 
-export interface ContextCompactionSummaryMessage extends CompactionSummaryMessage {
+/**
+ * pi 48c8f322: `CompactionSummaryMessage` is not exported by `pi-agent-core` — the
+ * shape is owned by the vendored coding-agent (`core/messages.ts`), which folds it
+ * into `AgentMessage` via the `CustomAgentMessages` declaration merge. This
+ * module owns the structurally identical message plus `keptMessageCount`; the
+ * shared fields mirror coding-agent's `CompactionSummaryMessage` exactly, so
+ * assignability to `AgentMessage` holds through that merge. W10 integration:
+ * closes the W08-baseline TS2305 carry-forward without editing the vendor.
+ */
+export interface ContextCompactionSummaryMessage {
+  role: 'compactionSummary';
+  summary: string;
+  tokensBefore: number;
+  timestamp: number;
   /**
    * Number of following messages retained from the old context, whose usage is stale.
    * Persist this with the summary so a restored transcript has the same usage boundary.

@@ -1,65 +1,46 @@
 /**
- * Stdio MCP transport for Mavis runtimes.
+ * Stdio MCP transport for Mavis runtimes — pi-mcp `StdioTransport` engine.
  *
- * Ported from the retired `packages/daemon/src/mcp/runtime/transport/stdio.ts`,
- * narrowed to the surface Mavis runtimes need:
+ * W08 PORT-PI-1.3: the old `@modelcontextprotocol/sdk` StdioClientTransport
+ * wrapper is ABSORBED by `@earendil-works/pi-mcp`. Mcode behaviors preserved
+ * through this facade (the factory owns them, the pool stays transport-
+ * agnostic):
  *
  *   * `cwd: homedir()` — never inherit launchd / Electron / systemd CWD (which
  *     can be `/`), so MCP children that write workspace-relative dirs
- *     (such as Playwright's `.playwright-mcp/`) don't
- *     ENOENT against `/`.
- *   * `stderr: 'pipe'` — the SDK creates a PassThrough but no consumer
- *     attaches by default. The connection pool's `attachStderrLogging` reads
- *     this stream and emits per-line log records; without `'pipe'` here that
- *     hook would silently no-op. We also attach an error handler to the raw
- *     child stderr pipe because Node does not forward source stream errors
- *     through `.pipe()`.
+ *     (such as Playwright's `.playwright-mcp/`) don't ENOENT against `/`.
+ *   * `stderr: 'pipe'` — pi buffers child stderr itself (`onStderr` /
+ *     `.stderr`); the pool's line-buffered observers are fed from here.
  *   * `env` constructed as `{ ...process.env, ...config.env, ...injected.env }`
  *     — injected env wins so host-provided identity or policy data can
  *     override any stale value baked into config or leaking from the parent
- *     process env.
- *   * `maxBufferSize: MCP_STDIO_MAX_MESSAGE_BYTES` — the SDK default (10 MiB)
- *     closes the connection when one JSON-RPC message is larger, which a single
- *     full-resolution image result easily exceeds. Oversized images are
- *     re-encoded later, before they reach a model request.
+ *     process env. (pi `inheritEnv` stays at its default `true`; the merged
+ *     map is passed explicitly so precedence is visible in one place.)
+ *   * pi transport adds process-group kill for wrapper children (npx/uvx) and
+ *     an exit hook — strictly stronger cleanup than the old SDK transport.
  */
 import { homedir } from 'node:os';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { StdioTransport } from '@earendil-works/pi-mcp';
 import type { StdioTransportConfig } from '../types.js';
-
-export const MCP_STDIO_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
 
 export interface McpStdioTransportOptions {
   env?: Record<string, string>;
+  /** Raw stderr chunks from the child (pi transport callback). */
+  onStderrChunk?: (chunk: string) => void;
 }
 
 export function createStdioTransport(
   config: StdioTransportConfig,
   options?: McpStdioTransportOptions,
-): Transport {
-  return new SafeStdioClientTransport({
+): StdioTransport {
+  return new StdioTransport({
     command: config.command,
     args: config.args,
-    env: buildProcessEnv(config.env, options?.env),
     cwd: config.cwd ?? homedir(),
+    env: buildProcessEnv(config.env, options?.env),
     stderr: 'pipe',
-    maxBufferSize: MCP_STDIO_MAX_MESSAGE_BYTES,
+    ...(options?.onStderrChunk ? { onStderr: options.onStderrChunk } : {}),
   });
-}
-
-class SafeStdioClientTransport extends StdioClientTransport {
-  override async start(): Promise<void> {
-    await super.start();
-    const childProcess = (
-      this as unknown as {
-        _process?: { stderr?: NodeJS.ReadableStream | null };
-      }
-    )._process;
-    childProcess?.stderr?.on?.('error', (error: Error) => {
-      this.onerror?.(error);
-    });
-  }
 }
 
 function buildProcessEnv(

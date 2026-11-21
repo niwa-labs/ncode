@@ -1,0 +1,33 @@
+{
+  "name": "@mavis/mcoded",
+  "version": "0.1.0",
+  "description": "Resident mcoded daemon (W10 product composition): unix-socket listener with launchd-style LISTEN_FDS adoption, the pi-rpc-semantics JSONL wire (prompt/steer/follow_up/events with version, cursor, request-id and bounded pagination) over pluggable transports, the bounded event replay ring backed by a durable event log (replay survives restarts), request-id dedup for retried mutations, crash-only checkpoint recovery and graceful drain shutdown. The live agent runtime plugs in through the RuntimeAdapter seam: LocalRuntimeV2Adapter drives the local-runtime-v2 conversation pipeline and is the hybrid default (MCODED_RUNTIME=echo keeps the legacy skeleton; unknown values fail startup \u2014 never a silent downgrade) \u2014 it inherits the selected profile's OAuth lease (--profile / MINIMAX_PROFILE), keeps the managed bearer synced for the model resolver, resolves the config default model to an available route model, and relays a failed turn (terminal session_status error) as an explicit turn_failed event.",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@mavis/logging": "workspace:*",
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "dependencies": {
+    "@mavis/config": "workspace:^",
+    "@mavis/local-runtime-v2": "workspace:^",
+    "@mavis/oauth-core": "workspace:*",
+    "@mavis/shared": "workspace:^",
+    "@mavis/mcode-tools-host": "workspace:^"
+  },
+  "private": true,
+  "license": "MIT"
+}

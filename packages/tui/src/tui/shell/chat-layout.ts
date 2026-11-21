@@ -6,7 +6,7 @@ import {
   VStack,
 } from '../engine/public.js';
 import type { Component } from '../rendering/component.js';
-import { stripAnsi, truncateToWidth } from '../rendering/text.js';
+import { stripAnsi } from '../rendering/text.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../theme/runtime.js';
 import { resolveTuiLayoutPolicy } from './layout-policy.js';
 
@@ -40,6 +40,8 @@ interface ActiveAwareComponent extends Component {
 /** A transcript whose leading rows can be marked final for native scrollback. */
 interface StableRowsAwareComponent extends Component {
   getStableRowCount(): number;
+  /** Parallel tools may rewrite prior rows; long streamed answers must reach history. */
+  shouldHoldMutableRows?(): boolean;
   /** Whether leading final rows were dropped; the welcome above them is then gone too. */
   isTrimmed?(): boolean;
   takeDiscardedRows?(): number;
@@ -52,7 +54,7 @@ interface PreludeAwareComponent extends Component {
 }
 
 interface MouseAwareComponent extends Component {
-  handleMouse(event: TuiMouseEvent): boolean;
+  handleLayoutMouse(event: TuiMouseEvent): boolean;
 }
 
 export class TuiChatLayout implements Component {
@@ -89,7 +91,7 @@ export class TuiChatLayout implements Component {
   ) {
     const body: MouseAwareComponent = {
       render: (width) => this.renderFullscreenBody(width),
-      handleMouse: (event) => this.handleFullscreenBodyMouse(event),
+      handleLayoutMouse: (event) => this.handleFullscreenBodyMouse(event),
       invalidate: () => {
         this.pendingFullscreenFrame = undefined;
         this.fullscreenBodyMouseTarget = undefined;
@@ -379,24 +381,17 @@ export class TuiChatLayout implements Component {
     const footer = [...interaction, ...accountNotice, ...afterInteraction.flat()];
     const liveBudget = Math.max(0, (this.terminal.rows || 24) - footer.length);
     let live = body.slice(finalRows);
-    if (live.length > liveBudget) {
+    // Mutable tool rows can be replaced; streamed answer rows must enter history.
+    const holdMutableRows = stableAware && transcriptPart.shouldHoldMutableRows?.() !== false;
+    if (holdMutableRows && live.length > liveBudget) {
       const shown = Math.max(0, liveBudget - 1);
       const hidden = live.length - shown;
       live = [
-        ...(liveBudget > 0
-          ? insetPart([renderHeldRowsNotice(hidden, frame.contentWidth, this.heldRowsHint())])
-          : []),
+        ...(liveBudget > 0 ? insetPart([renderHeldRowsNotice(hidden)]) : []),
         ...live.slice(live.length - shown),
       ];
     }
     return [...body.slice(0, finalRows), ...live, ...footer];
-  }
-
-  private heldRowsHint(): string | undefined {
-    const interaction = this.parts.interaction;
-    return 'heldRowsHint' in interaction && typeof interaction.heldRowsHint === 'function'
-      ? (interaction.heldRowsHint() as string | undefined)
-      : undefined;
   }
 
   private renderFullscreenBody(width: number): string[] {
@@ -413,7 +408,7 @@ export class TuiChatLayout implements Component {
     const range = this.fullscreenBodyMouseRange;
     if (!target || !range || !isMouseAwareComponent(target)) return false;
     if (event.y < range.start || event.y >= range.end) return false;
-    return target.handleMouse({
+    return target.handleLayoutMouse({
       ...event,
       x: Math.max(0, event.x - this.fullscreenBodyHorizontalPadding),
       y: event.y - range.start,
@@ -426,7 +421,7 @@ export class TuiChatLayout implements Component {
         const frame =
           this.fullscreenFooterFrame?.width === width
             ? this.fullscreenFooterFrame.frame
-            : this.resolveFullscreenFrame(width);
+            : this.composeFullscreenFrame(width, false);
         return [...(frame.footerSections[index] ?? [])];
       },
       invalidate: () => {
@@ -439,8 +434,6 @@ export class TuiChatLayout implements Component {
   private resolveFullscreenFrame(width: number): FullscreenChatFrame {
     const pending = this.pendingFullscreenFrame;
     if (pending?.width === width) return pending.frame;
-    const footerFrame = this.fullscreenFooterFrame;
-    if (footerFrame?.width === width) return footerFrame.frame;
     const frame = this.composeFullscreenFrame(width);
     this.pendingFullscreenFrame = { width, frame };
     this.fullscreenFooterFrame = { width, frame };
@@ -448,8 +441,7 @@ export class TuiChatLayout implements Component {
   }
 
   private renderFullscreenFooter(width: number): string[] {
-    const frame = this.composeFullscreenFrame(width);
-    this.pendingFullscreenFrame = { width, frame };
+    const frame = this.composeFullscreenFrame(width, false);
     this.fullscreenFooterFrame = { width, frame };
     return frame.footerSections.flatMap((section) => section);
   }
@@ -458,7 +450,9 @@ export class TuiChatLayout implements Component {
     return isActiveAwareComponent(this.parts.interaction) && this.parts.interaction.isActive();
   }
 
-  private composeFullscreenFrame(width: number): FullscreenChatFrame {
+  // Footer measurement uses the full width, while the body has a scrollbar
+  // gutter. Rendering history for both widths thrashes every transcript cache.
+  private composeFullscreenFrame(width: number, includeBody = true): FullscreenChatFrame {
     const frame = resolveChatFrame(width, this.terminal.rows);
     const surface = this.getSurface();
     const renderPart = (component: Component): string[] => [
@@ -492,6 +486,10 @@ export class TuiChatLayout implements Component {
             frame.horizontalPadding,
           )
         : fullInteraction;
+      if (!includeBody) return {
+        body: [], footerSections: [[], [], [], activity, [], status],
+        horizontalPadding: frame.horizontalPadding,
+      };
       const welcome = renderPart(this.parts.welcome);
       const transcript = renderPart(this.parts.transcript);
       const welcomeAndTranscript = joinWelcomeAndTranscript(welcome, transcript);
@@ -521,6 +519,10 @@ export class TuiChatLayout implements Component {
       goal.length + followUp.length + activity.length + composer.length + status.length,
       surface === 'conversation' ? 1 : Math.max(1, notice.length + 1),
     );
+    if (!includeBody) return {
+      body: [], footerSections: [goal, followUp, tasks, activity, composer, status],
+      horizontalPadding: frame.horizontalPadding,
+    };
     if (surface === 'welcome') {
       const availableRows = Math.max(
         1,
@@ -623,7 +625,7 @@ function isActiveAwareComponent(component: Component): component is ActiveAwareC
 }
 
 function isMouseAwareComponent(component: Component): component is MouseAwareComponent {
-  return 'handleMouse' in component && typeof component.handleMouse === 'function';
+  return 'handleLayoutMouse' in component && typeof component.handleLayoutMouse === 'function';
 }
 
 function joinWelcomeAndTranscript(
@@ -640,16 +642,9 @@ function joinWelcomeAndTranscript(
   return [...compactWelcome, ...(isVisuallyBlank(transcript[0] ?? '') ? [] : ['']), ...transcript];
 }
 
-function renderHeldRowsNotice(hiddenRows: number, width: number, hint?: string): string {
+function renderHeldRowsNotice(hiddenRows: number): string {
   const noun = hiddenRows === 1 ? 'line' : 'lines';
-  // Singular form is exactly 37 columns. A ~21-column pane then fails the
-  // regular-mode differential redraw guard (37 > 21) and stops the TUI.
-  // The current interaction may name a way to read the held rows instead.
-  return truncateToWidth(
-    chalk.hex(colors.muted)(`↑ ${hiddenRows} more ${noun} above · ${hint ?? 'still updating'}`),
-    Math.max(0, width),
-    '…',
-  );
+  return chalk.hex(colors.muted)(`↑ ${hiddenRows} more ${noun} above · still updating`);
 }
 
 function isStableRowsAwareComponent(

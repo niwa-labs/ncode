@@ -1,5 +1,5 @@
 import type { TuiSession } from '../../runtime/port.js';
-import type { TuiMessage, TuiStreamEvent } from '../../runtime/stream-events.js';
+import type { TuiStreamEvent } from '../../runtime/stream-events.js';
 import { TuiRunCoordinator } from '../../application/run-coordinator.js';
 import { executeTuiInteractiveTurn } from '../../application/interactive-turn-delivery.js';
 import { requireTuiInteractiveAgentAccess } from '../../application/login-gate.js';
@@ -12,7 +12,7 @@ import type { TranscriptAttachment, TranscriptUserPresentation } from '../transc
 import { MINIMAX_CODE_DEFAULT_AGENT_NAME } from '../../product-context.js';
 import { TuiTurnProjection } from './projection/turn-projection.js';
 import type { OptimisticUserCommitMode } from './projection/turn-projection.js';
-import { TuiStatusMetricsFlow, withKnownTokenPlan } from './projection/status-metrics-flow.js';
+import { TuiStatusMetricsFlow } from './projection/status-metrics-flow.js';
 import { TuiTurnOutputRate } from './projection/turn-output-rate.js';
 import {
   cloneAccountStatus,
@@ -83,9 +83,7 @@ export class TuiChatController {
   private sessionCreationSequence = 0;
   private sessionCatalogRefreshSequence = 0;
   private sessionProjectionSequence = 0;
-  private historyRefreshSequence?: number;
   private durableMessageAnchor?: string;
-  private historyMessageIds: string[] = [];
   private pendingHistoryRefresh = false;
   private readonly idleWaiters = new Set<() => void>();
   private notificationBatchDepth = 0;
@@ -227,7 +225,6 @@ export class TuiChatController {
       this.transcript.clear();
       this.turnProjection.hydrateHistory(messages);
       this.durableMessageAnchor = latestHistoryMessageId(messages);
-      this.historyMessageIds = messages.flatMap((message) => (message.id ? [message.id] : []));
       if (projectionSequence !== this.sessionProjectionSequence) return;
       this.updateState({
         ...resolveTuiSessionFailureState(session),
@@ -253,19 +250,18 @@ export class TuiChatController {
     this.assertNoActiveTurn('refreshing session history');
     this.invalidateSessionCatalogRefresh();
     const current = this.requireCurrentSession();
+    const getMessages = requireRuntimeMethod(this.runtime, 'getMessages');
     const projectionSequence = ++this.sessionProjectionSequence;
-    this.historyRefreshSequence = projectionSequence;
     this.updateState({ status: 'starting', error: undefined });
     try {
       const [session, messages] = await Promise.all([
         this.runtime.getSession?.(current.sessionId) ?? current,
-        this.readVisibleSessionHistory(current.sessionId, projectionSequence),
+        getMessages(current.sessionId),
       ]);
       if (projectionSequence !== this.sessionProjectionSequence) return;
       this.turnProjection.clearTodos();
       this.transcript.replaceDurableProjection(() => this.turnProjection.hydrateHistory(messages));
       this.durableMessageAnchor = latestHistoryMessageId(messages);
-      this.historyMessageIds = messages.flatMap((message) => (message.id ? [message.id] : []));
       if (projectionSequence !== this.sessionProjectionSequence) return;
       this.updateState({
         ...resolveTuiSessionFailureState(session),
@@ -283,9 +279,6 @@ export class TuiChatController {
         }),
       });
       throw error;
-    } finally {
-      if (this.historyRefreshSequence === projectionSequence)
-        this.historyRefreshSequence = undefined;
     }
   }
 
@@ -293,56 +286,6 @@ export class TuiChatController {
     if (this.state.session) return Promise.resolve(this.state.session);
     if (this.activeTurn || this.sessionCreation) return this.ensureSession();
     return Promise.reject(new Error('No active session.'));
-  }
-
-  private async readVisibleSessionHistory(
-    sessionId: string,
-    projectionSequence: number,
-  ): Promise<TuiMessage[]> {
-    if (!this.runtime.listMessagePage) {
-      return requireRuntimeMethod(this.runtime, 'getMessages')(sessionId, 0);
-    }
-    const startId = this.historyMessageIds[0];
-    const visibleMessageIds = new Set([
-      ...this.historyMessageIds,
-      ...this.transcript
-        .snapshot()
-        .flatMap((cell) => (cell.sourceMessageId ? [cell.sourceMessageId] : [])),
-    ]);
-    const pages: TuiMessage[][] = [];
-    const seenCursors = new Set<string>();
-    let before: string | undefined;
-    for (;;) {
-      const page = await this.runtime.listMessagePage(sessionId, { limit: 80, before });
-      if (projectionSequence !== this.sessionProjectionSequence) return [];
-      const startIndex = startId
-        ? page.messages.findIndex((message) => message.id === startId)
-        : -1;
-      pages.push(startIndex >= 0 ? page.messages.slice(startIndex) : page.messages);
-      if (startIndex >= 0) return pages.reverse().flat();
-      if (!page.hasMore) {
-        const latestPage = pages[0] ?? [];
-        const messages = pages.reverse().flat();
-        const firstVisible = messages.findIndex(
-          (message) => message.id && visibleMessageIds.has(message.id),
-        );
-        // A removed anchor must not expand the next refresh to the entire session.
-        return firstVisible >= 0 ? messages.slice(firstVisible) : latestPage;
-      }
-      if (!page.nextCursor || seenCursors.has(page.nextCursor)) {
-        throw new Error('Runtime returned an incomplete history page. Retry synchronization.');
-      }
-      seenCursors.add(page.nextCursor);
-      before = page.nextCursor;
-    }
-  }
-
-  private invalidatePendingHistoryRefresh(): void {
-    if (this.historyRefreshSequence !== this.sessionProjectionSequence) return;
-    this.historyRefreshSequence = undefined;
-    this.sessionProjectionSequence += 1;
-    if (this.activeTurn) this.pendingHistoryRefresh = true;
-    else if (this.state.status === 'starting') this.updateState({ status: 'idle' });
   }
 
   async renameCurrentSession(title: string): Promise<TuiSession> {
@@ -391,7 +334,6 @@ export class TuiChatController {
       this.turnProjection.clearTodos();
       this.transcript.clear();
       this.durableMessageAnchor = undefined;
-      this.historyMessageIds = [];
     }
     this.updateState({
       status: 'idle',
@@ -424,7 +366,6 @@ export class TuiChatController {
     let recoveringPausedQueue = false;
     const onQueuePaused = options.onQueuePaused;
     this.activeTurn = activeTurn;
-    this.invalidatePendingHistoryRefresh();
     const optimisticCell = options.optimisticRequestId
       ? this.transcript.get(`optimistic:user:${options.optimisticRequestId}`)
       : undefined;
@@ -526,6 +467,7 @@ export class TuiChatController {
           }
         },
         onRunAccepted: () => {
+          activeTurn.runtimeAccepted = true;
           admittedSessionId = resolvedSessionId;
           if (resolvedSessionId) options.onRuntimeAccepted?.(resolvedSessionId);
           this.onTurnAccepted?.(turnId);
@@ -534,6 +476,7 @@ export class TuiChatController {
           ? {
               onResult: async (execResult) => {
                 if (
+                  activeTurn.deliveryRetired ||
                   activeTurn.retracted ||
                   (execResult.status === 'blocked' &&
                     execResult.error?.code === 'QUESTIONNAIRE_REQUIRED') ||
@@ -683,11 +626,7 @@ export class TuiChatController {
     });
   }
 
-  /** `retractedRuntimeTurnId`: a withdrawn Runtime-owned Turn whose live cells are dropped. */
-  async reconcileOwnerHistory(
-    retractActiveTurn = false,
-    retractedRuntimeTurnId?: string,
-  ): Promise<boolean> {
+  async reconcileOwnerHistory(retractActiveTurn = false): Promise<boolean> {
     if (retractActiveTurn && this.activeTurn) {
       this.activeTurn.retracted = true;
       this.pendingHistoryRefresh = true;
@@ -697,9 +636,6 @@ export class TuiChatController {
     if (this.activeTurn) {
       this.pendingHistoryRefresh = true;
       return false;
-    }
-    if (retractActiveTurn && retractedRuntimeTurnId) {
-      this.turnProjection.removeTurn(retractedRuntimeTurnId);
     }
     await this.refreshCurrentSessionHistory();
     return true;
@@ -756,7 +692,6 @@ export class TuiChatController {
   }
 
   beginRuntimeTurn(turnId: string, timestamp: number): void {
-    this.invalidatePendingHistoryRefresh();
     this.outputRate.beginTurn(turnId);
     this.turnProjection.beginTurn(turnId, timestamp);
     if (
@@ -836,7 +771,6 @@ export class TuiChatController {
     this.outputRate.reset();
     this.transcript.clear();
     this.durableMessageAnchor = undefined;
-    this.historyMessageIds = [];
     if (markSessionCleared) this.options.onSessionLifecycle?.();
     this.state = {
       status: 'idle',
@@ -910,7 +844,7 @@ export class TuiChatController {
 
   async requireLoginForAgentAction(): Promise<void> {
     await requireTuiInteractiveAgentAccess(this.runtime, this.state.session?.sessionId, (account) =>
-      this.updateState({ account: withKnownTokenPlan(this.state.account, account) }),
+      this.updateState({ account }),
     );
   }
 
@@ -918,6 +852,33 @@ export class TuiChatController {
     if (this.activeTurn || this.runCoordinator.retiringTurnId()) {
       throw new Error(`Stop the running turn before ${action}.`);
     }
+  }
+
+  /** Called only after repeated authoritative idle reads for this exact turn. */
+  reconcileCompletedForegroundTurn(sessionId: string, turnId: string): boolean {
+    const activeTurn = this.activeTurn;
+    if (
+      this.state.session?.sessionId !== sessionId ||
+      activeTurn?.id !== turnId ||
+      !activeTurn.runtimeAccepted ||
+      activeTurn.cancelling
+    )
+      return false;
+    activeTurn.deliveryRetired = true;
+    this.activeTurn = undefined;
+    activeTurn.sessionDeliveryAbort.abort();
+    this.runCoordinator.retireCompletedRun(turnId);
+    this.pendingHistoryRefresh = false;
+    this.turnProjection.clearTurn(turnId);
+    // Idle does not establish a canonical success/failure outcome. History owns it.
+    this.updateState({
+      status: 'idle',
+      activeTurnId: undefined,
+      cancelling: false,
+      error: undefined,
+    });
+    this.resolveIdleWaiters();
+    return true;
   }
 
   private detachActiveTurnForSessionSwitch(): void {

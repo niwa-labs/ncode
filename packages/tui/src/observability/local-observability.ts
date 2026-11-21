@@ -1,10 +1,11 @@
 import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { redactTuiSensitiveText } from '../user-facing-failure.js';
+
 import type {
   TuiClipboardImageDiagnostic,
   TuiClipboardImageErrorCode,
 } from '../host/clipboard-image.js';
+import { redactTuiSensitiveText } from '../user-facing-failure.js';
 
 export type TuiObservabilitySurface = 'tui' | 'headless' | 'acp' | 'inspection';
 export type TuiRuntimeAccessSource = 'process-local';
@@ -82,6 +83,38 @@ export interface TuiRenderObservation {
   readonly height: number;
   readonly changedLines: number;
   readonly fullRedraw: boolean;
+}
+
+/**
+ * Time spent waiting for the previous frame's terminal output to drain before
+ * the next frame could be computed. Kept separate from `TuiRenderObservation`
+ * so CPU render cost and backpressure wait are never added together.
+ */
+export interface TuiRenderWaitObservation {
+  readonly durationMs: number;
+  /** Frame number whose render was deferred behind the drain. */
+  readonly frame: number;
+}
+
+/** Aggregated transcript projection/cache counters from `TranscriptView.getPerformanceSnapshot()`. */
+export interface TuiTranscriptPerformanceSnapshot {
+  readonly sourceUnits: number;
+  readonly projectedCells: number;
+  readonly projectedUnits: number;
+  readonly renderedUnits: number;
+  readonly hiddenTurns: number;
+  readonly foldedCells: number;
+  readonly projectionVisitedCells: number;
+  readonly windowRolls: number;
+  readonly unitCacheEntries: number;
+  readonly unitCacheHits: number;
+  readonly unitCacheMisses: number;
+  readonly frameCacheHit?: boolean;
+}
+
+export interface TuiTranscriptPerformanceObservation {
+  readonly frame: number;
+  readonly snapshot: TuiTranscriptPerformanceSnapshot;
 }
 
 export interface TuiProcessErrorObservation {
@@ -182,8 +215,8 @@ export interface TuiStopPolicyObservation {
 
 export interface TuiObservability {
   recordClipboardRead?(observation: TuiClipboardReadObservation): void;
-  recordSideSessionFailure?(observation: TuiSideSessionFailureObservation): void;
   recordStopPolicy?(observation: TuiStopPolicyObservation): void;
+  recordSideSessionFailure?(observation: TuiSideSessionFailureObservation): void;
   recordStartup(observation: TuiStartupObservation): void;
   recordAccess(observation: TuiRuntimeAccessObservation): void;
   recordEventStream(observation: TuiEventStreamObservation): void;
@@ -192,6 +225,10 @@ export interface TuiObservability {
   recordProcessStop(observation: TuiProcessStopObservation): void;
   recordTheme?(observation: TuiThemeObservation): void;
   observeRender(observation: TuiRenderObservation): void;
+  /** Drain (backpressure) wait before a render; optional so older sinks keep working. */
+  observeRenderWait?(observation: TuiRenderWaitObservation): void;
+  /** Periodic transcript projection/cache snapshot; optional so older sinks keep working. */
+  recordTranscriptPerformance?(observation: TuiTranscriptPerformanceObservation): void;
   snapshot(): TuiObservabilitySnapshot;
   flush(): Promise<void>;
 }
@@ -243,6 +280,8 @@ export const noopTuiObservability: TuiObservability = Object.freeze({
   recordProcessStop: () => undefined,
   recordTheme: () => undefined,
   observeRender: () => undefined,
+  observeRenderWait: () => undefined,
+  recordTranscriptPerformance: () => undefined,
   snapshot: (): TuiObservabilitySnapshot => ({
     filePath: '',
     eventCounts: {},
@@ -298,13 +337,13 @@ class LocalTuiObservability implements TuiObservability {
       .catch(() => undefined);
   }
 
-  recordClipboardRead(observation: TuiClipboardReadObservation): void {
-    this.record('clipboard.read', observation);
-  }
-
   recordSideSessionFailure(observation: TuiSideSessionFailureObservation): void {
     const { error, ...context } = observation;
     this.record('session.side.failed', { ...context, errors: describeSideSessionErrors(error) });
+  }
+
+  recordClipboardRead(observation: TuiClipboardReadObservation): void {
+    this.record('clipboard.read', observation);
   }
 
   recordStopPolicy(observation: TuiStopPolicyObservation): void {
@@ -364,6 +403,17 @@ class LocalTuiObservability implements TuiObservability {
     }
   }
 
+  observeRenderWait(observation: TuiRenderWaitObservation): void {
+    this.record('render.wait', {
+      ...observation,
+      durationMs: normalizeDuration(observation.durationMs),
+    });
+  }
+
+  recordTranscriptPerformance(observation: TuiTranscriptPerformanceObservation): void {
+    this.record('render.transcript', observation);
+  }
+
   snapshot(): TuiObservabilitySnapshot {
     return {
       filePath: this.filePath,
@@ -374,6 +424,8 @@ class LocalTuiObservability implements TuiObservability {
         terminal: this.eventCounts.get('terminal.capability') ?? 0,
         processStop: this.eventCounts.get('process.stop') ?? 0,
         renderLatency: this.eventCounts.get('render.latency') ?? 0,
+        renderWait: this.eventCounts.get('render.wait') ?? 0,
+        renderTranscript: this.eventCounts.get('render.transcript') ?? 0,
         renderSummary: this.eventCounts.get('render.summary') ?? 0,
       },
       accessSources: Object.fromEntries(this.accessSources),

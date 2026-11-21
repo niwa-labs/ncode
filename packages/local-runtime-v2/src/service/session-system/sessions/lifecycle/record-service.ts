@@ -3,8 +3,8 @@ import {
   hasConversationTaskModelSelection,
   type ConversationModelThinkingSelection,
   type ConversationModelSelection,
-  type ConversationPluginAgentDefinition,
   type ConversationTaskModelSelection,
+  type ConversationTaskPluginAgent,
 } from '@mavis/conversation-contract';
 
 import type {
@@ -30,7 +30,6 @@ import { isTaskSession } from '../repo/drizzle/normalization.js';
 import { AgentServiceError } from '../../../agent/errors.js';
 import { SessionServiceError } from '../errors.js';
 import { isDefaultProjectWorkspace } from '../../shared/project-workspace.js';
-import type { SessionToolCallModePolicy } from '../support/tool-call-mode.js';
 import type {
   SessionMutationFields,
   SessionMetadataCreateInput,
@@ -76,6 +75,7 @@ export interface CapturedTaskAgentBinding {
 
 export interface SessionCreateInput {
   readonly agentName: string;
+  readonly taskPluginAgent?: ConversationTaskPluginAgent;
   readonly workspaceDir?: string;
   readonly title?: string | null;
   readonly parentSessionId?: string | null;
@@ -92,6 +92,7 @@ export interface SessionCreateInput {
 
 export interface InternalSessionCreateInput {
   readonly agentName: string;
+  readonly taskPluginAgent?: ConversationTaskPluginAgent;
   readonly workspaceDir?: string;
   readonly sessionType?: 'root' | 'branch';
   readonly sessionKind?: SessionKind;
@@ -102,8 +103,6 @@ export interface InternalSessionCreateInput {
   readonly originCronId?: string;
   readonly runLocation?: SessionRecord['runLocation'];
   readonly appMode?: SessionAppMode;
-  /** Set by creators that copy a source's history (Fork); everyone else gets the policy mode. */
-  readonly toolCallMode?: SessionRecord['toolCallMode'];
   readonly effectiveModel?: string | null;
   readonly effectiveModelVariant?: string | null;
   readonly effectiveModelThinking?: ConversationModelThinkingSelection | null;
@@ -115,8 +114,6 @@ export interface InternalSessionCreateInput {
   readonly preserveDefaultWorkspaceIdentity?: boolean;
   /** Trusted Fork-only snapshot; its owner, prompt, capabilities and model remain immutable. */
   readonly forkedAgentDefinition?: SessionAgentDefinitionCreate;
-  /** Trusted Task-only Plugin Agent copied from the parent Turn's capability lease. */
-  readonly pluginAgentDefinition?: ConversationPluginAgentDefinition;
   readonly origin?: SessionOrigin;
 }
 
@@ -219,8 +216,6 @@ export interface SessionRecordServiceDeps {
   };
   readonly facts: SessionFactSink;
   readonly workspace?: { initialize(workspaceDir: string): Promise<void> };
-  /** Mode written to Sessions that do not copy a source's history; absent writes nothing. */
-  readonly toolCallMode?: SessionToolCallModePolicy;
   /**
    * Optional best-effort diagnostic sink for the startup full-Session-definition
    * backfill. Missing or test-only compositions may omit it; production wires
@@ -243,7 +238,6 @@ export interface SessionRecordServiceDeps {
       readonly taskModelSelection?: ConversationTaskModelSelection;
       readonly requestedModel?: ConversationModelSelection;
       readonly parentModel?: FrozenAgentExecutionDefinition['model'];
-      readonly pluginAgent?: ConversationPluginAgentDefinition;
     }): Promise<CapturedTaskAgentBinding>;
     captureSessionDefinition(input: {
       readonly agentName: string;
@@ -466,6 +460,7 @@ export class SessionRecordService
     });
     const taskCapture = await this.captureSessionAgentDefinition({
       agentName: input.agentName,
+      ...(input.taskPluginAgent ? { taskPluginAgent: input.taskPluginAgent } : {}),
       ...(input.model ? { requestedModel: input.model } : {}),
       session: sessionCaptureCandidate({
         sessionId,
@@ -597,13 +592,13 @@ export class SessionRecordService
       forkedAgentDefinition: undefined,
       taskCapture: await this.captureSessionAgentDefinition({
         agentName: input.input.agentName,
+        ...(input.input.taskPluginAgent ? { taskPluginAgent: input.input.taskPluginAgent } : {}),
         session,
         parent: input.parent,
         appMode: input.appMode,
         ...(hasConversationTaskModelSelection(input.taskModelSelection)
           ? { taskModelSelection: input.taskModelSelection }
           : {}),
-        pluginAgent: input.input.pluginAgentDefinition,
       }),
     };
   }
@@ -717,14 +712,13 @@ export class SessionRecordService
 
   private async captureSessionAgentDefinition(input: {
     readonly agentName: string;
+    readonly taskPluginAgent?: ConversationTaskPluginAgent;
     readonly session: SessionRecord;
     readonly parent: SessionRecord | undefined;
     readonly appMode?: SessionRecord['appMode'];
     readonly taskModelSelection?: ConversationTaskModelSelection;
     readonly requestedModel?: ConversationModelSelection;
-    readonly pluginAgent?: ConversationPluginAgentDefinition;
   }): Promise<CapturedTaskAgentBinding | undefined> {
-    assertPluginAgentTaskSession(input.session, input.pluginAgent);
     if (!isTaskSession(input.session)) return undefined;
     const capture = this.taskAgentBindingCapture;
     if (!capture) {
@@ -743,6 +737,7 @@ export class SessionRecordService
     return capture.capture({
       agentName: input.agentName,
       session: input.session,
+      ...(input.taskPluginAgent ? { pluginAgent: input.taskPluginAgent } : {}),
       ...(input.parent ? { parent: input.parent } : {}),
       ...(input.appMode ? { appMode: input.appMode } : {}),
       ...(parentModel?.parameterSnapshot ? { parentModel } : {}),
@@ -750,7 +745,6 @@ export class SessionRecordService
       ...(hasConversationTaskModelSelection(input.taskModelSelection)
         ? { taskModelSelection: input.taskModelSelection }
         : {}),
-      pluginAgent: input.pluginAgent,
     });
   }
 
@@ -867,11 +861,7 @@ export class SessionRecordService
   }
 
   private async createRecord(input: SessionMetadataCreateInput): Promise<SessionRecord> {
-    const toolCallMode = input.toolCallMode ?? this.deps.toolCallMode?.current();
-    const created = await this.deps.metadata.create({
-      ...input,
-      ...(toolCallMode ? { toolCallMode } : {}),
-    });
+    const created = await this.deps.metadata.create(input);
     try {
       await this.deps.artifacts?.initialize(created.sessionId);
     } catch (error) {
@@ -1005,7 +995,6 @@ function toInternalMetadataCreateInput(
     ...internalModelFields(context.input, context.taskCapture, context.forkedAgentDefinition),
     ...internalBindingFields(context.taskCapture, context.forkedAgentDefinition),
     origin: context.input.origin ?? 'user',
-    ...whenPresent('toolCallMode', context.input.toolCallMode),
   };
 }
 
@@ -1180,15 +1169,6 @@ function internalVariantField(
 ): Pick<SessionMetadataCreateInput, 'effectiveModelVariant'> {
   if (taskCapture) return whenDefined('effectiveModelVariant', taskCapture.effectiveModelVariant);
   return whenDefined('effectiveModelVariant', input.effectiveModelVariant);
-}
-
-function assertPluginAgentTaskSession(
-  session: SessionRecord,
-  pluginAgent: ConversationPluginAgentDefinition | undefined,
-): void {
-  if (pluginAgent && !isTaskSession(session)) {
-    throw new SessionServiceError('invalid-session-kind', 'Plugin Agent requires a Task Session');
-  }
 }
 
 function internalBindingFields(

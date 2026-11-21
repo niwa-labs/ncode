@@ -25,12 +25,6 @@ export function createLocalModelResolver(input: {
   dynamicMaxTokensState: LocalDynamicMaxTokensState;
   fetchImpl?: typeof fetch;
 }): LocalModelResolverLike {
-  type FetchAwareAuthStorage = {
-    getApiKey(
-      providerId: string,
-      options?: { includeFallback?: boolean; fetch?: typeof fetch },
-    ): Promise<string | undefined>;
-  };
   return new LocalModelResolver({
     providerConfigGetter: () => input.configGetter().provider,
     byokConfigGetter: () => {
@@ -39,11 +33,14 @@ export function createLocalModelResolver(input: {
     },
     authContextGetter: input.authContextGetter,
     routingContextGetter: input.routingContextGetter,
-    providerAuthGetter: (provider) => {
-      const authStorage = AuthStorage.create(
+    providerAuthGetter: async (provider) => {
+      // W06: the pin AuthStorage has no `getApiKey` (0.79-era surface);
+      // read the stored credential and surface api_key entries only —
+      // OAuth credentials do not yield a static provider key.
+      const credential = await AuthStorage.create(
         join(input.configGetter().dataDir, 'codex-auth.json'),
-      ) as FetchAwareAuthStorage;
-      return authStorage.getApiKey(provider, { includeFallback: false, fetch: input.fetchImpl });
+      ).read(provider);
+      return credential?.type === 'api_key' ? credential.key : undefined;
     },
     dynamicMaxTokensState: input.dynamicMaxTokensState,
     fetchImpl: input.fetchImpl,

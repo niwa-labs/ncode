@@ -68,11 +68,45 @@ export type LLMErrorSignal =
   | 'incomplete_stream';
 
 /**
- * Model-side safety classifier decline (Messages API `stop_reason: "refusal"`). Providers surface it
- * as an error message carrying this token; the remaining text is provider-controlled and must not
- * feed status/network heuristics.
+ * Model-side safety classifier decline (Messages API `stop_reason: "refusal"`).
+ *
+ * W06 fix (review round 1): the PRIMARY signal is structural — the pinned
+ * pi-ai adapters preserve the provider's raw stop reason on the assistant
+ * message (`AssistantMessage.rawStopReason`, set by every adapter BEFORE the
+ * stop-reason mapping: `api/anthropic-messages.ts` stores
+ * `event.delta.stop_reason` and only then maps `refusal` to
+ * `stopReason:"error"` with `errorMessage = stopDetails?.explanation || 'The
+ * model refused to complete the request'`). The product sees that message
+ * object at its retry/metrics boundaries (`pi-turn-runner/llm-retry.ts`
+ * `failureResult`), so the refusal is detected from `rawStopReason ===
+ * 'refusal'` — provider explanation text never has to match anything.
+ *
+ * The text regexes below remain only as a FALLBACK for paths that receive a
+ * flattened message string and no structure (legacy plugin `finish-step`
+ * events, UI-layer strings): they match the deterministic fallback text and
+ * the raw `stop_reason":"refusal"` token of pre-pi SDK bodies. A provider
+ * explanation that says something else is NOT catchable on those paths —
+ * that is the documented limit of the text form, which is exactly why the
+ * structural field wins wherever it exists.
  */
-const PROVIDER_REFUSAL_MESSAGE_RE = /\bstop_reason:\s*refusal\b/i;
+const PROVIDER_REFUSAL_MESSAGE_RE =
+  /\bstop_reason"?\s*:\s*"?refusal\b|\bthe model refused to complete the request\b/i;
+
+/** Anthropic stop reasons that mean "the model declined" (pin mapStopReason refusal branch). */
+export function isLLMProviderRefusalStopReason(reason: string | undefined): boolean {
+  return reason === 'refusal';
+}
+
+/**
+ * Provider stop reasons that end the turn as a safety outcome without being a
+ * refusal: Anthropic `sensitive` (content flagged by safety filters, surfaced
+ * as `stopReason:"error"` + `errorMessage: "Provider stopped with: sensitive"`
+ * — pin `api/anthropic-messages.ts` mapStopReason). Same not-retryable policy
+ * as a refusal: the same request will be stopped again.
+ */
+export function isLLMProviderSafetyStopReason(reason: string | undefined): boolean {
+  return reason === 'sensitive';
+}
 
 /** True when an LLM error message reports a provider safety refusal; it must not be retried. */
 export function isLLMProviderRefusalMessage(message: string | undefined): boolean {
@@ -100,6 +134,12 @@ export interface LLMErrorFacts {
   upstreamStatusCode?: number;
   providerMessageCode?: number;
   existingProtocolCode?: number;
+  /**
+   * The provider's raw stop reason as preserved by the pinned pi-ai adapters
+   * (`AssistantMessage.rawStopReason`) — the structural refusal/safety signal
+   * that does not depend on error text.
+   */
+  rawStopReason?: string;
   signals: ReadonlySet<LLMErrorSignal>;
 }
 
@@ -109,6 +149,8 @@ export interface LLMErrorInput {
   errorMessage?: string;
   statusCode?: number;
   explicitAbort?: boolean;
+  /** Provider raw stop reason (`AssistantMessage.rawStopReason`) when the caller has the message object. */
+  rawStopReason?: string;
 }
 
 export interface NormalizedLLMError {
@@ -155,8 +197,19 @@ const CONNECTION_ERROR_MESSAGE_RE = /Connection error\.?/i;
 const ABORT_MESSAGE_RE = /\babort(?:ed|ing)?\b/i;
 const TRANSIENT_TIMEOUT_MESSAGE_RE =
   /\b(?:timed?\s*out|timeout|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNABORTED|UND_ERR_(?:CONNECT|HEADERS|BODY)_TIMEOUT)\b/i;
+/**
+ * Transient transport/upstream failures. The gateway-upstream wordings mirror
+ * the pinned pi-ai retry patterns so target retry fixes reach the product
+ * path, which classifies errors itself (`withLLMRetry` disables SDK retries):
+ * `upstream request failed` / `upstream_stream_read_error` / `stream was
+ * interrupted` / `http/2 stream failed` (pi 698a2d23b, #10920 — gateway
+ * failures relayed as OpenAI Responses `response.failed` codes without an
+ * HTTP status) and node-fetch system errors `request to <url> failed, reason:`
+ * (pi 0fbdbd3f8, #10996 — e.g. the Google ADC token refresh behind
+ * google-vertex).
+ */
 const TRANSIENT_NETWORK_MESSAGE_RE =
-  /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed|network)\b/i;
+  /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed|network)\b|\bupstream.?request.?failed\b|\bupstream_stream_read_error\b|\bstream\s+was\s+interrupted\b|\bhttp\/?2\s+stream\s+failed\b|\brequest to \S+ failed, reason:/i;
 const SAFE_TRANSPORT_NETWORK_MESSAGE_RE = /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|fetch failed)\b/i;
 const CHROMIUM_NETWORK_MESSAGE_RE =
   /\bnet::ERR_(?:CONNECTION_(?:RESET|CLOSED|REFUSED)|NETWORK_IO_SUSPENDED|NETWORK_CHANGED|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|PROXY_CONNECTION_FAILED|HTTP2_PROTOCOL_ERROR|SSL_BAD_RECORD_MAC_ALERT)\b/i;
@@ -221,10 +274,25 @@ export function normalizeLLMError(input: LLMErrorInput): NormalizedLLMError {
     facts.upstreamStatusCode ??= extracted.upstreamStatusCode;
     facts.providerMessageCode ??= extracted.providerMessageCode;
     facts.existingProtocolCode ??= extracted.existingProtocolCode;
+    facts.rawStopReason ??= input.rawStopReason ?? extracted.rawStopReason;
     facts.explicitAbort ||= extracted.explicitAbort === true;
     facts.timeout ||= extracted.timeout === true;
     if (extracted.network) signals.add('network');
     const visibleMessage = extracted.message ?? input.errorMessage;
+    // Structural provider stop reasons win over any text: a refusal with a
+    // provider explanation (arbitrary text) and the `sensitive` safety stop
+    // are only reliably detectable via `rawStopReason`. Both share the policy:
+    // never retry (the same request hits the same filter again) and never
+    // derive transport/quota status codes from the provider's explanation.
+    if (isLLMProviderRefusalStopReason(facts.rawStopReason)) {
+      signals.add('refusal');
+      signals.add('content_filter');
+      return { facts, ...(visibleMessage ? { sanitizedMessage: visibleMessage } : {}) };
+    }
+    if (isLLMProviderSafetyStopReason(facts.rawStopReason)) {
+      signals.add('content_filter');
+      return { facts, ...(visibleMessage ? { sanitizedMessage: visibleMessage } : {}) };
+    }
     if (isLLMProviderRefusalMessage(visibleMessage)) {
       signals.add('refusal');
       signals.add('content_filter');
@@ -429,9 +497,39 @@ export function toLLMRetryDecision(normalized: NormalizedLLMError): LLMRetryDeci
       reason: facts.signals.has('tpm_rate_limit') ? 'tpm_rate_limited' : 'rate_limited',
     };
   }
+  if (status === 502 || status === 503 || status === 504) {
+    // Availability statuses from a gateway/CDN in front of the model (the
+    // live 504 case carried an Akamai HTML page): the request was never
+    // processed, so resending is safe and the failure is transient by
+    // definition. 500 stays fail-closed — it can be a mid-processing fault.
+    return { retryable: true, reason: 'network' };
+  }
   if (status === 529) return { retryable: true, reason: 'overloaded' };
+  if (
+    facts.existingProtocolCode === LLM_ERROR_CODES.LLM_UPSTREAM_ERROR &&
+    !isDefinedHttpStatus(status) &&
+    TRANSIENT_UNAVAILABLE_MESSAGE_RE.test(normalized.sanitizedMessage ?? '')
+  ) {
+    // A relayed "model provider is temporarily unavailable" (50113) without
+    // an HTTP status: transient by its own wording. The code alone is NOT
+    // enough — the relay maps permanent 4xx to the same code, and an explicit
+    // non-empty status (including any 4xx) keeps the fail-closed reading.
+    return { retryable: true, reason: 'network' };
+  }
   return { retryable: false, reason: metricKind };
 }
+
+function isDefinedHttpStatus(status: number | undefined): boolean {
+  return status !== undefined && status > 0;
+}
+
+/**
+ * Unambiguously transient unavailability wording for the relayed
+ * LLM_UPSTREAM_ERROR path — kept narrow so a permanent 4xx re-labelled 50113
+ * with its real message ("invalid request", quota text, …) never matches.
+ */
+const TRANSIENT_UNAVAILABLE_MESSAGE_RE =
+  /\btemporarily unavailable\b|\bservice unavailable\b|\btry again(?: later)?\b/i;
 
 export function toLLMProtocolClassification(
   normalized: NormalizedLLMError,
@@ -477,6 +575,7 @@ interface SafeExtracted {
   timeout?: boolean;
   network?: boolean;
   message?: string;
+  rawStopReason?: string;
 }
 
 function safeExtract(raw: unknown): SafeExtracted {
@@ -532,6 +631,11 @@ function safeExtract(raw: unknown): SafeExtracted {
     const message = value('message');
     if (typeof statusMessage === 'string') out.message = sanitizeMessage(statusMessage);
     else if (!out.message && typeof message === 'string') out.message = sanitizeMessage(message);
+    // The pinned adapters' structural stop signal (AssistantMessage.rawStopReason)
+    // — collected here so callers that pass the whole message object as `raw`
+    // get the structural refusal/safety classification for free.
+    const rawStopReason = value('rawStopReason');
+    if (typeof rawStopReason === 'string' && rawStopReason) out.rawStopReason = rawStopReason;
     const responseBody = value('responseBody');
     if (typeof responseBody === 'string' && responseBody.length <= 64_000) {
       try {
@@ -662,6 +766,8 @@ export interface FinishStepClassifierInput {
   finishReason?: string;
   statusCode?: number;
   errorMessage?: string;
+  /** Provider raw stop reason (`AssistantMessage.rawStopReason`) when the caller has the message object. */
+  rawStopReason?: string;
 }
 
 export function classifyFinishStepError(
@@ -669,7 +775,13 @@ export function classifyFinishStepError(
 ): LLMErrorReason | undefined {
   const { finishReason, statusCode, errorMessage } = input;
   if (finishReason === 'length') return 'length';
-  if (isLLMProviderRefusalMessage(errorMessage)) return 'content_filter';
+  if (
+    isLLMProviderRefusalStopReason(input.rawStopReason) ||
+    isLLMProviderSafetyStopReason(input.rawStopReason) ||
+    isLLMProviderRefusalMessage(errorMessage)
+  ) {
+    return 'content_filter';
+  }
   if (finishReason === 'content-filter' || finishReason === 'content_filter') {
     return 'content_filter';
   }
@@ -714,7 +826,14 @@ export function classifyFinishStepError(
  * SDK has already normalised the shape. Daemon code uses this entry point.
  */
 export function classifyLLMError(err: unknown): LLMErrorReason {
-  if (err instanceof Error && isLLMProviderRefusalMessage(err.message)) return 'content_filter';
+  const stopReason = stopReasonOf(err);
+  if (
+    isLLMProviderRefusalStopReason(stopReason) ||
+    isLLMProviderSafetyStopReason(stopReason) ||
+    (err instanceof Error && isLLMProviderRefusalMessage(err.message))
+  ) {
+    return 'content_filter';
+  }
   // DOMException AbortError or Error message-text "timeout/abort" — same
   // bucket whether it came from `AbortController.abort()` or a server-side
   // 504 with no explicit status.
@@ -808,6 +927,15 @@ function extractErrorMessage(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null) return undefined;
   const candidate = err as { message?: unknown };
   return typeof candidate.message === 'string' ? candidate.message : undefined;
+}
+
+/** Duck-typed read of the pinned adapters' `AssistantMessage.rawStopReason` from an unknown value. */
+function stopReasonOf(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const candidate = err as { rawStopReason?: unknown };
+  return typeof candidate.rawStopReason === 'string' && candidate.rawStopReason
+    ? candidate.rawStopReason
+    : undefined;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1064,6 +1192,7 @@ export function mapUpstreamHttpError(httpStatus: number): LLMErrorStatusCode | u
  */
 export function classifyLLMErrorToCode(
   err: unknown,
+  options: { readonly rawStopReason?: string } = {},
 ): { status_code: LLMErrorStatusCode; message: string } | null {
   // Accept plain strings (some callers — notably pi-turn-runner capturing
   // `agent.state.errorMessage`) have already collapsed the typed error
@@ -1071,9 +1200,16 @@ export function classifyLLMErrorToCode(
   // `pass 3` string-fallback inside `tryExtractFromPayload` (status prefix
   // + embedded JSON parse) still fires.
   const normalized = typeof err === 'string' ? { message: err } : err;
-  // A provider refusal is a policy outcome, not a transport/quota error. Its explanation text is
-  // provider-controlled, so never derive status codes from it.
-  if (isLLMProviderRefusalMessage(typeof err === 'string' ? err : extractErrorMessage(err))) {
+  // A provider refusal/safety stop is a policy outcome, not a transport/quota
+  // error. Detected structurally via `rawStopReason` when the caller has the
+  // assistant message (the reliable signal), with the text marker as the
+  // fallback for flattened strings. Either way, never derive status codes
+  // from the provider's explanation text.
+  if (
+    isLLMProviderRefusalStopReason(options.rawStopReason ?? stopReasonOf(err)) ||
+    isLLMProviderSafetyStopReason(options.rawStopReason ?? stopReasonOf(err)) ||
+    isLLMProviderRefusalMessage(typeof err === 'string' ? err : extractErrorMessage(err))
+  ) {
     return null;
   }
   const extracted = tryExtractFromPayload(normalized);

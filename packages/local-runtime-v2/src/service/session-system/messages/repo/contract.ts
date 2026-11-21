@@ -177,3 +177,9 @@ export class UserMessageCommitAdmissionError extends Error {
     super(`User message commit rejected: ${sessionId}/${reason}`);
   }
 }
+
+/** A paging anchor must belong to the requested session. */
+export class MessageCursorNotFoundError extends Error {
+  override readonly name = 'MessageCursorNotFoundError';
+  constructor(sessionId: string) { super(`Message cursor does not belong to session ${sessionId}.`); }
+}

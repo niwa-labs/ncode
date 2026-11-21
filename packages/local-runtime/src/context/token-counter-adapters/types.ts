@@ -52,9 +52,28 @@ export interface RemoteTokenCounter {
 
 export interface RemoteTokenCounterHttpRequest {
   url: string;
+  unsupportedCacheKey: string;
   body: unknown;
   headers: Record<string, string>;
   hasImages: boolean;
+}
+
+/**
+ * Pin `ProviderHeaders` values are `string | null`, where `null` removes the
+ * header in the provider transport; count requests go through plain `fetch`,
+ * which cannot send nulls. Copy stream-option headers into a count context by
+ * dropping null-valued entries (absent = not sent).
+ */
+export function sanitizeProviderHeaders(
+  headers: Record<string, string | null> | undefined,
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  let sanitized: Record<string, string> | undefined;
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === null) continue;
+    (sanitized ??= {})[key] = value;
+  }
+  return sanitized;
 }
 
 /**

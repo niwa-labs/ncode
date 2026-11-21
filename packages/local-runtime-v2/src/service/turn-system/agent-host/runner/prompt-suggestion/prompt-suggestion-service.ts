@@ -4,7 +4,7 @@ import {
   type PiAfterLlmCallHookInput,
   type PiLlmCallPreparedHookInput,
 } from '@mavis/agent-core/pi-turn-runner';
-import type { AssistantMessage, Context, SimpleStreamOptions } from '@earendil-works/pi-ai';
+import { normalizeContext, type AssistantMessage, type Context, type SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { buildRecentConversationPrompt, latestUserText } from './recent-context.js';
 import type {
   GlobalEventInput,
@@ -362,7 +362,20 @@ export function createPromptSuggestionService(options: PromptSuggestionServiceOp
       replyMessageId?: string,
     ): void {
       syncPolicy();
-      if (closed || !options.enabled() || capture.finalAssistant.stopReason !== 'stop') return;
+      if (closed || !options.enabled() || capture.finalAssistant.stopReason !== 'stop') {
+        // One WARN per refused schedule: the optional feature must never be
+        // silent about WHY it did nothing (the first live check had no way
+        // to tell 'generated' from 'refused at the gate').
+        log({
+          sessionId,
+          turnId,
+          status: 'schedule_refused',
+          closed,
+          enabled: options.enabled(),
+          stop_reason: capture.finalAssistant.stopReason,
+        });
+        return;
+      }
       // Dedupe runs before any cancel: a repeated schedule for the same Turn
       // must not cancel the request it is duplicating.
       const key = turnKey(sessionId, turnId);
@@ -681,7 +694,7 @@ async function generatePromptSuggestion(
   // Same thinking level as the main Turn's last call, mapped the way the main
   // runner maps it: `off` sends no reasoning option.
   const thinkingLevel = capture.prepared.thinkingLevel;
-  const response = await composeStreamFn(capture.resolved)(capture.prepared.model, context, {
+  const response = await composeStreamFn(capture.resolved)(capture.prepared.model, normalizeContext(context), {
     ...(thinkingLevel && thinkingLevel !== 'off' ? { reasoning: thinkingLevel } : {}),
     apiKey: capture.resolved.apiKey,
     headers: capture.resolved.headers,

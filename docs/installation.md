@@ -1,43 +1,12 @@
 # Installation packages and source builds
 
-## Install a GitHub release archive
+## Install the Niwa Labs fork from source
 
-When a CLI release is available on [GitHub Releases](https://github.com/MiniMax-AI/minimax-code/releases),
-download `minimax-code-X.Y.Z.tar.gz` and the matching `.sha256` file. This is an npm
-installation package containing the built CLI; no source build or pnpm is needed.
-Install Node.js 22.19+ (22.x), 24.2+ (24.x), 25 or 26 first. npm still needs network
-access to public npm for runtime dependencies. Native dependencies can require
-Python and C/C++ build tools when no matching prebuilt binary is available.
-
-For example, for an available `v0.4.13` release:
-
-```bash
-# Linux; on macOS use: shasum -a 256 -c minimax-code-0.4.13.tar.gz.sha256
-sha256sum -c minimax-code-0.4.13.tar.gz.sha256
-npm install --global ./minimax-code-0.4.13.tar.gz --registry=https://registry.npmjs.org/ --include=optional --ignore-scripts=false --allow-scripts=better-sqlite3
-mcode --version
-```
-
-Keep optional dependencies enabled and allow the native SQLite installation
-script. The tag determines the installed version. GitHub archive installation is
-validated on Linux and macOS; Windows package acceptance is currently not run.
-
-This archive uses the same `@minimax-ai/code` package name, `mcode` command and
-default user data directory as the official npm CLI. Installing it globally into
-the same npm prefix replaces that npm installation. Update to another GitHub
-version by explicitly installing its archive; the built-in updater follows the
-official npm registry channel and does not select GitHub release assets. To remove
-the package, use `npm uninstall --global @minimax-ai/code`. User data remains in place.
-
-## Install from source
-
-The official CLI is available as [`@minimax-ai/code`](https://www.npmjs.com/package/@minimax-ai/code). Public npm `latest` was 0.6.9 on 2026-10-13. Follow the [official quick start](https://agent.minimax.io/docs/cli/quick-start) or the [README installation steps](../README.md#quick-start) for the macOS / Linux / WSL installer, Windows PowerShell installer, or npm installation.
-
-For npm, use the command in the README: it explicitly selects the public registry, includes optional dependencies, and allows the `@minimax-ai/code` and `better-sqlite3` lifecycle scripts. SQLite is declared optional in the package metadata, but a working native SQLite binding is required at runtime. Do not omit optional dependencies or disable installation scripts. On npm versions that enforce script approvals, `--allow-scripts` grants these two packages permission without allowing every dependency script.
-
-`@latest` follows the stable npm dist-tag. For a reproducible CLI version, replace `@latest` with an exact published version such as `@0.6.9`, keeping the other options. Use Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26 for both npm and source installations.
-
-This guide builds the 0.6.3 source preview. Workspace and local-build manifests remain `private: true` to prevent accidental publishing, except `@minimax-ai/code-sdk`. That package is public and is published only as a checked tarball (`packages/code-sdk/RELEASING.md`); `prepublishOnly` rejects `npm publish` in the package directory. A source checkout may contain additional reviewed distribution changes; matching version strings alone do not establish byte-for-byte or build-provenance equivalence with the official npm tarball. Use the committed source revision and release receipt to identify a source build.
+Open your checkout of the Niwa Labs fork and build it below. For MiniMax’s
+installers, npm packages and GitHub release archives, see the
+[upstream installation guide](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/installation.md).
+The built-in update channel belongs to the official npm distribution. Update
+this source build by rebuilding a newer fork revision.
 
 For a source build, you need Git, Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26, and pnpm 9.12.0. Regular CI uses Node.js 24 across Linux and macOS. The weekly and manual compatibility matrix covers Node.js 22.19.0, 24.2.0, 25, and 26 on both platforms. Windows CI and source-candidate validation are temporarily paused while their checks are made reliable. Initial installation and build require access to public npm.
 
@@ -46,8 +15,6 @@ On Windows, check out this repository on a local NTFS volume before running `pnp
 Node 24.0 and 24.1 are unsupported: their bundled libuv can return inconsistent Windows file identity metadata, causing safe configuration reads to fail. [Node 24.2.0](https://nodejs.org/en/blog/release/v24.2.0) includes libuv 1.51.0 with the [upstream fix](https://github.com/libuv/libuv/commit/82cdfb75f). Use a current patch release of a supported Node line.
 
 ```bash
-git clone https://github.com/MiniMax-AI/minimax-code.git
-cd minimax-code
 corepack enable
 corepack prepare pnpm@9.12.0 --activate
 node scripts/check-windows-source-location.mjs
@@ -64,7 +31,7 @@ The build extracts mcode-tools from a pinned public `@minimax-ai/code` archive a
 To use the CLI in another project, open that project's directory and run the built entry point by absolute path:
 
 ```bash
-node /absolute/path/to/minimax-code/dist/cli.js
+node /absolute/path/to/your-checkout/dist/cli.js
 ```
 
 On Windows, also use `node` with the appropriate local absolute path. Do not overwrite another globally installed command with this source build.
@@ -94,11 +61,88 @@ To locate data safely:
 
 For tests, explicitly set `MINIMAX_DATA_DIR` to a temporary directory to keep normal sessions separate. Use `$env:MINIMAX_DATA_DIR = 'C:\path\to\test-profile'` in PowerShell or `export MINIMAX_DATA_DIR=/path/to/test-profile` in a POSIX shell.
 
+### Profiles
+
+A named profile selects an entire data directory, and with it a separate account. With no selector, the `default` profile uses the unsuffixed `~/.minimax`; `--profile work` uses `~/.minimax-work`. This is how a personal token plan and a work token plan can both stay signed in without sharing anything.
+
+Two selectors choose a profile, in priority order:
+
+1. `--profile <name>`, accepted on the root command and on every subcommand. Both `--profile work` and `--profile=work` are accepted, so `mcode --profile work exec` and `mcode login --profile work` select the same profile.
+2. `MINIMAX_PROFILE=<name>`, which selects a profile for a whole process tree. The flag wins when both are set.
+
+Like `MINIMAX_DATA_DIR`, `MINIMAX_PROFILE` is stripped from child-process environments at the daemon and agent boundary: each runtime is told its own identity instead of inheriting one. A `mcode` started from a shell inside a profile session therefore starts on the `default` profile rather than silently joining the parent's credentials. Pass `--profile` for such a nested invocation instead of exporting the variable.
+
+A profile owns its whole directory, so two profiles share nothing: OAuth tokens, sessions, `config.yaml` (models and providers), MCP configuration, plugins, skills, and cron or background tasks. Selecting a different profile does not migrate, copy, or merge data; the earlier directory stays exactly where it was. Signing in restarts MCode and keeps the same profile. The `--profile` flag and the `mcode profile` command are available in builds from this repository.
+
+One exception applies to a source build run directly with `pnpm` or from the npm package rather than the installed CLI: the first run against a new profile seeds its `config.yaml` from the default profile's file, including any BYOK API key stored there. That is the same behaviour a derived worktree data directory already had. Edit or delete the new profile's `config.yaml` if it should not carry those settings, and check it before using that profile for a different organisation's work. The installed CLI does not do this; it writes its own defaults.
+
+Names are validated, never sanitised, because the name becomes a directory segment under `$HOME` and an unchecked value could resolve outside the home directory. A name is 1-64 characters, must start and end with a letter or number, and may otherwise contain only letters, numbers, dots, underscores, and hyphens. `.`, `..`, names containing `/` or whitespace, and names longer than 64 characters are refused with an error and exit code 1. See [`auth-profile.ts`](../packages/config/src/auth-profile.ts) for the allowlist.
+
+`default` is reserved. `--profile default` is the same as omitting the flag, so it selects the default profile rather than creating a second account in `~/.minimax-default`.
+
+Selection is resolved once per process, in this order: `--profile`, then `MINIMAX_PROFILE`, then git-branch auto-detection in the `mavis` and `agent-archon` source trees. The flag wins over the environment, and when `--profile` is given more than once the last one wins. Anything after `--` is prompt text and is not read as a profile.
+
+Data directories on macOS and Windows are case-insensitive, so `--profile Work` and `--profile work` select the same account. `mcode profile list` shows such a case variant only once.
+
+Manage profiles with `mcode profile`:
+
+| Command | Effect |
+| --- | --- |
+| `mcode profile list` | Tab-separated rows of name, sign-in status, and data directory. `*` marks the active profile, `(default)` labels the default one, and status is one of `signed in`, `signed out`, `authorization pending`, or `not created`. |
+| `mcode profile list --json` | The same profiles as an array of `name`, `dataDir`, `exists`, `authenticated`, and `pendingAuthorization`. |
+| `mcode profile current` | Prints `Current profile: <name>` and `Data directory: <path>`. |
+| `mcode profile remove <name> --yes` | Deletes that profile's data directory, and its legacy `~/.mavis-<profile>` compatibility directory when one exists. |
+
+`mcode profile remove` refuses the `default` profile and tells you to delete its directory manually if that is what you want, refuses an invalid name, and refuses to run without `--yes`. It also fails when the named profile has no data directory. A profile directory that is a symlink is unlinked rather than followed, so a link is never walked into. These checks live in [`profile-command.ts`](../packages/tui/src/cli/profile-command.ts).
+
+None of these commands print credentials: listing reports names, statuses, and paths only. To remove profile data without the command, run `mcode profile current` first to confirm the exact path, then delete only that directory. Do not use wildcard deletion across `~/.minimax*`, and do not delete a profile directory to move it elsewhere; profile data is not migrated between directories.
+
 ## macOS terminal shortcuts: Ghostty Option+M
 
 In the composer, `Alt+M` (`Option+M` on macOS) cycles permission modes through Ask, Auto, and Full access. Its binding ID is `composer.cycle-permission`. `Shift+Tab` toggles **Plan mode**, a separate setting. You can also use `/permission` to choose a permission mode and `/permission status` to inspect it without an Option shortcut.
 
 If `Option+M` inserts `µ` instead, the terminal is sending text rather than the expected Alt shortcut. MCode preserves literal `µ` as text; it cannot safely infer a permission change from that character. The terminal must forward the modifier, or you can choose another binding.
+
+## Delete guard: recoverable versus permanent deletes
+
+Permission mode answers **when you get asked**. The delete guard is a separate setting that answers **whether a delete is recoverable at all**, so it is deliberately not part of `/permission` and is not implied by Full access.
+
+While the guard is **on** (the default), a destructive command such as `rm` is routed to a recoverable delete: it lands in the platform trash instead of being unlinked, and no permission card is raised for the routine case. The guard also covers deletes that never appear as a literal `rm`, such as `xargs rm`, `find -exec rm`, or a `rm` inside a script the agent just wrote.
+
+Turn it off only when you accept that deletes are immediate and cannot be undone:
+
+- `/delete-guard` opens a picker with **Recoverable** and **Permanent**.
+- `/delete-guard status` reports the current setting without changing it.
+- `/delete-guard on` keeps deletes recoverable; `/delete-guard off` lets them run permanently.
+
+The setting is stored as `permission.dangerousCommandGateEnabled` in `config.yaml`. It governs **the main window only**: a sub-agent Session keeps the guard on regardless of this value, because it runs unattended and must not inherit a preference the user made while watching their own session. A tool call whose Session cannot be identified — for example the public `POST /permission/check` route, which receives only a Session id — is also treated as a sub-agent, so an unknown origin never relaxes the guard.
+
+Background bash keeps the guard unconditionally for the same reason: that executor is created once per process and cannot tell a main-window run from a sub-agent one at spawn time. A `run_in_background` delete therefore stays recoverable even with the guard off.
+
+The setting is fail-closed: an absent or malformed value keeps the guard **on**, and a host that does not manage the setting reports it as such rather than claiming a protection it is not enforcing.
+
+The switch takes effect on the next command. You do not need to restart MCode.
+
+### Sandbox: what the agent may write and delete
+
+Permission mode and the sandbox are **independent layers**. Permission mode decides when you are asked; the sandbox decides what is reachable even when nothing is asked. Full access (`bypassPermissions`) therefore does **not** lift a sandbox restriction, which is the usual reason a delete is blocked in an unattended session.
+
+The level is stored as `sandbox.filesystem.policy.mode` in `config.yaml`:
+
+| Level | Writes | Deletes (`unlink`) |
+| --- | --- | --- |
+| `read_only` | Session temp only | Nothing beyond session temp |
+| `workspace_write` | Workspace surface, plus the trash destination | Workspace surface only |
+| `delete_guard` | Anywhere on the host | Workspace surface only |
+| `full_access` | Anywhere on the host | Anywhere on the host |
+
+`delete_guard` is the default when the sandbox is on: writes are unrestricted, but unlinking anything outside the workspace surface is refused. Choose `full_access` when that restriction is what you want removed, and `read_only` when the agent must not change anything at all.
+
+- `/sandbox` opens a picker with all four levels.
+- `/sandbox status` reports the current level without changing it.
+- `/sandbox <mode>` switches to `read_only`, `workspace_write`, `delete_guard` or `full_access`. An unrecognised value prints usage and writes nothing.
+
+Switching re-initializes the sandbox backend and persists the new level; no restart is needed, and running sessions pick it up on their next command. A host that runs no sandbox reports it as such rather than naming a level it is not enforcing.
 
 ### Configure Ghostty's Option key
 

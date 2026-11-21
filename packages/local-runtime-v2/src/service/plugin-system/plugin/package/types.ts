@@ -61,6 +61,23 @@ export interface PluginSkill {
 
 export type PluginAgentSourceFormat = 'MINIMAX' | '\u0043\u004c\u0041\u0055\u0044\u0045';
 
+/** A subagent declared by a local plugin's `agents/` directory (AGENT_PLUGINS_V1). */
+export interface PluginAgentDefinition {
+  readonly name: string;
+  readonly scopedName: string;
+  readonly description: string;
+  readonly content: string;
+  readonly sourcePath: string;
+  /** Body after the frontmatter delimiter — the delegate's system prompt. */
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+}
+
 /**
  * Markdown subagent accepted from an official or LOCAL package. Selector fields keep the
  * Custom Agent encoding: `undefined` inherits, `[]` explicitly disables.
@@ -163,7 +180,7 @@ export interface ReadPluginPackage {
   readonly hostBindings?: readonly PluginHostBinding[];
   readonly hooks?: readonly PluginHookCommandHandler[];
   /** MiniMax (official and local) and compatible-format packages carry subagents. */
-  readonly agents?: readonly PluginAgent[];
+  readonly agents?: readonly (PluginAgent | PluginAgentDefinition)[];
   readonly miniapp?: MiniAppContribution;
   readonly diagnostics: readonly PluginReaderDiagnostic[];
 }

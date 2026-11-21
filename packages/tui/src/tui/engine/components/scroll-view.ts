@@ -9,9 +9,10 @@ export interface ScrollViewOptions {
 	primary?: boolean;
 	overscroll?: "chain" | "contain";
 	scrollbar?: ScrollViewScrollbar;
-	/** Columns reserved for an always-visible scrollbar, including its hit gutter. */
+	/** L035: columns reserved for an always-visible scrollbar, including its hit gutter. */
 	scrollbarGutter?: number;
-	scrollbarStyle?: (text: string) => string;
+	scrollbarTrackStyle?: (text: string) => string;
+	scrollbarThumbStyle?: (text: string) => string;
 	scrollbarHideDelayMs?: number;
 }
 
@@ -22,10 +23,12 @@ export interface ScrollViewScrollToOptions {
 
 export class ScrollView extends Container {
 	private readonly child: Component;
-	private readonly followEnd: boolean;
+	readonly followEnd: boolean;
 	readonly primary: boolean;
 	readonly overscroll: "chain" | "contain";
-	readonly scrollbarStyle: (text: string) => string;
+	readonly scrollbarTrackStyle: (text: string) => string;
+	readonly scrollbarThumbStyle: (text: string) => string;
+	/** L035: reserved always-visible scrollbar columns; at least one content column stays on narrow terminals. */
 	private readonly scrollbarGutter: number;
 	private currentScrollbar: ScrollViewScrollbar;
 	private readonly scrollbarHideDelayMs: number;
@@ -54,7 +57,8 @@ export class ScrollView extends Container {
 		this.scrollbarGutter = Number.isFinite(options.scrollbarGutter)
 			? Math.max(1, Math.floor(options.scrollbarGutter ?? 1))
 			: 1;
-		this.scrollbarStyle = options.scrollbarStyle ?? ((text) => `\x1b[100m${text}\x1b[49m`);
+		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
+		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
 		this.scrollbarHideDelayMs = Math.max(0, Math.floor(options.scrollbarHideDelayMs ?? 1000));
 	}
 
@@ -81,6 +85,10 @@ export class ScrollView extends Container {
 		);
 	}
 
+	get isScrollbarActive(): boolean {
+		return this.scrollbarActive;
+	}
+
 	setScrollbar(scrollbar: ScrollViewScrollbar): void {
 		if (scrollbar === this.currentScrollbar) return;
 		this.currentScrollbar = scrollbar;
@@ -90,6 +98,7 @@ export class ScrollView extends Container {
 	}
 
 	getContentWidth(width: number): number {
+		// L035: an always-visible bar reserves its full gutter, keeping at least one content column.
 		return this.scrollbar === "always" && width > 1 ? Math.max(1, width - this.scrollbarGutter) : width;
 	}
 
@@ -120,6 +129,7 @@ export class ScrollView extends Container {
 		if (active === this.scrollbarActive) return;
 		this.scrollbarActive = active;
 		this.markScrollbarActivity();
+		this.requestRenderCallback?.();
 	}
 
 	scrollTo(scrollTop: number, options: ScrollViewScrollToOptions = {}): void {
@@ -184,6 +194,9 @@ export class ScrollView extends Container {
 		}
 	}
 
+	// L043: clamping a detached scroll position must not re-arm follow-end. Upstream
+	// additionally re-arms follow when clamped content fits the end again; that would
+	// move a detached reader, so the local difference stays.
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
@@ -210,7 +223,7 @@ export class ScrollView extends Container {
 	override render(width: number): string[] {
 		const contentWidth = this.getContentWidth(width);
 		const lines = this.child.render(contentWidth);
-		return contentWidth === width ? lines : lines.map((line) => `${line}${" ".repeat(width - contentWidth)}`);
+		return contentWidth === width ? lines : lines.map((line) => `${line} `);
 	}
 
 	[LAYOUT_NODE](): ScrollLayoutNode {

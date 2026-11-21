@@ -202,6 +202,27 @@ export function hardBlockedCategoryIsFinalDeny(category: string | undefined): bo
   );
 }
 
+/**
+ * Safety-check categories whose ASK is bypass-immune in EVERY permission
+ * mode ("неотключаемые действия", spec §3.1): exactly the non-final-deny
+ * slice of {@link HARD_BLOCKED_CATEGORIES} plus the `privateRuntimeData`
+ * boundary from fs-permission (read AND write sides of the private runtime
+ * tree).
+ *
+ * Strictly derived — never hand-listed. Final-deny categories stay hard
+ * `deny` in all modes and never surface an ask, so the immune ask set is
+ * the complement computed here. The engine consults this set at step 1g
+ * when `bypassPermissions` would otherwise silently allow a safety-check
+ * ask (SOFT risks, subcommand danger and protectedFile/protectedDirectory/
+ * gitDirectory stay outside this set on purpose: bypass keeps allowing
+ * those).
+ */
+export const BYPASS_IMMUNE_SAFETY_CATEGORIES: ReadonlySet<string> = new Set(
+  ([...HARD_BLOCKED_CATEGORIES] as readonly string[])
+    .filter((category) => !hardBlockedCategoryIsFinalDeny(category))
+    .concat(['privateRuntimeData']),
+);
+
 // ---------------------------------------------------------------------------
 // Shared regex parts
 // ---------------------------------------------------------------------------

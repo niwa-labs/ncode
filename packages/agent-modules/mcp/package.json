@@ -1,7 +1,7 @@
 {
   "name": "@mavis/mcp",
   "version": "0.2.1",
-  "description": "Shared MCP runtime substrate for Mavis agent runtimes. Uses the MCP SDK and host-local naming storage; never imports runtime packages.",
+  "description": "Shared MCP runtime substrate for Mavis agent runtimes. W08 PORT-PI-1.3: transport/client engine absorbed by pinned @earendil-works/pi-mcp; @mavis/mcp stays the mcode facade (pool policy, config/credentials, name registry). Never imports runtime packages.",
   "type": "module",
   "types": "./src/index.ts",
   "exports": {
@@ -31,7 +31,7 @@
     }
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@earendil-works/pi-mcp": "workspace:*",
     "proper-lockfile": "^4"
   },
   "devDependencies": {

@@ -23,7 +23,6 @@ function createHarness(
     source: "cli" | "vscode";
   },
   inSideSession = false,
-  acceptPromptSuggestion?: () => boolean,
 ) {
   let inputListener: ((data: string) => unknown) | undefined;
   let currentInput = input;
@@ -116,7 +115,6 @@ function createHarness(
     offeredCodexSession = undefined;
   });
   const scrollByPage = vi.fn();
-  const toggleFullView = vi.fn(() => true);
   const composerDraft = {
     snapshot: vi.fn(() => ({
       attachments: draft.attachments,
@@ -150,7 +148,6 @@ function createHarness(
     interaction: {
       isActive: vi.fn(() => interactionActive),
       scrollByPage,
-      toggleFullView,
     } as never,
     interactionSurface: {} as never,
     interactionFlow: {} as never,
@@ -185,7 +182,6 @@ function createHarness(
     onSubmissionSettled,
     requestProcessSuspend,
     requestInteractionRender: vi.fn(),
-    ...(acceptPromptSuggestion ? { acceptPromptSuggestion } : {}),
   });
   flow.attach();
   return {
@@ -211,7 +207,6 @@ function createHarness(
     onChanged,
     requestRender,
     scrollByPage,
-    toggleFullView,
     trackAutocompleteSelect,
     takeRecentCodexSession,
     restoreRecentCodexSession,
@@ -643,25 +638,6 @@ describe("TuiInputFlow steer Draft handling", () => {
     expect(harness.scrollByPage).toHaveBeenNthCalledWith(2, 1);
   });
 
-  it("routes the full-view shortcut to an active interaction that supports it", () => {
-    const harness = createHarness(
-      '',
-      { attachments: [] },
-      false,
-      false,
-      false,
-      'consumed',
-      true,
-    );
-
-    expect(harness.inputListener?.("\x0f")).toEqual({ consume: true });
-    expect(harness.toggleFullView).toHaveBeenCalledOnce();
-    expect(harness.toggleTranscriptDetails).not.toHaveBeenCalled();
-
-    harness.toggleFullView.mockReturnValueOnce(false);
-    expect(harness.inputListener?.('\x0f')).toBeUndefined();
-  });
-
   it("clears and restores text and attachments as one Draft", () => {
     const harness = createHarness(
       "preserve everything",
@@ -901,15 +877,40 @@ describe("TuiInputFlow steer Draft handling", () => {
     }
   });
 
-  it("uses Pi app semantics: Ctrl+C clears while Escape interrupts a live turn", () => {
+  it("uses the claude-cli scheme: Ctrl+C interrupts a live turn and a second Ctrl+C exits", () => {
     const harness = createHarness("keep this Draft", { attachments: [] });
 
+    // First Ctrl+C on the active Turn: interrupt (same as Esc), draft kept,
+    // and no "Press Ctrl+C again" hint — that hint is idle-chat only.
     expect(harness.inputListener?.("\x03")).toEqual({ consume: true });
-    expect(harness.editor.getText()).toBe("");
-    expect(harness.abortLiveTurn).not.toHaveBeenCalled();
+    expect(harness.abortLiveTurn).toHaveBeenCalledOnce();
+    expect(harness.editor.getText()).toBe("keep this Draft");
+    expect(harness.setHint).not.toHaveBeenCalledWith("Press Ctrl+C again to exit");
+
+    // Second Ctrl+C while the interrupt is still settling exits the UI;
+    // leaveUi performs its own final abort as part of shutdown.
+    expect(harness.inputListener?.("\x03")).toEqual({ consume: true });
+    expect(harness.leaveUi).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Escape interrupting a live turn without touching the input", () => {
+    const harness = createHarness("keep this Draft", { attachments: [] });
 
     expect(harness.inputListener?.("\u001B")).toEqual({ consume: true });
     expect(harness.abortLiveTurn).toHaveBeenCalledOnce();
+    expect(harness.editor.getText()).toBe("keep this Draft");
+  });
+
+  it("interrupts a Turn blocked on a task_output wait with Escape and keeps the input", () => {
+    // A task_output wait_ms read parks INSIDE the live Turn, so the run is
+    // still active from the input flow's point of view (hasLiveRun) — Esc
+    // must reach the same interrupt path and never eat the typed draft.
+    const harness = createHarness("check the task result", { attachments: [] }, false, false, true);
+
+    expect(harness.inputListener?.("\u001B")).toEqual({ consume: true });
+    expect(harness.abortLiveTurn).toHaveBeenCalledOnce();
+    expect(harness.editor.getText()).toBe("check the task result");
+    expect(harness.commandFlow.submit).not.toHaveBeenCalled();
   });
 
   it("opens Edit when Escape is pressed twice while chat is idle", async () => {
@@ -1024,11 +1025,13 @@ describe("TuiInputFlow steer Draft handling", () => {
     expect(harness.requestProcessSuspend).toHaveBeenCalledOnce();
   });
 
-  it("uses Ctrl+D to exit only when the Composer is empty", () => {
+  it("exits with Ctrl+D always in the main conversation and keeps side-mode semantics", () => {
     const empty = createHarness("", { attachments: [] }, false, false, false);
     expect(empty.inputListener?.("\x04")).toEqual({ consume: true });
     expect(empty.leaveUi).toHaveBeenCalledOnce();
 
+    // Ctrl+D is the unconditional exit: a draft never blocks it, and the
+    // draft survives through the regular shutdown draft recovery.
     const withText = createHarness(
       "keep me",
       { attachments: [] },
@@ -1036,8 +1039,8 @@ describe("TuiInputFlow steer Draft handling", () => {
       false,
       false,
     );
-    expect(withText.inputListener?.("\x04")).toBeUndefined();
-    expect(withText.leaveUi).not.toHaveBeenCalled();
+    expect(withText.inputListener?.("\x04")).toEqual({ consume: true });
+    expect(withText.leaveUi).toHaveBeenCalledOnce();
 
     const withAttachment = createHarness(
       "",
@@ -1046,8 +1049,16 @@ describe("TuiInputFlow steer Draft handling", () => {
       false,
       false,
     );
-    expect(withAttachment.inputListener?.("\x04")).toBeUndefined();
-    expect(withAttachment.leaveUi).not.toHaveBeenCalled();
+    expect(withAttachment.inputListener?.("\x04")).toEqual({ consume: true });
+    expect(withAttachment.leaveUi).toHaveBeenCalledOnce();
+  });
+
+  it("preserves Enter guidance intent when the local run view is idle", async () => {
+    const harness = createHarness("finish now", { attachments: [] }, false, false, false);
+    harness.editor.submit();
+    await vi.waitFor(() => expect(harness.commandFlow.submit).toHaveBeenCalledWith(
+      "finish now", harness.submissionSeed, expect.objectContaining({ busyAction: "steer" }),
+    ));
   });
 
   it("submits the active Draft as guidance when Enter is pressed", async () => {
@@ -1174,45 +1185,4 @@ describe("shell cancellation", () => {
       expect(harness.editor.setText).not.toHaveBeenCalled();
     },
   );
-});
-
-describe('TuiInputFlow next-message suggestion', () => {
-  const idleHarness = (input: string, accept: () => boolean, attachments: unknown[] = []) =>
-    createHarness(
-      input,
-      { attachments },
-      false,
-      false,
-      false,
-      'consumed',
-      false,
-      vi.fn(() => false),
-      undefined,
-      false,
-      accept,
-    );
-
-  it('fills an empty composer with the visible suggestion on Tab', () => {
-    const accept = vi.fn(() => true);
-    const harness = idleHarness('', accept);
-
-    expect(harness.inputListener?.('\t')).toEqual({ consume: true });
-    expect(accept).toHaveBeenCalledTimes(1);
-  });
-
-  it('leaves Tab to normal completion when no suggestion is visible', () => {
-    const accept = vi.fn(() => false);
-    const harness = idleHarness('', accept);
-
-    expect(harness.inputListener?.('\t')).toBeUndefined();
-    expect(accept).toHaveBeenCalledTimes(1);
-  });
-
-  it('never replaces a draft or attachments with the suggestion', () => {
-    const accept = vi.fn(() => true);
-
-    expect(idleHarness('my own words', accept).inputListener?.('\t')).toBeUndefined();
-    expect(idleHarness('', accept, [{ type: 'image' }]).inputListener?.('\t')).toBeUndefined();
-    expect(accept).not.toHaveBeenCalled();
-  });
 });

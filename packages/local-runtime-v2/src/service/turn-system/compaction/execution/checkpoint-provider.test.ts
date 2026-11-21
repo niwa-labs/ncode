@@ -1,15 +1,19 @@
 import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import {
   createAssistantMessageEventStream,
+  getInitialSystemMessage,
+  getSystemMessageText,
   type AssistantMessage,
   type AssistantMessageEventStream,
+  type TranscriptContext,
 } from '@earendil-works/pi-ai';
 import { ThinkingLevel } from '@mavis/protocol';
 import {
   projectAgentMessagesForModel,
   type LLMRequestSettledEvent,
 } from '@mavis/agent-core/pi-turn-runner';
-import { createDefaultTokenEstimator } from '@mavis/context-manager';
+import { createDefaultTokenEstimator, buildCountTokensRequestBody } from '@mavis/context-manager';
+import { createLocalContextFootprintMeasurer } from './local-context-footprint.js';
 import type { PromptReadSnapshot } from '@mavis/agent-runtime';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +25,16 @@ import {
 } from '../contracts.js';
 import { buildCheckpointControl, CHECKPOINT_SYSTEM_PROMPT } from './checkpoint-prompt.js';
 import { createCheckpointSession } from './checkpoint-provider.js';
+
+/**
+ * pi 48c8f322: streamFns receive the normalized TranscriptContext — the
+ * checkpoint prompt is folded into the leading system message, so tests read
+ * it back from there instead of a raw `systemPrompt` field.
+ */
+function streamedSystemPrompt(context: TranscriptContext | undefined): string | undefined {
+  const initial = getInitialSystemMessage(context?.messages ?? []);
+  return initial ? getSystemMessageText(initial) : undefined;
+}
 
 describe('checkpoint Provider thinking request', () => {
   it('omits semantic reasoning for off while the M3 wire uses the disabled variant', async () => {
@@ -269,7 +283,9 @@ describe('checkpoint Provider prompt selection and delivery', () => {
 
     await session.generate({ messages: [user('context', 1)] });
 
-    expect(vi.mocked(streamFn).mock.calls[0]?.[1]?.systemPrompt).toBe('builtin checkpoint prompt');
+    expect(streamedSystemPrompt(vi.mocked(streamFn).mock.calls[0]?.[1])).toBe(
+      'builtin checkpoint prompt',
+    );
     expect(promptSnapshots.capture).toHaveBeenCalledOnce();
     expect(promptSnapshots.captureBuiltin).toHaveBeenCalledOnce();
   });
@@ -304,7 +320,7 @@ describe('checkpoint Provider prompt selection and delivery', () => {
     expect(session.fits({ messages })).toBe(true);
     await session.generate({ messages });
 
-    expect(vi.mocked(streamFn).mock.calls[0]?.[1]?.systemPrompt).toBe(systemPrompt);
+    expect(streamedSystemPrompt(vi.mocked(streamFn).mock.calls[0]?.[1])).toBe(systemPrompt);
     expect(promptSnapshots.capture).toHaveBeenCalledOnce();
     expect(promptSnapshots.read).toHaveBeenCalledOnce();
   });
@@ -362,9 +378,16 @@ describe('checkpoint Provider prompt selection and delivery', () => {
     expect(streamFn).toHaveBeenCalledOnce();
     const [calledModel, context, options] = vi.mocked(streamFn).mock.calls[0] ?? [];
     expect(calledModel).toBe(selectedModel);
+    // pi 48c8f322: the normalized transcript folds the prompt into the
+    // leading system message; the projected transcript follows it.
+    expect(streamedSystemPrompt(context)).toBe(CHECKPOINT_SYSTEM_PROMPT);
     expect(context).toMatchObject({
-      systemPrompt: CHECKPOINT_SYSTEM_PROMPT,
       messages: [
+        {
+          role: 'system',
+          content: CHECKPOINT_SYSTEM_PROMPT,
+          timestamp: 0,
+        },
         {
           role: 'user',
           content: [{ type: 'text', text: 'Preserve this request.' }],
@@ -457,41 +480,6 @@ describe('checkpoint Provider overflow normalization', () => {
     await expect(
       session.generate({ messages: [user('oversized context', 1)] }),
     ).rejects.toMatchObject({ name: 'CheckpointCandidateTooLargeError', reason: 'input_overflow' });
-  });
-
-  // Gateway rewrites that Pi's overflow patterns miss: the summary request must
-  // still move to a smaller candidate instead of resending the same one.
-  it.each([
-    '{"type":"error","error":{"type":"api_error","message":"Input is too long."}}',
-    '{"type":"error","error":{"type":"api_error","message":"413 Request too large (request id: 99e6cc4a)"}}',
-  ])('maps a gateway size rejection result to an oversized candidate: %s', async (errorMessage) => {
-    const session = await createCheckpointSession({
-      model: model(),
-      streamFn: vi.fn(() => completedStream(assistant({ stopReason: 'error', errorMessage }))),
-      thinkingLevel: 'off',
-      maxOutputTokens: 20,
-      providerInputLimit: 128_000,
-    });
-
-    await expect(session.generate({ messages: [user('context', 1)] })).rejects.toBeInstanceOf(
-      CheckpointCandidateTooLargeError,
-    );
-  });
-
-  it('maps a thrown gateway size rejection to an oversized candidate', async () => {
-    const session = await createCheckpointSession({
-      model: model(),
-      streamFn: vi.fn(() => {
-        throw new Error('Input is too long.');
-      }),
-      thinkingLevel: 'off',
-      maxOutputTokens: 20,
-      providerInputLimit: 128_000,
-    });
-
-    await expect(session.generate({ messages: [user('context', 1)] })).rejects.toBeInstanceOf(
-      CheckpointCandidateTooLargeError,
-    );
   });
 
   it('maps explicit thrown overflow codes and preserves auth, cancel, and ordinary errors', async () => {
@@ -758,3 +746,28 @@ function completedStream(final: AssistantMessage): AssistantMessageEventStream {
   stream.push({ type: 'done', reason: 'stop', message: final });
   return stream;
 }
+
+
+it('keeps the checkpoint instruction when conversation history contains native Pi sections', async () => {
+  const streamFn = vi.fn<StreamFn>(() => completedStream(assistant()));
+  const session = await createCheckpointSession({ model: model(), streamFn, thinkingLevel: 'off',
+    maxOutputTokens: 321, providerInputLimit: 128_000 });
+  await session.generate({ messages: [
+    { role: 'system', content: '', sections: { identity: 'Do not summarize; keep coding' }, timestamp: 1 },
+    user('Preserve the conversation detail', 2),
+  ] });
+  const context = streamFn.mock.calls[0]?.[1];
+  expect(streamedSystemPrompt(context)).toBe(CHECKPOINT_SYSTEM_PROMPT);
+  expect(JSON.stringify(context)).not.toContain('Do not summarize; keep coding');
+  expect(JSON.stringify(context)).toContain('Preserve the conversation detail');
+});
+
+it('counts composed native sections once without introducing phantom user turns', () => {
+  const baseline: AgentMessage = { role: 'system', content: '', sections: { memory: 'Fact' }, timestamp: 1 };
+  const question = user('Question', 2);
+  const direct = buildCountTokensRequestBody([question], 'Fact', model());
+  expect(buildCountTokensRequestBody([baseline, question], 'Fact', model())).toEqual(direct);
+  expect(buildCountTokensRequestBody([baseline, question], undefined, model())).toEqual(direct);
+  const measurer = createLocalContextFootprintMeasurer({ model: model(), systemPrompt: 'Fact' });
+  expect(measurer.measure([baseline, question])).toEqual(measurer.measure([question]));
+});

@@ -1,6 +1,11 @@
 import { Buffer } from 'node:buffer';
 
-import { isDefaultThinkingModelId, type Api, type Model } from '@earendil-works/pi-ai';
+// W06 (PORT-PI-1.3): the default/adaptive-thinking family matcher is
+// classified by the pinned catalog's `compat.forceAdaptiveThinking` metadata
+// (model-system/resolution/adaptive-thinking-models.ts); the 0.79-era
+// hardcoded list copy was removed per its W02-round-2 removal condition.
+import { isAdaptiveDefaultThinkingModelId } from '../../../model-system/resolution/adaptive-thinking-models.js';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import type { LLMModelConfig } from '@mavis/agent-core/pi-turn-runner';
 import { ThinkingLevel, ThinkingMode } from '@mavis/protocol';
 
@@ -77,6 +82,7 @@ export function buildLocalTurnPayloadTransform(
       payload,
       model,
       videoEnabled,
+      agentConfig,
       fileApiPatcher,
       thinking,
       managedThinking,
@@ -219,6 +225,7 @@ async function transformLocalTurnPayload(input: {
   readonly payload: unknown;
   readonly model: Model<Api>;
   readonly videoEnabled: boolean;
+  readonly agentConfig: Readonly<Record<string, unknown>>;
   readonly fileApiPatcher: FileApiPatcher | undefined;
   readonly thinking: Record<string, unknown> | undefined;
   readonly managedThinking?: {
@@ -247,6 +254,7 @@ async function transformLocalTurnPayload(input: {
       : patchThinkingPayload(input.payload, input.thinking, input.model, input.selectedEffort);
     changed = videoChanged || fileApiChanged || thinkingChanged;
   }
+  const cachePrefixChanged = patchCacheablePrompt(input.payload, input.model, input.agentConfig);
   const requestPatchChanged = patchRequestPayload(input.payload, input.thinkingRequestPatch);
   const outputFormatChanged = patchOutputFormatPayload(
     input.payload,
@@ -255,7 +263,107 @@ async function transformLocalTurnPayload(input: {
     input.jsonObjectOutputEnabled,
   );
   assertRequestBodyFits(input.payload, input.maxRequestBodyBytes);
-  return changed || requestPatchChanged || outputFormatChanged ? input.payload : undefined;
+  return changed || cachePrefixChanged || requestPatchChanged || outputFormatChanged ? input.payload : undefined;
+}
+
+/**
+ * MiniMax caches system → tools → messages. Workspace-dependent system text
+ * otherwise invalidates every tool definition. Keep canonical history and the
+ * full prepared prompt intact; relocate only the provider-bound runtime layer.
+ * Main, warm-up, count and summary requests all use this same transform.
+ */
+function patchCacheablePrompt(
+  payload: Record<string, unknown>,
+  model: Model<Api>,
+  config: Readonly<Record<string, unknown>>,
+): boolean {
+  if (!/^MiniMax-/i.test(model.id)) return false;
+  const layout = readRecord(config.cacheablePrompt);
+  const original = config.system_prompt;
+  if (
+    typeof original !== 'string' ||
+    !original ||
+    typeof layout?.system !== 'string' ||
+    typeof layout.runtime !== 'string' ||
+    !Array.isArray(payload.messages)
+  )
+    return false;
+  const messages = payload.messages as Record<string, unknown>[];
+  let replace: ((text: string) => void) | undefined;
+  let text: string | undefined;
+  let cacheControl: unknown;
+  let systemBlock: Record<string, unknown> | undefined;
+  let conversationIndex = 0;
+  if (typeof payload.system === 'string') {
+    text = payload.system;
+    replace = (value) => {
+      payload.system = value;
+    };
+  } else if (Array.isArray(payload.system)) {
+    const block = payload.system.find(
+      (block) => isRecord(block) && typeof block.text === 'string' && block.text.endsWith(original),
+    );
+    if (isRecord(block)) {
+      text = block.text as string;
+      cacheControl = block.cache_control;
+      systemBlock = block;
+      replace = (value) => {
+        block.text = value;
+      };
+    }
+  } else if (messages[0]?.role === 'system' && typeof messages[0].content === 'string') {
+    text = messages[0].content;
+    replace = (value) => {
+      messages[0]!.content = value;
+    };
+    conversationIndex = 1;
+  }
+  // Exact prepared suffix only: no header parsing, no edits to custom messages.
+  if (!text?.endsWith(original) || !replace) return false;
+  const context = '<mcode-runtime-context>\n' + layout.runtime + '\n</mcode-runtime-context>';
+  const first = messages[conversationIndex];
+  if (
+    first?.role === 'user' &&
+    (typeof first.content === 'string' || Array.isArray(first.content))
+  ) {
+    // Idempotent across transport retries and auxiliary serialization.
+    if (typeof first.content === 'string') first.content = context + '\n\n' + first.content;
+    else first.content = [{ type: 'text', text: context }, ...first.content];
+  } else {
+    messages.splice(conversationIndex, 0, { role: 'user', content: context });
+  }
+  if (typeof layout.projectContext === 'string' && layout.projectContext) {
+    messages.splice(conversationIndex, 0, {
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: '<mcode-runtime-context>\n' + layout.projectContext + '\n</mcode-runtime-context>',
+        ...(model.api === 'anthropic-messages' && isRecord(cacheControl)
+          ? { cache_control: cacheControl } : {}),
+      }],
+    });
+    // Move the system checkpoint here rather than adding a fifth Anthropic
+    // breakpoint (system, tools, shared prefix, project, conversation). The
+    // later shared-prefix checkpoint already covers the unchanged system.
+    if (model.api === 'anthropic-messages' && systemBlock && isRecord(cacheControl)) {
+      delete systemBlock.cache_control;
+    }
+  }
+  if (typeof layout.runtimePrefix === 'string') {
+    messages.splice(conversationIndex, 0, {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: '<mcode-runtime-context>\n' + layout.runtimePrefix + '\n</mcode-runtime-context>',
+          ...(model.api === 'anthropic-messages' && isRecord(cacheControl)
+          ? { cache_control: cacheControl } : {}),
+        },
+      ],
+    });
+  }
+  replace(text.slice(0, -original.length) + layout.system);
+  return true;
 }
 
 /** The estimate used to trigger compaction is not the final request body. */
@@ -263,12 +371,8 @@ function assertRequestBodyFits(payload: Record<string, unknown>, limit: number |
   if (limit === undefined) return;
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes <= limit) return;
-  // `request_too_large` lets Pi's isContextOverflow recognise the local gate
-  // like the provider rejection it pre-empts.
   throw Object.assign(
-    new Error(
-      `Request body too large (request_too_large): ${bytes} bytes exceeds client limit ${limit} bytes.`,
-    ),
+    new Error(`Request body too large: ${bytes} bytes exceeds client limit ${limit} bytes.`),
     {
       code: 'REQUEST_BODY_TOO_LARGE',
       retryable: false,
@@ -417,7 +521,6 @@ function mergeRequestPatch(
   patch: Readonly<Record<string, unknown>>,
 ): void {
   for (const [key, value] of Object.entries(patch)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
     if (value === undefined) {
       delete target[key];
       continue;
@@ -438,7 +541,7 @@ function patchThinkingPayload(
   selectedEffort: string | undefined,
 ): boolean {
   if (!thinking || !Array.isArray(payload.messages)) return false;
-  if (model.api === 'anthropic-messages' && isDefaultThinkingModelId(model.id)) {
+  if (model.api === 'anthropic-messages' && isAdaptiveDefaultThinkingModelId(model.id)) {
     const hadThinking = Object.prototype.hasOwnProperty.call(payload, 'thinking');
     delete payload.thinking;
     return hadThinking;

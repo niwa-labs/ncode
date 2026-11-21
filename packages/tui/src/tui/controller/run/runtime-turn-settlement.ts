@@ -73,12 +73,10 @@ export class TuiRuntimeTurnSettlement {
     );
   }
 
-  /** `failurePresented`: the transcript already explains the failure, so add no error cell. */
   async publish(
     settledTurn: TuiSettledTurn,
     durationMs?: number,
     error?: ExecResultError,
-    failurePresented = false,
   ): Promise<void> {
     if (await this.requiresQuestionnaireContinuation(settledTurn)) return;
     const writer = this.options.writeAutomationResult;
@@ -102,12 +100,10 @@ export class TuiRuntimeTurnSettlement {
 
     const status = settledStatus(result.status);
     if (status === 'failed') {
-      if (!failurePresented) {
-        this.options.turnProjection.failTurn(
-          settledTurn.turnId,
-          result.error?.message ?? 'Runtime turn failed.',
-        );
-      }
+      this.options.turnProjection.failTurn(
+        settledTurn.turnId,
+        result.error?.message ?? 'Runtime turn failed.',
+      );
       this.options.turnProjection.clearTurn(settledTurn.turnId);
     }
     this.options.updateState({ lastSettledTurn: { ...settledTurn, status } });

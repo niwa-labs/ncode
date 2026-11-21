@@ -20,7 +20,7 @@ import {
   requireTaskConversation,
 } from '../api/local-task-host.js';
 import { normalizeLocalTaskInput, taskModelSelectionFor } from '../api/local-task-input.js';
-import { resolveLocalTaskAgentTarget, taskSessionOwner } from '../api/local-task-subagents.js';
+import { resolveLocalTaskAgentTarget } from '../api/local-task-subagents.js';
 import { admitBackgroundTask, drainBackgroundTasks } from './lifecycle.js';
 
 export async function startBackgroundLocalTask(input: {
@@ -82,7 +82,8 @@ async function startAdmittedBackgroundLocalTask(
   let childSession: LocalSessionRecord | undefined;
   try {
     childSession = await input.host.agentRoutes.createSession({
-      ...taskSessionOwner(target),
+      agentName: target.pluginAgent ? 'worker' : agentName,
+      ...(target.pluginAgent ? { taskPluginAgent: target.pluginAgent } : {}),
       workspaceDir: input.parentSession.workspaceDir || input.host.resolveDefaultWorkspaceDir(),
       sessionType: 'branch',
       sessionKind: 'task',
@@ -95,6 +96,10 @@ async function startAdmittedBackgroundLocalTask(
       isDefaultWorkspace: input.parentSession.isDefaultWorkspace,
       ...(taskModelSelection ? { taskModelSelection } : {}),
     });
+    input.host.sessionPermissionModes?.inherit(
+      childSession.sessionId,
+      input.parentSession.sessionId,
+    );
     if (shutdownSignal.aborted) {
       return cancelAdmittedTaskSetup({
         input,

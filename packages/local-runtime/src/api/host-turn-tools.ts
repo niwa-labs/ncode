@@ -39,6 +39,7 @@ export type BuildOwnerTurnToolSourcesInput = {
   /** Frozen extension Skill selector from Agent configSelection. */
   allowedExtensionSkillNames?: readonly string[];
   cronEnabled?: boolean;
+  mavisHistoryOnly?: boolean;
   desktopCapabilities?: DesktopTurnCapabilityView;
   codeReviewAdapter?: LocalCodeReviewAdapter;
   disabledBuiltinSkillNames?: readonly AgentBuiltinSkillId[];
@@ -47,20 +48,6 @@ export type BuildOwnerTurnToolSourcesInput = {
 };
 
 export type OwnerTurnToolSources = LocalTurnToolSources;
-
-/**
- * Passes the host getter itself, not its result: the host swaps in a new auth
- * object on every token refresh, so a Turn that outlives one access token must
- * read it per request instead of the Turn-start snapshot in `authContext`.
- */
-function liveAuthSources(host: LocalRuntimeApiHost) {
-  return {
-    ...(host.authContextGetter ? { authContextGetter: host.authContextGetter } : {}),
-    ...(host.authContextInvalidator
-      ? { authContextInvalidator: host.authContextInvalidator }
-      : {}),
-  };
-}
 
 /**
  * Exposes only raw v1 product-domain tool sources to the hosted v2 runtime.
@@ -82,9 +69,11 @@ export async function buildLocalTurnToolSourcesForHost(
   return buildLocalTurnToolSources({
     toolsDisabled: input.toolsDisabled,
     dataDir: runtimeConfig.dataDir,
-    configGetter: input.host.configGetter,
     workspaceRoot: input.session.workspaceDir,
     agentName: input.resourceAgentName,
+    // Same task-Session signal the memory scope above uses: it decides whether
+    // this Turn's bash keeps the recoverable-delete `rm` shim.
+    sessionKind: input.session.sessionKind,
     ...(input.excludeAgentResources ? { excludeAgentResources: true } : {}),
     ...(input.expectedAgentInstanceId
       ? { expectedAgentInstanceId: input.expectedAgentInstanceId }
@@ -92,7 +81,6 @@ export async function buildLocalTurnToolSourcesForHost(
     ...(input.skipAgentResolution ? { skipAgentResolution: true } : {}),
     sessionId: input.session.sessionId,
     authContext: input.host.authContextGetter?.(),
-    ...liveAuthSources(input.host),
     routingContextGetter: input.host.routingContextGetter,
     fetchImpl: input.host.fetchImpl,
     nativeWebSearchEnabled: ['electron', 'tui', 'cli'].includes(input.host.getRuntimeOwnerKind()),
@@ -107,6 +95,10 @@ export async function buildLocalTurnToolSourcesForHost(
     sandboxOperationsFactory: input.sandboxOperationsFactory,
     taskAdapter: buildLocalTaskAdapter(input.host, input.session),
     taskAppendAdapter: buildLocalTaskAppendAdapter(input.host),
+    // §5.4 №19: the model-facing release promise must follow the actual
+    // capability — JSONL/legacy hosts leave `nativeTaskWaits` unset, so their
+    // task description honestly says a foreground wait is never released.
+    taskToolReactive: input.host.nativeTaskWaits !== undefined,
     taskControlAdapter: input.host.backgroundTaskService,
     memoryFacade: input.host.memoryFacade,
     memoryEnabled: input.memoryEnabled ?? runtimeConfig.memory?.enabled !== false,
@@ -128,6 +120,7 @@ export async function buildLocalTurnToolSourcesForHost(
       ? { mavisCronAdapter: input.mavisCronAdapter }
       : {}),
     mavisSessionAdapter: input.mavisSessionAdapter,
+    mavisHistoryOnly: input.mavisHistoryOnly,
     cuModeActive: input.cuModeActive,
     ...(input.miniappAvailable === true ? { miniappAvailable: true } : {}),
     ...(input.desktopCapabilities ? { desktopCapabilities: input.desktopCapabilities } : {}),

@@ -114,24 +114,33 @@ describe('ExecutionCoordinator durable Queue pause terminal policy', () => {
     ]);
   });
 
-  it('releases in-process ownership without waking the Queue when terminal settlement cannot be persisted', async () => {
-    const order: string[] = [];
-    const logger = {
-      warn: vi.fn(),
-      error: vi.fn(() => {
-        order.push('log');
-      }),
-    };
-    const harness = fixture({ logger });
-    const diskFull = new Error('database or disk is full');
+  // Wave-0 item 0.6 (canon 05 §2.3): the queue starts after EVERY terminal
+  // event of a compaction turn — abort included. The owner's Esc stops the
+  // COMPACTION, not their attendance; input that accumulated during the
+  // compaction must be delivered, not stranded behind the released lease.
+  it('wakes the queue after an aborted compaction settlement', async () => {
+    const harness = fixture();
+    harness.host.compact.mockResolvedValueOnce({
+      status: 'aborted',
+      reason: 'owner pressed esc',
+    });
+    await harness.coordinator.compact({ lease: compactionTurn(), reason: 'manual' });
+
+    expect(harness.repository.settle).toHaveBeenCalledTimes(1);
+    expect(harness.released.publish).toHaveBeenCalledWith('session-1');
+  });
+
+  it('wakes the queue after a completed compaction settlement', async () => {
+    const harness = fixture();
+    await harness.coordinator.compact({ lease: compactionTurn(), reason: 'manual' });
+    expect(harness.released.publish).toHaveBeenCalledWith('session-1');
+  });
+
+  it('fails closed without releasing Turn ownership when atomic terminal settlement fails', async () => {
+    const harness = fixture();
+    const pauseError = new Error('queue pause unavailable');
     harness.host.run.mockResolvedValueOnce({ status: 'failed', error: new Error('model failed') });
-    harness.repository.settle.mockRejectedValueOnce(diskFull).mockRejectedValueOnce(diskFull);
-    harness.controller.complete.mockImplementationOnce(() => {
-      order.push('controller.complete');
-    });
-    harness.turnSettlement.abandon.mockImplementationOnce(async () => {
-      order.push('product-abandon');
-    });
+    harness.repository.settle.mockRejectedValueOnce(pauseError).mockRejectedValueOnce(pauseError);
 
     const started = await harness.coordinator.startTurn({
       turn: agentTurn(),
@@ -142,112 +151,64 @@ describe('ExecutionCoordinator durable Queue pause terminal policy', () => {
       },
     });
 
-    await expect(started.completion).resolves.toEqual({ status: 'failed', error: diskFull });
+    await expect(started.completion).resolves.toEqual({ status: 'failed', error: pauseError });
     expect(harness.repository.settle).toHaveBeenCalledTimes(2);
-    // The next admission recovers the durable lock; only the in-process owner
-    // is released here, and the product Turn is abandoned instead of settled.
-    expect(order).toEqual(['controller.complete', 'log', 'product-abandon']);
-    expect(harness.turnSettlement.abandon).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      turnId: 'turn-1',
-    });
-    expect(harness.turnSettlement.settle).not.toHaveBeenCalled();
-    expect(harness.released.publish).not.toHaveBeenCalled();
-    expect(logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({
-        session_id: 'session-1',
-        turn_id: 'turn-1',
-        owner_released: true,
-        error: 'database or disk is full',
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('keeps the outcome and still releases when the failure log throws', async () => {
-    const logger = {
-      warn: vi.fn(() => {
-        throw new Error('log sink down');
-      }),
-    };
-    const harness = fixture({ logger });
-    const diskFull = new Error('database or disk is full');
-    harness.repository.settle.mockRejectedValue(diskFull);
-
-    const compacted = await harness.coordinator.compact({
-      lease: compactionTurn(),
-      reason: 'manual',
-    });
-
-    expect(compacted).toEqual({ status: 'failed', error: diskFull });
-    expect(logger.warn).toHaveBeenCalledOnce();
-    expect(harness.controller.complete).toHaveBeenCalledOnce();
-    // Compaction owns no product Turn state.
-    expect(harness.turnSettlement.abandon).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['reports unpersisted steering', () => true],
-    [
-      'cannot tell',
-      () => {
-        throw new Error('steering probe failed');
-      },
-    ],
-  ])('keeps the in-process owner when the steering probe %s', async (_case, hasPendingForTurn) => {
-    const steeringTeardown = {
-      commitDiscardedBeforeRelease: vi.fn(async () => undefined),
-      hasPendingForTurn: vi.fn(hasPendingForTurn),
-    };
-    const harness = fixture({ steeringTeardown });
-    const diskFull = new Error('database or disk is full');
-    harness.host.run.mockResolvedValueOnce({ status: 'aborted', reason: 'user_stop' });
-    harness.repository.settle.mockRejectedValue(diskFull);
-
-    const started = await harness.coordinator.startTurn({
-      turn: agentTurn('user_stop'),
-      request: {
-        input: { text: 'hello' },
-        genuineUserQueryText: 'hello',
-        provenance: { source: 'api', routingFingerprint: 'api:steering-pending' },
-      },
-    });
-
-    await expect(started.completion).resolves.toEqual({ status: 'failed', error: diskFull });
-    expect(steeringTeardown.hasPendingForTurn).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      turnId: 'turn-1',
-    });
     expect(harness.controller.complete).not.toHaveBeenCalled();
-    expect(harness.turnSettlement.abandon).not.toHaveBeenCalled();
     expect(harness.released.publish).not.toHaveBeenCalled();
   });
 
-  it('releases the owner when the steering probe reports nothing pending', async () => {
-    const steeringTeardown = {
-      commitDiscardedBeforeRelease: vi.fn(async () => undefined),
-      hasPendingForTurn: vi.fn(() => false),
-    };
-    const harness = fixture({ steeringTeardown });
-    const diskFull = new Error('database or disk is full');
-    harness.host.run.mockResolvedValueOnce({ status: 'aborted', reason: 'user_stop' });
-    harness.repository.settle.mockRejectedValue(diskFull);
-
-    const started = await harness.coordinator.startTurn({
-      turn: agentTurn('user_stop'),
-      request: {
-        input: { text: 'hello' },
-        genuineUserQueryText: 'hello',
-        provenance: { source: 'api', routingFingerprint: 'api:steering-durable' },
+  // I-PUB-1b (W1, W0 F8): the jsonl publication flush completes BEFORE the
+  // repository settlement releases the turn lease, and after the last durable
+  // write of the Turn (the discarded steering commit).
+  it('flushes the jsonl publisher after the steering teardown and before the settlement', async () => {
+    const order: string[] = [];
+    const harness = fixture({
+      steeringTeardown: {
+        commitDiscardedBeforeRelease: async () => {
+          order.push('steering');
+        },
+      },
+      publishBeforeRelease: async () => {
+        order.push('publish');
       },
     });
 
-    await expect(started.completion).resolves.toEqual({ status: 'failed', error: diskFull });
-    expect(harness.controller.complete).toHaveBeenCalledOnce();
-    expect(harness.turnSettlement.abandon).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      turnId: 'turn-1',
+    const started = await harness.coordinator.startTurn({
+      turn: agentTurn(),
+      request: {
+        input: { text: 'hello' },
+        genuineUserQueryText: 'hello',
+        provenance: { source: 'api', routingFingerprint: 'api:publish-order' },
+      },
     });
+    await started.completion;
+
+    expect(order).toEqual(['steering', 'publish']);
+    expect(harness.repository.settle).toHaveBeenCalledTimes(1);
+    expect(harness.controller.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the Turn even when the publication flush fails (non-throwing settlement)', async () => {
+    const harness = fixture({
+      publishBeforeRelease: async () => {
+        throw new Error('jsonl flush failed');
+      },
+    });
+
+    const started = await harness.coordinator.startTurn({
+      turn: agentTurn(),
+      request: {
+        input: { text: 'hello' },
+        genuineUserQueryText: 'hello',
+        provenance: { source: 'api', routingFingerprint: 'api:publish-failure' },
+      },
+    });
+
+    // Durable stays the source of truth: the settlement (and the lease
+    // release) proceed; the publisher marks the session stale on its side.
+    await expect(started.completion).resolves.toMatchObject({ status: 'completed' });
+    expect(harness.repository.settle).toHaveBeenCalledTimes(1);
+    expect(harness.controller.complete).toHaveBeenCalledTimes(1);
   });
 });
 

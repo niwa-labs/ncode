@@ -54,6 +54,9 @@ export * from './catalog/provider-views.js';
 export * from './connectivity/discover-models.js';
 export * from './connectivity/provider-request.js';
 export * from './connectivity/test-connection.js';
+// W06 (PORT-PI-1.3): pinned pi-ai classifier surface (JEV / Decisions /
+// llama.cpp) with host request policy.
+export * from './classifier/pi-classifier.js';
 export * from './management/provider-key.js';
 export * from './management/service.js';
 export {

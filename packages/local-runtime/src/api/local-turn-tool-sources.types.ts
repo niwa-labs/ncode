@@ -14,7 +14,6 @@ import type {
 } from '@mavis/agent-tools/desktop';
 import type { AgentBuiltinSkillId, ResolvedAgentCapabilities } from '@mavis/config';
 
-import type { LocalRuntimeConfig } from '../config/types.js';
 import type { DesktopTurnCapabilityView } from '../runtime/desktop-turn-capabilities.js';
 import type { LocalRuntimeAuthContext } from '../runtime/model-resolver.js';
 import type { LocalRuntimeRoutingContext } from '../runtime/routing-headers.js';
@@ -28,8 +27,6 @@ import type { LocalRuntimeApiHostOptions } from './host-helpers.js';
 export interface LocalTurnToolSourcesInput {
   toolsDisabled: boolean;
   dataDir: string;
-  /** Read current policy when a new Bash child is started. */
-  configGetter?: () => LocalRuntimeConfig;
   workspaceRoot: string;
   agentName: string;
   excludeAgentResources?: boolean;
@@ -37,6 +34,12 @@ export interface LocalTurnToolSourcesInput {
   skipAgentResolution?: boolean;
   eventWriter?: PiEventWriter;
   sessionId: string;
+  /**
+   * Session classification of this Turn. `'task'` marks an unattended
+   * sub-agent Session, which keeps the recoverable-delete `rm` shim even when
+   * the main window disabled the destructive-delete guard.
+   */
+  sessionKind?: string;
   authContext?: LocalRuntimeAuthContext;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   fetchImpl?: typeof fetch;
@@ -55,6 +58,12 @@ export interface LocalTurnToolSourcesInput {
   enableTaskTool?: boolean;
   enableTaskControlTools?: boolean;
   /**
+   * Owner-input release availability on this runtime (§5.4 №19): `false`
+   * swaps the task description to the honest non-reactive contract. Absent
+   * keeps the legacy (reactive) description.
+   */
+  taskToolReactive?: boolean;
+  /**
    * Set to `false` for subagent (task) turns: they run in hidden child
    * sessions, so their `todowrite` calls would only pollute the parent-facing
    * task list stream. Mirrors cloud-runtime `SubagentResolverFromConfig`,
@@ -66,6 +75,7 @@ export interface LocalTurnToolSourcesInput {
   mavisAgentAdapter?: LocalMavisAgentAdapter;
   mavisCronAdapter?: LocalMavisCronAdapter;
   mavisSessionAdapter?: LocalMavisSessionAdapter;
+  mavisHistoryOnly?: boolean;
   codeReviewAdapter?: LocalCodeReviewAdapter;
   /** Optional metrics reporter injected by the host. Absent -> noop. */
   metrics?: ModuleMetricsReporter;

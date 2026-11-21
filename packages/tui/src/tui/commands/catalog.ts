@@ -282,9 +282,15 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
     category: 'Session',
     argumentHint: '[instructions]',
     discoverability: 'contextual',
-    runAvailability: 'idle',
-    visibleWhen: (context) => context.hasSession,
-    unavailableReason: 'Start or resume a Session before compacting it.',
+    // Deliberately NOT `runAvailability: 'idle'` (wave-3 item 3.4, owner bug
+    // 2026-11-07): /compact is an inbox control element — with a live Turn or
+    // a non-empty Queue the catalog must still claim it, so the handler can
+    // hand the request to the runtime and the runtime defers it behind the
+    // running turn (queue-deferred). Gating it idle made the dispatch refuse
+    // with "Stop the running turn" and, past the dispatch, dropped the input
+    // into the e1cf119e unrecognized-slash park guard instead.
+    // Keep /compact discoverable before the first turn. The handler explains
+    // that an active session is needed without forcing a model request.
   },
   {
     ...TUI_COMMAND_DESCRIPTORS.status,
@@ -312,6 +318,30 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
       ['full', 'Use Full Access mode'],
     ]),
     shortcut: 'Alt+M',
+  },
+  {
+    name: 'delete-guard',
+    description: 'Choose whether agent deletes stay recoverable',
+    category: 'Runtime',
+    argumentHint: '[status | on | off]',
+    getArgumentCompletions: argumentCompleter([
+      ['status', 'Show the current delete guard'],
+      ['on', 'Keep deletes recoverable (trash)'],
+      ['off', 'Let deletes run permanently'],
+    ]),
+  },
+  {
+    name: 'sandbox',
+    description: 'Choose what the sandbox may write and delete',
+    category: 'Runtime',
+    argumentHint: '[status | read_only | workspace_write | delete_guard | full_access]',
+    getArgumentCompletions: argumentCompleter([
+      ['status', 'Show the current sandbox level'],
+      ['read_only', 'Refuse every write and delete'],
+      ['workspace_write', 'Write and delete inside the workspace surface'],
+      ['delete_guard', 'Write anywhere, delete inside the workspace surface'],
+      ['full_access', 'Drop every filesystem restriction'],
+    ]),
   },
   {
     name: 'login',
@@ -370,20 +400,8 @@ const COMMAND_SOURCES: readonly TuiCommandSource[] = [
   },
   {
     name: 'settings',
-    description: 'Configure TUI mode, suggestions, and other on/off preferences',
+    description: 'Configure the MCode terminal interface',
     category: 'Application',
-  },
-  {
-    name: 'suggestions',
-    description: 'Turn next-message suggestions on or off',
-    category: 'Application',
-    // Kept for scripts and habit; /settings is the discoverable home for switches.
-    discoverability: 'search-only',
-    argumentHint: '[on | off]',
-    getArgumentCompletions: argumentCompleter([
-      ['on', 'Suggest a next message after each turn'],
-      ['off', 'Stop suggesting next messages'],
-    ]),
   },
   {
     name: 'statusline',

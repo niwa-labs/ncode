@@ -76,6 +76,9 @@ function createFixture(options?: {
   queuedMessages?: () => Promise<TuiQueuedMessage[]>;
   interactionContinuesTurn?: (sessionId: string, turnId: string) => boolean;
   observability?: TuiObservability;
+  terminalReconciliationTimeoutMs?: number;
+  refreshSessionMetadataImpl?: () => Promise<void>;
+  resumeQueueAfterTurnTerminal?: () => Promise<boolean>;
 }) {
   const stateStore = new TuiStateStore(createTuiState());
   stateStore.dispatch({ type: 'session/activate', sessionId: 'session-1' });
@@ -133,8 +136,10 @@ function createFixture(options?: {
       session: { sessionId: 'session-1' },
       activeTurnId: options?.currentControllerTurnId?.(),
     })),
+    reconcileCompletedForegroundTurn: vi.fn(() => false),
     refreshCurrentSessionHistory: vi.fn(async () => undefined),
-    refreshSessionMetadata: vi.fn(async () => undefined),
+    refreshSessionMetadata:
+      options?.refreshSessionMetadataImpl ?? vi.fn(async () => undefined),
     beginRuntimeTurn: vi.fn(),
     recordTurnStart: (turnId: string, timestampMs: number) =>
       turnStarts.record(turnId, timestampMs),
@@ -172,6 +177,9 @@ function createFixture(options?: {
     refreshQueue,
     projectQueueItem: vi.fn(),
     restoreFailedQueueItem: vi.fn(),
+    ...(options?.resumeQueueAfterTurnTerminal
+      ? { resumeQueueAfterTurnTerminal: options.resumeQueueAfterTurnTerminal }
+      : {}),
     onLlmRetryChanged: vi.fn(),
     onRetryAvailabilityChanged: vi.fn(),
     goalFlow: { project: vi.fn(), refresh: vi.fn(async () => undefined) },
@@ -183,11 +191,15 @@ function createFixture(options?: {
     ...(options?.observability ? { observability: options.observability } : {}),
     staleRunCheckIntervalMs: 0,
     notify: vi.fn(),
+    ...(options?.terminalReconciliationTimeoutMs !== undefined
+      ? { terminalReconciliationTimeoutMs: options.terminalReconciliationTimeoutMs }
+      : {}),
   });
 
   return {
     flow,
     controller,
+    append: (flow as unknown as { options: { append: (content: string, kind?: string) => void } }).options.append,
     runtime,
     runProjection,
     activeRunFlow,
@@ -473,6 +485,20 @@ describe('TuiRuntimeEventFlow stale-run safety net', () => {
     fixture.flow.stop();
   });
 
+  it('retires an admitted foreground reader after two idle observations and refreshes history', async () => {
+    const fixture = createFixture({
+      currentControllerTurnId: () => 'turn-local',
+    });
+    fixture.controller.reconcileCompletedForegroundTurn.mockReturnValue(true);
+    await expect(fixture.flow.reconcileStaleRun()).resolves.toBe(false);
+    await expect(fixture.flow.reconcileStaleRun()).resolves.toBe(true);
+    expect(
+      fixture.controller.reconcileCompletedForegroundTurn,
+    ).toHaveBeenCalledWith('session-1', 'turn-local');
+    expect(fixture.reconcileOwnerHistory).toHaveBeenCalled();
+    fixture.flow.stop();
+  });
+
   it('records terminals for other Turns that the local projection does not own', async () => {
     const { observability, recordRunLifecycle } = createObservability();
     let controllerTurnId: string | undefined = 'turn-local';
@@ -559,4 +585,132 @@ describe('TuiRuntimeEventFlow Turn start ledger', () => {
       expect.anything(),
     );
   });
+});
+
+describe('terminal reconciliation after a user stop (session.abort)', () => {
+  const neverSettles = (): Promise<void> => new Promise(() => {});
+
+  it('a stopped turn never surfaces the reopen-the-session error when the refresh is slow', async () => {
+    // The owner's live bug: Esc → "Interrupted" → "× Error Runtime state
+    // refresh timed out ... Reopen the Session" — for a plain user stop the
+    // server is still abort-reconciling; the refresh racing it is expected.
+    const fixture = createFixture({
+      terminalReconciliationTimeoutMs: 10, // user-stop budget: 80 ms
+      refreshSessionMetadataImpl: neverSettles,
+    });
+    await handle(fixture.flow, lifecycle('session.abort', 'turn-abort-1'));
+    const calls = (fixture.append as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<
+      [string, string?]
+    >;
+    expect(calls.some(([content, kind]) => kind === 'error')).toBe(false);
+    expect(calls.some(([content]) => /Reopen the Session/.test(content))).toBe(false);
+    expect(
+      calls.some(([content, kind]) => kind === 'warning' && /still settling/.test(content)),
+    ).toBe(true);
+  });
+
+  it('a stopped turn whose refresh settles within the extended budget appends nothing', async () => {
+    const fixture = createFixture({
+      terminalReconciliationTimeoutMs: 10, // extended budget: 80 ms
+      refreshSessionMetadataImpl: () =>
+        new Promise((resolve) => setTimeout(resolve, 30)),
+    });
+    await handle(fixture.flow, lifecycle('session.abort', 'turn-abort-2'));
+    const calls = (fixture.append as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<
+      [string, string?]
+    >;
+    expect(calls.length).toBe(0);
+  });
+
+  it('a FINISHED turn keeps the short budget and the honest reopen error (regression guard)', async () => {
+    const fixture = createFixture({
+      terminalReconciliationTimeoutMs: 10,
+      refreshSessionMetadataImpl: neverSettles,
+    });
+    await handle(fixture.flow, lifecycle('session.finish', 'turn-done-1'));
+    const calls = (fixture.append as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<
+      [string, string?]
+    >;
+    expect(
+      calls.some(
+        ([content, kind]) =>
+          kind === 'error' && /Runtime state refresh timed out/.test(content),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe('queue wake after ANY owned Turn terminal (input wave 2)', () => {
+  const resume = vi.fn(async () => true);
+
+  it.each(['session.finish', 'session.error', 'session.abort'] as const)(
+    'kicks the queue resume on %s of an owned Turn',
+    async (type) => {
+      const wake = vi.fn(async () => true);
+      const fixture = createFixture({ resumeQueueAfterTurnTerminal: wake });
+      await handle(fixture.flow, lifecycle(type, 'turn-terminal-1'));
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledOnce());
+    },
+  );
+
+  it('never wakes when the Turn continues through an interaction', async () => {
+    const wake = vi.fn(async () => true);
+    const fixture = createFixture({
+      resumeQueueAfterTurnTerminal: wake,
+      interactionContinuesTurn: () => true,
+    });
+    await handle(fixture.flow, lifecycle('session.finish', 'turn-continuation-1'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('never wakes for a terminal of a Turn the in-process run owns', async () => {
+    const wake = vi.fn(async () => true);
+    const fixture = createFixture({
+      resumeQueueAfterTurnTerminal: wake,
+      currentControllerTurnId: () => 'turn-in-process',
+    });
+    await handle(fixture.flow, lifecycle('session.abort', 'turn-runtime-1'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('terminal handling survives a missing or rejected resume hook', async () => {
+    const noHook = createFixture();
+    await handle(noHook.flow, lifecycle('session.abort', 'turn-no-hook'));
+
+    const rejecting = createFixture({ resumeQueueAfterTurnTerminal: resume });
+    (rejecting.flow as unknown as {
+      options: { resumeQueueAfterTurnTerminal: () => Promise<boolean> };
+    }).options.resumeQueueAfterTurnTerminal = vi.fn(async () => {
+      throw new Error('resume refused');
+    });
+    await handle(rejecting.flow, lifecycle('session.abort', 'turn-rejected'));
+  });
+});
+
+it('shows compaction start and replacement locally without reconciling owner history', async () => {
+  const fixture = createFixture();
+  for (const [index, stage] of (['preparing', 'installed'] as const).entries()) {
+    await handle(fixture.flow, { type: 'session.compaction.progress', timestampMs: index + 1,
+      source: 'runtime', sessionId: 'session-1', progressId: `p-${index}`, stage });
+  }
+  expect(fixture.append).toHaveBeenNthCalledWith(1, 'Context compaction started. Preparing a summary.', undefined);
+  expect(fixture.append).toHaveBeenNthCalledWith(2, 'Context replaced with the summary and recent messages.', undefined);
+  expect(fixture.reconcileOwnerHistory).not.toHaveBeenCalled();
+  fixture.flow.stop();
+});
+
+it('warns once while subscription quota is unavailable and clears the warning on recovery', async () => {
+  const fixture = createFixture();
+  const event = { type: 'session.llm_retry' as const, timestampMs: 1, source: 'runtime', sessionId: 'session-1',
+    turnId: 'turn', callId: 'quota-call', scope: 'agent' as const, retryAttempt: 1, maxRetries: 100, requestAttempt: 2 };
+  const waiting = { ...event, status: 'waiting' as const, nextRetryAtMs: 100_000, error: { reason: 'usage_limit' as const, code: 42212 } };
+  await handle(fixture.flow, waiting);
+  await handle(fixture.flow, waiting);
+  expect(fixture.append).toHaveBeenCalledTimes(1);
+  expect(fixture.append).toHaveBeenLastCalledWith(expect.stringContaining('Subscription usage limit reached. Waiting'), 'warning');
+  await handle(fixture.flow, { ...event, status: 'recovered' });
+  expect(fixture.append).toHaveBeenLastCalledWith('Subscription access restored. Resuming the current turn.');
+  fixture.flow.stop();
 });

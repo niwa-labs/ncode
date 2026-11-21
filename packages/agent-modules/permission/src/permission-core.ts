@@ -1,4 +1,5 @@
 import { matchesMcpServerRuntimeName } from './mcp-runtime-name.js';
+import { BYPASS_IMMUNE_SAFETY_CATEGORIES } from './classifier/dangerous-patterns.js';
 import {
   getContentRulesForTool,
   hasWholeToolRule,
@@ -16,6 +17,25 @@ import type {
 } from './types.js';
 
 export type PermissionPolicyOwner = 'engine' | 'core';
+
+/**
+ * Step-1g category net (§3): a checker safety ASK whose category is in
+ * {@link BYPASS_IMMUNE_SAFETY_CATEGORIES} is bypass-immune and skips the auto
+ * classifier in every mode. Returned as a spreadable overlay so the rule-ask
+ * returns that precede step 1g (whole-tool / MCP / content ask rules) keep
+ * the immunity instead of masking it — otherwise an `ask edit` rule would
+ * turn a permission.json edit into an ordinary ask the bypass ask-gate
+ * silently downgrades to allow.
+ */
+export function bypassImmuneCategoryOverlay(
+  checkerResult: ToolCheckResult | undefined,
+): { bypassImmune?: true; skipAutoClassifier?: true } {
+  if (checkerResult?.behavior !== 'ask' || checkerResult.reason.type !== 'safetyCheck') return {};
+  const category = checkerResult.reason.category;
+  return category !== undefined && BYPASS_IMMUNE_SAFETY_CATEGORIES.has(category)
+    ? { bypassImmune: true, skipAutoClassifier: true }
+    : {};
+}
 
 export interface PermissionCheckOptions {
   policyOwner?: PermissionPolicyOwner;
@@ -174,6 +194,8 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
     return { behavior: 'deny', reason: checkerResult.reason };
   }
 
+  const immuneOverlay = bypassImmuneCategoryOverlay(checkerResult);
+
   const askRule = hasWholeToolRule(context, toolName, 'ask');
   const sandboxBypassesAsk =
     toolName === 'bash' && context.sandboxEnabled && context.autoAllowBashIfSandboxed;
@@ -185,6 +207,7 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       ruleMatchers: resolveRuleMatchers(checkerResult),
       candidateScopes: resolveCandidateScopes(checkerResult),
       rewrittenInput: checkerResult?.rewrittenInput,
+      ...immuneOverlay,
     };
   }
 
@@ -194,6 +217,7 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       behavior: 'ask',
       reason: { type: 'rule', rule: mcpAskRule },
       ruleContents: resolveRuleContents(toolName, input.input),
+      ...immuneOverlay,
     };
   }
 
@@ -240,10 +264,18 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       ruleMatchers: resolveRuleMatchers(checkerResult),
       candidateScopes: resolveCandidateScopes(checkerResult),
       rewrittenInput: checkerResult?.rewrittenInput,
+      ...immuneOverlay,
     };
   }
 
-  if (checkerResult?.behavior === 'ask' && !isBypassMode(context)) {
+  // Checker ASK, engine-step-1g equivalent. Ordinary asks are waived by
+  // bypass mode below; safety-check asks whose category is in
+  // BYPASS_IMMUNE_SAFETY_CATEGORIES survive every mode as a bypass-immune
+  // ask that skips the auto classifier (mirrors the engine path).
+  if (
+    checkerResult?.behavior === 'ask' &&
+    (immuneOverlay.bypassImmune || !isBypassMode(context))
+  ) {
     return {
       behavior: 'ask',
       reason: checkerResult.reason,
@@ -252,6 +284,7 @@ export function reducePermissionDecision(input: PermissionCoreDecisionInput): Pe
       candidateScopes: resolveCandidateScopes(checkerResult),
       rewrittenInput: checkerResult.rewrittenInput,
       skipAutoClassifier: checkerResult.skipAutoClassifier,
+      ...immuneOverlay,
     };
   }
 

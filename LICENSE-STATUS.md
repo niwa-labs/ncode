@@ -5,7 +5,7 @@ The default license for first-party code is [MIT](LICENSE), including the root w
 ## Third-party exceptions
 
 - `third_party/sandbox-runtime` remains **Apache-2.0**, including its retained upstream copyright and modification notices. Its `LICENSE` must accompany distributions containing that component; retain any applicable upstream notices.
-- Pi, derived terminal code, the model catalog and bundled assets retain their original declarations. See [Third-party notices](THIRD_PARTY_NOTICES.md) and the relevant file/package notices.
+- Pi, Pi Durable, Chord, derived terminal code, the model catalog and bundled assets retain their original declarations. See [Third-party notices](THIRD_PARTY_NOTICES.md) and the relevant file/package notices.
 - `release/dependency-licenses.json` records dependencies' declared licenses without changing their terms. Binary or installer distributions must retain applicable license texts and notices, including those for bundled native dependencies.
 
 The root MIT license is not a statement that every file or bundled component is MIT-licensed.

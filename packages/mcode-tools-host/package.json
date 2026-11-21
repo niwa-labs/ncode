@@ -1,7 +1,7 @@
 {
   "name": "@mavis/mcode-tools-host",
   "version": "0.1.0-beta.0",
-  "description": "Host-neutral OAuth lease broker and launcher lifecycle for embedded mcode-tools.",
+  "description": "Host-neutral OAuth lease broker, launcher lifecycle and host-environment activation for embedded mcode-tools.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,7 +26,8 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@mavis/oauth-lease-protocol": "workspace:*"
+    "@mavis/oauth-lease-protocol": "workspace:*",
+    "@mavis/shared": "workspace:^"
   },
   "devDependencies": {},
   "private": true

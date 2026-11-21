@@ -763,6 +763,40 @@ describe("normalizeTuiRuntimeEvent", () => {
     });
   });
 
+  it("normalizes the durable jsonl publish-conflict warning with its evidence copy", () => {
+    expect(
+      normalizeTuiRuntimeEvent({
+        type: "session.publish_conflict",
+        timestamp: 720,
+        source: "runtime",
+        payload: {
+          schemaVersion: 1,
+          sessionId: "session-1",
+          preservedTo: "/data/sessions/x/messages.jsonl.external-1.jsonl",
+          durableEntries: 4,
+          publishedEntries: 1,
+        },
+      }),
+    ).toEqual({
+      type: "session.publish_conflict",
+      timestampMs: 720,
+      source: "runtime",
+      sessionId: "session-1",
+      preservedTo: "/data/sessions/x/messages.jsonl.external-1.jsonl",
+      durableEntries: 4,
+      publishedEntries: 1,
+    });
+    // A conflict without counts fails closed to an unknown event.
+    expect(
+      normalizeTuiRuntimeEvent({
+        type: "session.publish_conflict",
+        timestamp: 721,
+        source: "runtime",
+        payload: { sessionId: "session-1" },
+      }).type,
+    ).toBe("unknown");
+  });
+
   it("normalizes Session rotation without inventing an active Session id", () => {
     expect(
       normalizeTuiRuntimeEvent({
@@ -786,4 +820,13 @@ describe("normalizeTuiRuntimeEvent", () => {
       reason: "context-limit",
     });
   });
+});
+
+it('normalizes compaction progress without treating preparation as installed history', () => {
+  for (const stage of ['preparing', 'installed', 'failed']) {
+    expect(normalizeTuiRuntimeEvent({ type: 'session.compaction.progress', source: 'runtime', timestamp: 1,
+      payload: { sessionId: 's', progressId: `p-${stage}`, stage } })).toMatchObject({ type: 'session.compaction.progress', sessionId: 's', stage });
+  }
+  expect(normalizeTuiRuntimeEvent({ type: 'session.compaction.progress', source: 'runtime', timestamp: 1,
+    payload: { sessionId: 's', progressId: 'bad', stage: 'invented' } })?.type).not.toBe('session.compaction.progress');
 });

@@ -1,5 +1,6 @@
 import type { PiBeforeToolCallHook } from '@mavis/agent-core/pi-turn-runner';
 import { isRuntimeToolInputValid } from '@mavis/agent-core/tools';
+import { readSessionToolEnv } from '../../session-tool-env.js';
 
 import type { AgentExecutionSnapshot } from '../preparation/contracts.js';
 import type { AgentHostSteeringMessage, LocalTurnExecutionInput } from '../runner/contracts.js';
@@ -7,10 +8,9 @@ import type {
   LocalRuntimeTurnToolContext,
   LocalTurnExecutionPreparationSource,
 } from '../execution/executor.js';
-import { LocalTurnPermissionGate } from '../runner/policy/local-turn-permission-gate.js';
+import { LocalTurnPermissionGate, createLocalTurnPermissionMarkSink } from '../runner/policy/local-turn-permission-gate.js';
 import { LocalTurnInputPreparer } from './local-turn-input-preparation.js';
 import { readTrustedBuiltinAgentProfileIdentity } from './local-turn-tool-catalog-source.js';
-import { readAuthorizedTurnTools } from '../execution/ptc/catalog.js';
 import {
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator,
@@ -55,6 +55,10 @@ export class NativeLocalTurnExecutionPreparationSource<
       browserAssets,
       prepared.channelContext,
     );
+    // §4: one mark sink per Turn — the permission guard records who decided
+    // each tool call, the runner hands the same sink to the event bridge.
+    // Turn-scoped by construction: the map dies with this preparation.
+    const permissionMarks = createLocalTurnPermissionMarkSink();
     let nextSteeringMessageIndex =
       input.execution.request.immediateSendBatch?.members.length ??
       input.execution.canonicalUserInput.messages.length;
@@ -90,6 +94,7 @@ export class NativeLocalTurnExecutionPreparationSource<
       toolResolution: {
         context,
         disableBuiltinToolFallback: true,
+        permissionMarks,
         permissionGuard: (
           toolContext: Parameters<PiBeforeToolCallHook>[0],
           signal: Parameters<PiBeforeToolCallHook>[1],
@@ -110,6 +115,7 @@ export class NativeLocalTurnExecutionPreparationSource<
                   beforeApproval: createPluginPermissionRequestHook(input.execution),
                 }
               : {}),
+            permissionMarks,
           }),
       },
     };
@@ -200,11 +206,7 @@ function isValidPluginPermissionRewrite(
           toolName,
           updatedInput,
         )
-      : isRuntimeToolInputValid(
-          readAuthorizedTurnTools(execution.assembly.tools),
-          toolName,
-          updatedInput,
-        ))
+      : isRuntimeToolInputValid(execution.assembly.tools, toolName, updatedInput))
   );
 }
 
@@ -262,6 +264,10 @@ function createToolContext(
   );
   const forceReadOnlyFilesystem =
     identity.trustedBuiltin && identity.canonicalViewName === 'explore';
+  // W4 (§4.4/R5): the daemon-installed provider supplies the window's
+  // attach snapshot for THIS session; without a provider (embedded TUI,
+  // tests) this is `undefined` and the context is byte-identical to W3.
+  const toolEnv = readSessionToolEnv(execution.lease.sessionId);
   return {
     sessionId: execution.lease.sessionId,
     turnId: execution.lease.turnId,
@@ -275,5 +281,6 @@ function createToolContext(
       ? [execution.assemblyContext.plan.canonicalPath]
       : [],
     ...(channelContext ? { channelContext } : {}),
+    ...(toolEnv ? { toolEnv } : {}),
   };
 }

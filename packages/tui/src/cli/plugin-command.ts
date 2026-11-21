@@ -175,6 +175,7 @@ async function createPluginCommandContext(
     workspaceDir: process.cwd(),
     version,
     surface: 'headless',
+    managementSurface: true,
     ...(lane ? { lane } : {}),
   });
   return {

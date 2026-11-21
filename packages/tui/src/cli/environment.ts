@@ -7,6 +7,7 @@ import {
 } from '@mavis/config';
 
 import {
+  readRuntimeRegion,
   resolveMcodeAuthEnvironment,
   setMcodeStartupBuildEnvironment,
   type McodeAuthEnvironment,
@@ -19,6 +20,7 @@ const MANAGED_BACKEND_LANE_PATTERN = /^[A-Za-z0-9._-]+$/u;
 const STARTUP_ENVIRONMENT_OPTION = '--env';
 const ROOT_OPTIONS_WITH_REQUIRED_VALUES = new Set([
   '--lane',
+  '--profile',
   '--resume',
   '--tui-mode',
   '-m',
@@ -166,8 +168,4 @@ function isReusableAuthStatus(value: unknown): value is AuthStatus {
     value === 'scope_upgrade_required' ||
     value === 'expired'
   );
-}
-
-function readRuntimeRegion(value: string | undefined): McodeAuthEnvironment['region'] | undefined {
-  return value === 'cn' || value === 'en' ? value : undefined;
 }

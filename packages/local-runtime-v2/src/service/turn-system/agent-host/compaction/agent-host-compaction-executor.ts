@@ -3,6 +3,7 @@ import type {
   AgentHostDependencies,
   AgentHostRuntimeProfiles,
 } from '../contracts.js';
+import type { WireCompactionBarrier } from '../../compaction/context-wire.js';
 import {
   composeStreamFn,
   recordPiLLMCallMetrics,
@@ -53,16 +54,11 @@ import {
   recordCheckpointAttemptBestEffort,
 } from './context-compaction.js';
 import {
-  recordSharedPrefixFallbackBestEffort,
-  resolveCheckpointRequestShape,
-} from './checkpoint-request-shape.js';
-import {
   createCompactionLifecycleMetadata,
   createManualCompactionChange,
 } from './compaction-history.js';
 import {
   joinPrompt,
-  readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
   resolveProviderContextMode,
 } from '../execution/prompt.js';
@@ -196,10 +192,6 @@ interface ManualCompactionRequestPlan {
   readonly payloadTransform: ManualContextCompactionInput['payloadTransform'];
   readonly systemPrompt: ManualContextCompactionInput['systemPrompt'];
   readonly tools: ManualContextCompactionInput['tools'];
-  readonly contextUsagePromptRanges: ManualContextCompactionInput['contextUsagePromptRanges'];
-  readonly checkpointRequestShape: NonNullable<
-    ManualContextCompactionInput['checkpointRequestShape']
-  >;
 }
 
 async function preCompactHookRejection(
@@ -320,6 +312,37 @@ export class AgentHostCompactionExecutor<
         abortedReason: abortReason(input),
       });
     }
+    // Wave 2 (canon 05 §2.2: "Legacy-компактор в wire-режиме удаляется
+    // полностью"): the manual /compact of a wire-mode session runs through the
+    // UNIFIED scheduler's blocking compaction — no LocalContextCompactor, no
+    // `compactContext`. The cut the scheduler commits IS the durable truth
+    // (the four compaction events), so this path delivers no history change:
+    // it joins the job, reports the committed checkpoint and closes the lease.
+    const resolvedBarrier = await capture(async () =>
+      compactionDependencies.prepareManualWireCompaction
+        ? compactionDependencies.prepareManualWireCompaction(input.lease.sessionId, input.lease.turnId)
+        : compactionDependencies.wireCompactionBarrier?.(input.lease.sessionId),
+    );
+    if (!resolvedBarrier.ok) {
+      return this.failPrepared({ context, attemptId, error: resolvedBarrier.error });
+    }
+    const wireBarrier = resolvedBarrier.value;
+    if (wireBarrier !== undefined) {
+      return this.runUnifiedManualCompaction({
+        input,
+        context,
+        attemptId,
+        barrier: wireBarrier,
+      });
+    }
+    if (compactionDependencies.manual === undefined) {
+      return {
+        status: 'failed',
+        error: new TypeError(
+          'Manual compaction requires either the unified compaction seam (wire mode) or the legacy manual compactor (jsonl compatibility mode).',
+        ),
+      };
+    }
     const captured = await capture<CapturedManualCompactionSnapshot>(async () => {
       const session = captureSession(
         input.lease.sessionId,
@@ -363,8 +386,7 @@ export class AgentHostCompactionExecutor<
 
   private async runManualCompaction(
     plan: RunManualCompactionPlan<TAgent>,
-  ): Promise<CompactionOutcome> {
-    const {
+  ): Promise<CompactionOutcome> {    const {
       input,
       session,
       history,
@@ -520,27 +542,25 @@ export class AgentHostCompactionExecutor<
         sessionId: input.lease.sessionId,
         signal: input.lease.signal,
       });
-      const baseSystemPrompt = readPreparedSystemPrompt(preparation.agentConfig);
-      const contextUsagePromptRanges = readPreparedContextUsagePromptRanges(
-        preparation.agentConfig,
-        assembly.systemPromptPrefix,
-        baseSystemPrompt,
-      );
       const providerContext = resolveProviderContextMode(
         session,
         {
-          systemPrompt: joinPrompt(assembly.systemPromptPrefix, baseSystemPrompt),
+          systemPrompt: joinPrompt(
+            assembly.systemPromptPrefix,
+            readPreparedSystemPrompt(preparation.agentConfig),
+          ),
           tools: assembly.tools.map(({ def }) => ({
             name: def.name,
             description: def.description,
             parameters: def.schema,
           })),
-          ...(contextUsagePromptRanges === undefined ? {} : { contextUsagePromptRanges }),
         },
         'compaction',
       );
       const compaction = captureContextCompactionResult(
-        await compactionDependencies.manual.compactManual(
+        // Guarded in `compact` (wire mode routes to the unified barrier before
+        // this path; the jsonl composition always composes the manual one).
+        await compactionDependencies.manual!.compactManual(
           createManualCompactionRequest({
             input,
             messages: piHistory,
@@ -550,11 +570,6 @@ export class AgentHostCompactionExecutor<
             payloadTransform,
             systemPrompt: providerContext.systemPrompt,
             tools: [...providerContext.tools],
-            contextUsagePromptRanges: providerContext.contextUsagePromptRanges,
-            checkpointRequestShape: resolveCheckpointRequestShape(
-              preparation.llm,
-              compactionDependencies.checkpointSharedPrefixEnabled,
-            ),
           }),
           {
             onStarted: () =>
@@ -583,18 +598,6 @@ export class AgentHostCompactionExecutor<
                   phase: 'manual',
                   thinkingLevel,
                   checkpoint: metadata,
-                },
-              ),
-            onCheckpointSharedPrefixFallback: (reason) =>
-              recordSharedPrefixFallbackBestEffort(
-                this.dependencies.logger,
-                compactionDependencies.metricsClient,
-                {
-                  context,
-                  attemptId,
-                  phase: 'manual',
-                  api: preparation.llm.model.api,
-                  reason,
                 },
               ),
             onProviderRequestSettled: state.tokenUsage.observe,
@@ -681,8 +684,97 @@ export class AgentHostCompactionExecutor<
     };
   }
 
-  private async failPrepared(plan: FailPreparedPlan): Promise<CompactionOutcome> {
-    const { context, attemptId, error, metadata, abortedReason } = plan;
+  /**
+   * Wave 2 (canon 05 §2.2, item 2.4): the manual /compact of a wire-mode
+   * session — `runBlocking` over the session's unified scheduler, raced
+   * against the lease signal. The scheduler's own commit already wrote the
+   * cut (the four compaction events), so this path delivers NO history
+   * change: it joins the job, reports the committed checkpoint's numbers and
+   * closes the lease. A null checkpoint is the honest "nothing to compact"
+   * (or the wait lost to Esc — reported as aborted); a job failure propagates
+   * to `failPrepared` like every compaction failure.
+   */
+  private async runUnifiedManualCompaction(plan: {
+    readonly input: AgentCompactionInput;
+    readonly context: AgentEventContext;
+    readonly attemptId: string;
+    readonly barrier: WireCompactionBarrier;
+  }): Promise<CompactionOutcome> {
+    const { input, context, attemptId, barrier } = plan;
+    const compactionDependencies = this.requireCompaction();
+    observeCompactionBestEffort(compactionDependencies.observer, {
+      context,
+      attemptId,
+      status: 'started',
+      reason: 'manual',
+    });
+    try {
+      const checkpoint = await barrier.runBlocking(input.lease.signal, { force: true });
+      if (checkpoint === null) {
+        if (input.lease.signal.aborted) {
+          return this.failPrepared({
+            context,
+            attemptId,
+            error: abortError(input.lease.signal),
+            abortedReason: abortReason(input),
+          });
+        }
+        observeCompactionBestEffort(compactionDependencies.observer, {
+          context,
+          attemptId,
+          status: 'unchanged',
+          reason: 'nothing-to-compact',
+        });
+        return { status: 'unchanged', reason: 'nothing-to-compact' };
+      }
+      const close = captureSync(() => compactionDependencies.control.beginClose(input.lease));
+      if (!close.ok) {
+        return this.failPrepared({
+          context,
+          attemptId,
+          error: close.error,
+          ...(input.lease.signal.aborted ? { abortedReason: abortReason(input) } : {}),
+        });
+      }
+      if (!close.value.closed) {
+        return this.failPrepared({
+          context,
+          attemptId,
+          error: new AgentCompactionCloseError(close.value.reason),
+          ...(input.lease.signal.aborted ? { abortedReason: abortReason(input) } : {}),
+        });
+      }
+      observeCompactionBestEffort(compactionDependencies.observer, {
+        context,
+        attemptId,
+        status: 'completed',
+        compactionId: checkpoint.compactionId,
+        messagesBefore: checkpoint.messagesBefore,
+        messagesAfter: checkpoint.messagesAfter,
+        tokensBefore: checkpoint.tokensBefore,
+        tokensAfter: checkpoint.tokensAfter,
+        ...(checkpoint.contextUsage ? { contextUsage: checkpoint.contextUsage } : {}),
+      });
+      return {
+        status: 'completed',
+        compactionId: checkpoint.compactionId,
+        messagesBefore: checkpoint.messagesBefore,
+        messagesAfter: checkpoint.messagesAfter,
+        tokensBefore: checkpoint.tokensBefore,
+        tokensAfter: checkpoint.tokensAfter,
+        ...(checkpoint.contextUsage ? { contextUsage: checkpoint.contextUsage } : {}),
+      };
+    } catch (error) {
+      return this.failPrepared({
+        context,
+        attemptId,
+        error,
+        ...(input.lease.signal.aborted ? { abortedReason: abortReason(input) } : {}),
+      });
+    }
+  }
+
+  private async failPrepared(plan: FailPreparedPlan): Promise<CompactionOutcome> {    const { context, attemptId, error, metadata, abortedReason } = plan;
     const compactionDependencies = this.requireCompaction();
     const tokenUsage = metadata?.tokenUsage ?? plan.tokenUsage?.snapshot();
     const lifecycle = await capture(() =>
@@ -740,12 +832,6 @@ function createManualCompactionRequest(
     ...(input.customInstructions ? { customInstructions: input.customInstructions } : {}),
     systemPrompt,
     tools: plan.tools,
-    ...(plan.contextUsagePromptRanges === undefined
-      ? {}
-      : { contextUsagePromptRanges: plan.contextUsagePromptRanges }),
-    ...(plan.checkpointRequestShape === 'isolated'
-      ? {}
-      : { checkpointRequestShape: plan.checkpointRequestShape }),
   };
 }
 

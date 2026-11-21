@@ -100,11 +100,18 @@ function statusRows(sections: readonly TranscriptInspectionSection[]): Transcrip
     if (title === 'Account') {
       const plan = find('Plan');
       const source = find('Model source');
-      return rows
-        .filter((row) => row.label === 'Account' || row === source)
-        .map((row) =>
-          row.label === 'Account' && plan ? { ...row, value: `${row.value} (${plan.value})` } : row,
-        );
+      // The serving daemon's profile/dataDir (opus 2026-11-01, правка 5):
+      // shown ahead of the account so a window on the wrong store is
+      // visible at a glance. Absent on daemons predating the field.
+      const profile = find('Profile');
+      const account = find('Account');
+      return [
+        ...(profile ? [profile] : []),
+        ...(account ? [account] : []),
+        ...(source ? [source] : []),
+      ].map((row) =>
+        row.label === 'Account' && plan ? { ...row, value: `${row.value} (${plan.value})` } : row,
+      );
     }
     return rows.map((row) => (row.label === 'Session ID' ? { ...row, label: 'Session' } : row));
   });

@@ -5,6 +5,7 @@ import { resolveTuiExecInvocation, type RawTuiExecOptions } from '../headless/in
 import { runTuiExec } from '../headless/runner.js';
 import { prepareTuiDataDir } from '../runtime/data-dir.js';
 import { createTuiRuntime, shutdownTuiRuntime } from '../runtime/lifecycle.js';
+import { resolveTuiServerMode } from '../runtime/remote-host.js';
 
 type TuiTerminationSignal = 'SIGINT' | 'SIGTERM' | 'SIGHUP';
 
@@ -72,7 +73,6 @@ export async function runTuiExecCommand(
         version,
         ...(invocation.configPath ? { configPath: invocation.configPath } : {}),
         surface: 'headless',
-        ...(invocation.ptc ? { ptcLaunchOverride: true } : {}),
         promptMode: invocation.promptMode ?? 'tui',
         ...(invocation.systemPromptOverrides
           ? { systemPromptOverrides: invocation.systemPromptOverrides }
@@ -80,6 +80,8 @@ export async function runTuiExecCommand(
         permissionMode: runtimePermissionMode(invocation.permission),
         ...(invocation.contextMode ? { contextMode: invocation.contextMode } : {}),
         ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
+        ...(commandOptions.profile ? { profile: commandOptions.profile } : {}),
+        ...(invocation.noDaemon ? { noDaemon: true } : {}),
       },
       explicitConfig
         ? {
@@ -108,6 +110,10 @@ export async function runTuiExecCommand(
           ? {}
           : { outputLastMessagePath: invocation.outputLastMessagePath }),
         ...(invocation.reviewRequest ? { reviewRequest: invocation.reviewRequest } : {}),
+        // §5.4 №20: only the process HOSTING the runtime owes the wake. In
+        // daemon mode the mcoded daemon outlives this thin client and performs
+        // the completion notice itself.
+        ownsBackgroundWake: resolveTuiServerMode() === 'off',
       },
       {
         runtime: runtime.adapter,

@@ -227,17 +227,15 @@ describe("thread-goal renderNudgePrompt", () => {
     expect(prompt).toContain("materially different next action");
   });
 
-  it("states the no-new-tool-progress streak instead of a repeat when only that condition fired", () => {
-
+  it("states the tool-less streak instead of a repeat when only that condition fired", () => {
     const prompt = renderNudgePrompt({
       objective: "Finish the audit",
       noProgressStreak: 0,
       noToolStreak: 1,
     });
 
-    expect(prompt).toContain("made no new tool progress");
+    expect(prompt).toContain("ended without using a single tool");
     expect(prompt).not.toContain("repeated an earlier final response");
-
   });
 
   it("states both guards when both counters are live", () => {
@@ -248,8 +246,7 @@ describe("thread-goal renderNudgePrompt", () => {
     });
 
     expect(prompt).toContain("repeated an earlier final response");
-    expect(prompt).toContain("made no new tool progress");
-
+    expect(prompt).toContain("ended without using a single tool");
   });
 
   it("keeps verifier gaps before the no-progress nudge", () => {

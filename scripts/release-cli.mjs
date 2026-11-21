@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { cliBuildVersion, versionFromTag } from './lib/cli-release.mjs';
+import { assertUpstreamCliPublication, cliBuildVersion, versionFromTag } from './lib/cli-release.mjs';
 
 const versionFiles = ['package.json', 'packages/tui/package.json'];
 
@@ -50,6 +50,7 @@ function createVersionPullRequest({ root, branch, version, tag }) {
 }
 
 export function releaseCli({ root, version, dryRun = false, openPullRequest = createVersionPullRequest }) {
+  assertUpstreamCliPublication(root);
   const tag = `v${version}`;
   versionFromTag(tag);
   const branch = `release/${tag}`;

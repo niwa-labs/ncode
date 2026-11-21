@@ -1,7 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
-import { getConfig, getConfigPath, minimaxApiModels, resetConfig } from '@mavis/config';
+import {
+  getConfig,
+  getConfigPath,
+  minimaxApiModels,
+  resetConfig,
+  SANDBOX_FILESYSTEM_MODE_NAMES,
+} from '@mavis/config';
 import yaml from 'js-yaml';
 import lockfile from 'proper-lockfile';
 
@@ -47,6 +53,13 @@ const LOCAL_PERMISSION_MODES = new Set([
   'auto',
   'off',
 ]);
+
+// Fail-closed set for the sandbox mode write: a value the config parser would
+// reject must never reach `sandbox.filesystem.policy.mode`, or the next load
+// would throw and take the whole configuration down with it.
+const LOCAL_SANDBOX_FILESYSTEM_MODES: ReadonlySet<string> = new Set(
+  SANDBOX_FILESYSTEM_MODE_NAMES,
+);
 
 const LOCAL_CONFIG_WRITE_ERROR_MESSAGE = 'Local runtime failed to update config file';
 const LOCAL_CONFIG_FILE_MODE = 0o600;
@@ -330,12 +343,7 @@ function applyLocalConfigUpdate(raw: Record<string, unknown>, body: Record<strin
       return;
     }
     if (Object.prototype.hasOwnProperty.call(body, 'put')) {
-      if (
-        field === 'review.mode' ||
-        field === 'permission.nativeDelete' ||
-        field === 'worktreeRefreshBeforeCreate' ||
-        field === 'promptSuggestion.enabled'
-      ) {
+      if (field === 'review.mode' || field === 'worktreeRefreshBeforeCreate') {
         throw new LocalConfigValidationError(`Unsupported config update operation for ${field}`);
       }
       const [target, key] = resolvePath(raw, field);
@@ -373,7 +381,21 @@ function applyLocalConfigSet(raw: Record<string, unknown>, field: string, value:
 }
 
 function assertMutableConfigField(field: string): void {
-  if (field === 'permission.policyOwner' || field === 'permission.storageWriteVersion') return;
+  if (
+    field === 'permission.policyOwner' ||
+    field === 'permission.storageWriteVersion' ||
+    field === 'permission.dangerousCommandGateEnabled' ||
+    // The sandbox is a whole configuration tree, and most of it (deny lists,
+    // network policy, local access) has no safe single-field edit. Only the
+    // master switch and the filesystem level are user-facing, so they are
+    // named individually instead of opening the `sandbox` root: a root entry
+    // would also admit `sandbox.filesystem.denyWrite` and friends through the
+    // generic `put` operation.
+    field === 'sandbox.enabled' ||
+    field === 'sandbox.filesystem.policy.mode'
+  ) {
+    return;
+  }
   const parts = field.split('.');
   const [root, ...children] = parts;
   if (
@@ -407,6 +429,26 @@ function validateLocalConfigValue(field: string, value: unknown): unknown {
     if (value === 1 || value === 2) return value;
     throw new LocalConfigValidationError(
       `Invalid permission.storageWriteVersion "${String(value)}"`,
+    );
+  }
+  if (field === 'permission.dangerousCommandGateEnabled') {
+    if (typeof value === 'boolean') return value;
+    throw new LocalConfigValidationError(
+      `Invalid permission.dangerousCommandGateEnabled "${String(value)}"`,
+    );
+  }
+  if (field === 'sandbox.enabled') {
+    if (typeof value === 'boolean') return value;
+    throw new LocalConfigValidationError(`Invalid sandbox.enabled "${String(value)}"`);
+  }
+  // Persisting the level is enough for the sandbox service to pick it up on its
+  // next apply; the live backend is re-initialized by the sandbox service
+  // itself (`LocalSandboxService.applyConfig`), which the host routes its own
+  // sandbox writes through rather than through this generic updater.
+  if (field === 'sandbox.filesystem.policy.mode') {
+    if (typeof value === 'string' && LOCAL_SANDBOX_FILESYSTEM_MODES.has(value)) return value;
+    throw new LocalConfigValidationError(
+      `Invalid sandbox.filesystem.policy.mode "${String(value)}"`,
     );
   }
   if (field === 'permissionMode') {
@@ -456,7 +498,6 @@ function deepMergeRecord(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(patch)) {
-    if (isUnsafeConfigKey(key)) continue;
     out[key] =
       isPlainRecord(value) && isPlainRecord(out[key]) ? deepMergeRecord(out[key], value) : value;
   }
@@ -468,22 +509,14 @@ function resolvePath(
   field: string,
 ): [Record<string, unknown>, string] {
   const parts = field.split('.');
-  if (parts.some(isUnsafeConfigKey)) {
-    throw new LocalConfigValidationError(`Unsupported config field: ${field}`);
-  }
   const target = parts.slice(0, -1).reduce(ensurePlainRecordChild, raw);
   return [target, parts.at(-1) ?? field];
-}
-
-function isUnsafeConfigKey(key: string): boolean {
-  return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
 function ensurePlainRecordChild(
   target: Record<string, unknown>,
   key: string,
 ): Record<string, unknown> {
-  if (isUnsafeConfigKey(key)) throw new LocalConfigValidationError(`Unsupported config field: ${key}`);
   const value = Object.prototype.hasOwnProperty.call(target, key) ? target[key] : undefined;
   if (isPlainRecord(value)) return value;
   const child: Record<string, unknown> = {};

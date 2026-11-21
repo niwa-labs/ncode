@@ -369,7 +369,13 @@ export function replaceLatestExactReviewReminder(
       const replaced = replaceLast(message.content, fullReminder, compactReminder);
       if (replaced === undefined) continue;
       const output = [...messages];
-      output[messageIndex] = { ...message, content: replaced } as AgentMessage;
+      // pi 48c8f322: `toolResult` content is block-only. A legacy string
+      // content re-emits as the equivalent single text block (the string held
+      // the whole result), so the replaced transcript stays a valid
+      // AgentMessage; `user` keeps its string form.
+      const content: unknown =
+        message.role === 'toolResult' ? [{ type: 'text', text: replaced }] : replaced;
+      output[messageIndex] = { ...message, content } as AgentMessage;
       return { messages: output };
     }
     if (!Array.isArray(message.content)) continue;

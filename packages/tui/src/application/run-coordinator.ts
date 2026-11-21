@@ -1,8 +1,8 @@
 import type { CliSendMessageReq } from '@mavis/local-runtime-v2/cli-service';
-import { isTurnLifecycleMessageKind } from '@mavis/shared/turn-message-kind';
 
 import type { TuiTransportAttachment } from '../types/invocation.js';
 import { TuiFailure } from '../failure.js';
+import { TurnDeliveryRetired, TurnStreamDetached } from '../runtime/remote-host.js';
 import type {
   TuiConversationPort,
   TuiClientIntent,
@@ -71,12 +71,6 @@ export interface TuiRunResult {
   status: TuiRunStatus;
   outcome: TuiTurnRunOutcome;
   error?: string;
-  /**
-   * Settles after every observer call for this run has finished. Present only
-   * when `releaseObserverOnStop` is enabled, because the run may then return
-   * before a blocked observer completes.
-   */
-  observations?: Promise<void>;
 }
 
 export type TuiRunObserver = (event: TuiStreamEvent) => void | Promise<void>;
@@ -101,13 +95,6 @@ export interface TuiRunCoordinatorOptions {
   onAnswerSelection?: (event: Readonly<Record<string, unknown>>) => void;
   cancellationSettlementTimeoutMs?: number;
   nowMs?: () => number;
-  /**
-   * Stop waiting for the observer once the run is stopping (timeout, limit or
-   * abort). Observer calls still run in event order in the background. Headless
-   * Exec enables this because a stdout reader that stops reading must not keep
-   * a stopped run from settling.
-   */
-  releaseObserverOnStop?: boolean;
 }
 
 export const DEFAULT_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 1_000;
@@ -137,6 +124,15 @@ export class TuiRunCoordinator {
     const activeRun = this.activeRun;
     if (!activeRun || (turnId !== undefined && activeRun.turnId !== turnId)) return false;
     this.activeRun = undefined;
+    return true;
+  }
+
+  /** Stops a stale delivery reader without issuing abortSession. */
+  retireCompletedRun(turnId: string): boolean {
+    const activeRun = this.activeRun;
+    if (!activeRun || activeRun.turnId !== turnId) return false;
+    this.activeRun = undefined;
+    activeRun.controller.abort(new TurnDeliveryRetired('Runtime turn already settled.'));
     return true;
   }
 
@@ -208,14 +204,10 @@ export class TuiRunCoordinator {
     const usageResponses: TuiTurnResponseUsage[] = [];
     let usageIncomplete = false;
     let questionnaireRequested = false;
-    const releaseObserverOnStop = this.options.releaseObserverOnStop === true;
-    let observations: Promise<void> = Promise.resolve();
-    const observeEvent = (event: TuiStreamEvent): Promise<void> => {
-      if (!releaseObserverOnStop) return observeBestEffort(observe, event);
-      // Chain observer calls so output order never depends on whether we wait.
-      observations = observations.then(() => observeBestEffort(observe, event));
-      return untilSettledOrAborted(observations, activeRun.controller.signal);
-    };
+    // Wave 2 (incident 2026-11-05): the terminal marker the source MUST end
+    // with — the projected `[DONE]` frame. A source that ends without it did
+    // not confirm the turn's end; the net below refuses to report success.
+    let sawTerminal = false;
 
     try {
       session = await waitForSession(request.session, activeRun.controller.signal);
@@ -247,6 +239,7 @@ export class TuiRunCoordinator {
           const next = await source.next();
           if (next.done) break;
           const event = next.value;
+          if (event.type === 'done') sawTerminal = true;
           questionnaireRequested ||= hasQuestionnaireToolResult(event, request.turnId);
           if (!accepted) {
             accepted = true;
@@ -256,21 +249,26 @@ export class TuiRunCoordinator {
           if (continuation) {
             status = 'awaiting-user-continuation';
             failure = continuation;
-            await observeEvent(event);
+            await observeBestEffort(observe, event);
             break;
           }
-          if (
-            isCompletedAssistantMessage(event) &&
-            isTurnLifecycleMessageKind(event.message.kind)
-          ) {
-            // Lifecycle frames are runtime bookkeeping, not model responses: they
-            // never consume a step or replace the answer. Compaction still spends
-            // an auxiliary provider call whose usage is not exposed here.
-            usageIncomplete ||= isTurnCompactionMessage(event.message, request.turnId);
-          } else if (isCompletedAssistantMessage(event)) {
+          if (isCompletedAssistantMessage(event)) {
+            // Automatic context compaction reports its lifecycle inside the
+            // turn stream as assistant-role display markers (`compaction*`
+            // kinds). They are runtime maintenance, not model steps: the usage
+            // accounting below already excludes them, and the step budget must
+            // exclude them for the same reason — otherwise a compaction the
+            // runtime starts before the FIRST model call consumes the exec's
+            // `--max-steps` budget and the real answer is refused as
+            // `limit_exceeded` (BYOK regression over reactive subagents
+            // wave 2, whose larger tool description legitimately pushed a
+            // 32k-window fixture over the compaction trigger).
+            const isCompactionMarker = isTurnCompactionMessage(event.message, request.turnId);
+            usageIncomplete ||= isCompactionMarker;
             const responseUsage = responseUsageFromMessage(event.message, request.turnId);
             if (responseUsage) upsertResponseUsage(usageResponses, responseUsage);
             if (
+              !isCompactionMarker &&
               request.policy?.maxSteps !== undefined &&
               completedAssistantSteps >= request.policy.maxSteps
             ) {
@@ -278,7 +276,7 @@ export class TuiRunCoordinator {
               await this.stopActive(activeRun, 'limit');
               break;
             }
-            completedAssistantSteps += 1;
+            if (!isCompactionMarker) completedAssistantSteps += 1;
             if (event.message.toolCalls?.length) {
               // Pre-tool prose is not the final answer.
               this.reportAnswerSelection({
@@ -312,7 +310,7 @@ export class TuiRunCoordinator {
             status = eventFailure.status;
             failure = eventFailure.error;
           }
-          await observeEvent(event);
+          await observeBestEffort(observe, event);
         }
       } finally {
         await source.return?.(undefined);
@@ -343,6 +341,31 @@ export class TuiRunCoordinator {
         status = 'awaiting-user-continuation';
         answer = null;
         failure = questionnaireContinuationError();
+      }
+      // The safety net (incident 2026-11-05, verdict §2.2б): a source that
+      // ended WITHOUT its terminal `[DONE]` and without our own exits
+      // (abort/stop, questionnaire, limits) did not confirm the turn's end —
+      // a lost window must never read as success, because the turn may still
+      // be running. Only the listed statuses survive it: cancelled (abort),
+      // awaiting (questionnaire) and limit_exceeded (limits) are set BEFORE
+      // this point by our own logic; a succeeded status here came from
+      // `next.done` with no `done` event ever seen.
+      if (
+        !sawTerminal &&
+        !activeRun.controller.signal.aborted &&
+        activeRun.stopReason === undefined &&
+        status !== 'cancelled' &&
+        status !== 'awaiting-user-continuation' &&
+        status !== 'limit_exceeded'
+      ) {
+        status = 'failed';
+        failure = {
+          category: 'runtime',
+          code: 'TURN_DETACHED',
+          message: 'The turn window closed before the turn ended; the turn may still be running.',
+          retryable: true,
+        };
+        answer = null;
       }
       if (request.policy?.requireAnswer === true && status === 'succeeded' && answer === null) {
         status = 'failed';
@@ -402,7 +425,6 @@ export class TuiRunCoordinator {
       status,
       outcome,
       ...(failure?.message ? { error: failure.message } : {}),
-      ...(releaseObserverOnStop ? { observations } : {}),
     };
   }
 
@@ -444,17 +466,20 @@ export class TuiRunCoordinator {
   ): Promise<boolean> {
     activeRun.stopReason ??= reason;
     const sessionId = activeRun.sessionId;
-    const abortRequest = sessionId
-      ? this.runtime
+    // Commit the turn-scoped stop first. Aborting the local stream can send
+    // a separate transport cancellation, which would otherwise win the race
+    // and settle without the user-stop queue pause.
+    const requested = sessionId
+      ? await this.runtime
           .abortSession({
             id: sessionId,
             turnId: activeRun.turnId,
             reason: reason === 'limit' ? 'max_steps' : reason,
           })
           .catch(() => false)
-      : Promise.resolve(true);
+      : true;
     activeRun.controller.abort(new Error(`Turn stopped: ${reason}`));
-    return abortRequest;
+    return requested;
   }
 }
 
@@ -568,6 +593,18 @@ function failureFromEvent(event: TuiStreamEvent):
 }
 
 function execError(error: unknown): TuiTurnRunError {
+  // Wave 2 (verdict §2.2б): the reattach gave up — same TURN_DETACHED code
+  // as the next.done net, with the stream's own reason and the attempt count.
+  if (error instanceof TurnStreamDetached) {
+    return {
+      category: 'runtime',
+      code: 'TURN_DETACHED',
+      message:
+        'The turn window closed before the turn ended; the turn may still be running. ' +
+        `(reason: ${error.reason}, attempts: ${error.attempts})`,
+      retryable: true,
+    };
+  }
   if (error instanceof TuiFailure) {
     const category =
       error.category === 'config' || error.category === 'internal' ? error.category : 'runtime';
@@ -622,19 +659,6 @@ async function observeBestEffort(observe: TuiRunObserver, event: TuiStreamEvent)
   } catch {
     // Display output cannot replace the Runtime-owned turn outcome.
   }
-}
-
-/** Resolves when `work` settles or `signal` aborts, whichever happens first. */
-function untilSettledOrAborted(work: Promise<void>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const release = () => {
-      signal.removeEventListener('abort', release);
-      resolve();
-    };
-    signal.addEventListener('abort', release, { once: true });
-    void work.then(release, release);
-  });
 }
 
 function createActiveRun(turnId: string): ActiveRun {

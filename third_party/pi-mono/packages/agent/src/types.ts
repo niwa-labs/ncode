@@ -1,19 +1,28 @@
 import type {
+	Api,
 	AssistantMessage,
 	AssistantMessageEvent,
+	AssistantMessageEventStream,
 	ImageContent,
+	JsonValue,
 	Message,
 	Model,
 	SimpleStreamOptions,
-	streamSimple,
 	TextContent,
 	Tool,
 	ToolResultMessage,
+	TranscriptContext,
+	Usage,
 } from "@earendil-works/pi-ai";
-import type { Static, TSchema } from "typebox";
+import type { Static } from "@earendil-works/pi-schema";
 
 /**
- * Stream function used by the agent loop.
+ * Stream function used by the agent loop. `Models.streamSimple` satisfies
+ * this shape.
+ *
+ * The loop passes a normalized transcript: the system prompt and tool
+ * declarations are carried by the transcript's system messages, never by
+ * `context.systemPrompt` or `context.tools`.
  *
  * Contract:
  * - Must not throw or return a rejected promise for request/model/runtime failures.
@@ -22,8 +31,10 @@ import type { Static, TSchema } from "typebox";
  *   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
  */
 export type StreamFn = (
-	...args: Parameters<typeof streamSimple>
-) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+	model: Model<Api>,
+	context: TranscriptContext,
+	options?: SimpleStreamOptions,
+) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -55,11 +66,18 @@ export type AgentToolCall = Extract<AssistantMessage["content"][number], { type:
 export interface BeforeToolCallResult {
 	block?: boolean;
 	reason?: string;
-	/** Trusted permission-gate classification for a blocked admission. */
-	blockedBy?: "permission";
-	/** Optional approval terminal state when the host can distinguish it. */
-	approvalStatus?: "denied" | "expired";
-	/** Stops the whole agent run after publishing this blocked tool result. */
+	/**
+	 * Hint that the agent should stop after the current tool batch when this call is blocked.
+	 * Early termination only happens when every finalized tool result in the batch sets this to true.
+	 */
+	terminate?: boolean;
+	/**
+	 * MiniMax host seam: stop the WHOLE agent, not just this batch. When a blocked call sets
+	 * this to true, the remaining unstarted calls of the batch receive skipped error outcomes
+	 * (every toolCallId keeps exactly one outcome), already-started parallel effects settle, and
+	 * the tool chain issues no further provider request. Unlike `terminate`, a single
+	 * `terminateAgent` is sufficient — the every-result rule does not apply.
+	 */
 	terminateAgent?: boolean;
 }
 
@@ -70,23 +88,33 @@ export interface BeforeToolCallResult {
  * - `content`: if provided, replaces the tool result content array in full
  * - `details`: if provided, replaces the tool result details value in full
  * - `isError`: if provided, replaces the tool result error flag
+ * - `usage`: if provided, replaces the tool result usage
  * - `terminate`: if provided, replaces the early-termination hint
+ * - `structuredContent`: if provided, replaces the structured content. If `content` is provided
+ *   without it, the structured content is dropped, because it may no longer match the content.
+ *   Return it along with `content` to keep it.
+ * - `terminateAgent`: if provided and true, requests whole-agent stop (MiniMax host seam)
  *
- * Omitted fields keep the original executed tool result values.
- * There is no deep merge for `content` or `details`.
+ * Other omitted fields keep the original executed tool result values.
+ * There is no deep merge for `content`, `details`, or `usage`.
  */
 export interface AfterToolCallResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
+	structuredContent?: JsonValue;
 	isError?: boolean;
-	/** Source of an explicit `isError: true` override. */
-	isErrorOrigin?: "tool" | "hook";
+	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
+	usage?: Usage;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
-	/** Stops the whole agent run regardless of other results in the same tool batch. */
+	/**
+	 * MiniMax host seam: stop the WHOLE agent after this batch. One `true` is sufficient; the
+	 * remaining unstarted calls of the batch receive skipped error outcomes, already-started
+	 * parallel effects settle, and the tool chain issues no further provider request.
+	 */
 	terminateAgent?: boolean;
 }
 
@@ -100,10 +128,6 @@ export interface BeforeToolCallContext {
 	args: unknown;
 	/** Current agent context at the time the tool call is prepared. */
 	context: AgentContext;
-	/** Host-owned PTC parent call, absent for model-issued top-level calls. */
-	parentToolCallId?: string;
-	/** User-visible PTC description for approval surfaces. */
-	parentDescription?: string;
 }
 
 /** Context passed to `afterToolCall`. */
@@ -120,17 +144,13 @@ export interface AfterToolCallContext {
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
-	/** Host-owned PTC parent call, absent for model-issued top-level calls. */
-	parentToolCallId?: string;
-	/** User-visible PTC description for approval surfaces. */
-	parentDescription?: string;
 }
 
-/** Context passed to `shouldStopAfterTurn`. */
-export interface ShouldStopAfterTurnContext {
+/** Context passed to completed-turn callbacks. */
+export interface AgentTurnContext {
 	/** The assistant message that completed the turn. */
 	message: AssistantMessage;
-	/** Tool result messages passed to the preceding `turn_end` event. */
+	/** Tool result messages emitted for the completed turn. */
 	toolResults: ToolResultMessage[];
 	/** Current agent context after the turn's assistant message and tool results have been appended. */
 	context: AgentContext;
@@ -138,17 +158,52 @@ export interface ShouldStopAfterTurnContext {
 	newMessages: AgentMessage[];
 }
 
+/** Decision returned by {@link FinishTurn}. Returning undefined preserves normal scheduling. */
+export type AgentTurnDecision = { action: "continue" } | { action: "end" };
+
+/**
+ * Called after a completed assistant turn and all of its tool-result messages, but before `turn_end`.
+ * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
+ * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
+ * with the current context. Error and aborted responses remain hard exits.
+ */
+export type FinishTurn = (
+	turn: AgentTurnContext,
+	signal?: AbortSignal,
+) => AgentTurnDecision | void | Promise<AgentTurnDecision | undefined> | Promise<void>;
+
 /** Replacement runtime state used by the agent loop before starting another provider request. */
 export interface AgentLoopTurnUpdate {
 	/** Context for the next provider request. */
 	context?: AgentContext;
+	/** Messages to append before the next provider request, with normal lifecycle events. */
+	messages?: AgentMessage[];
 	/** Model for the next provider request. */
 	model?: Model<any>;
 	/** Thinking level for the next provider request. */
 	thinkingLevel?: ThinkingLevel;
 }
 
-export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {}
+/** Runtime state available immediately before a conversational provider request. */
+export interface PrepareRequestContext {
+	context: AgentContext;
+	model: Model<any>;
+	thinkingLevel: ThinkingLevel;
+}
+
+/** Replacement runtime state for the provider request being prepared. */
+export type AgentRequestUpdate = Omit<AgentLoopTurnUpdate, "messages">;
+
+/**
+ * Called immediately before every conversational provider request, including the first.
+ * Pending messages have already been appended and emitted when this callback runs.
+ */
+export type PrepareRequest = (
+	request: PrepareRequestContext,
+	signal?: AbortSignal,
+) => AgentRequestUpdate | void | Promise<AgentRequestUpdate | undefined> | Promise<void>;
+
+export interface PrepareNextTurnContext extends AgentTurnContext {}
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
@@ -156,7 +211,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 *
-	 * Each AgentMessage must be converted to a UserMessage, AssistantMessage, or ToolResultMessage
+	 * Each AgentMessage must be converted to a SystemMessage, UserMessage, AssistantMessage, or ToolResultMessage
 	 * that the LLM can understand. AgentMessages that cannot be converted (e.g., UI-only notifications,
 	 * status messages) should be filtered out.
 	 *
@@ -214,26 +269,25 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 
 	/**
-	 * Called after each turn fully completes and `turn_end` has been emitted.
-	 *
-	 * If it returns true, the loop emits `agent_end` and exits before polling steering or follow-up queues,
-	 * without starting another LLM call. The current assistant response and any tool executions finish normally.
-	 *
-	 * Use this to request a graceful stop after the current turn, e.g. before context gets too full.
-	 *
-	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
+	 * Called after the assistant message and all tool-result messages have been emitted, immediately before `turn_end`.
+	 * `{ action: "end" }` ends the run without polling queues or preparing another request.
+	 * On a normal turn, `{ action: "continue" }` ensures one next provider request. Tool-result, steering, or
+	 * follow-up scheduling can satisfy that request and adds no extra request; otherwise the loop continues once
+	 * with the current context. Returning undefined preserves normal scheduling. Error and aborted responses remain
+	 * hard exits.
 	 */
-	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	finishTurn?: FinishTurn;
 
 	/**
-	 * Called immediately after steering messages have been polled and before another provider request.
-	 * This is a MiniMax host seam for a steering admission hook to stop the current run gracefully.
+	 * Called immediately before every conversational provider request, including the first.
+	 * Pending messages have already been appended. The returned context, model, and thinking level
+	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
 	 */
-	shouldStopAfterSteering?: () => boolean | Promise<boolean>;
+	prepareRequest?: PrepareRequest;
 
 	/**
-	 * Called after `turn_end` and before the loop decides whether another provider request should start.
-	 * Return replacement context/model/thinking state to affect the next turn in this run.
+	 * Called after `turn_end` when the loop will continue, immediately before the next turn starts.
+	 * Return replacement context/model/thinking state or messages to append to affect that turn.
 	 * Return undefined to keep using the current context/config.
 	 */
 	prepareNextTurn?: (
@@ -243,7 +297,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
-	 * Called after the current assistant turn finishes executing its tool calls, unless `shouldStopAfterTurn` exits first.
+	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
 	 * If messages are returned, they are added to the context before the next LLM call.
 	 * Tool calls from the current assistant message are not skipped.
 	 *
@@ -267,6 +321,41 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
 
 	/**
+	 * MiniMax host seam: called immediately after steering messages have been polled and before
+	 * the loop decides whether another provider request starts. Returning true ends the run
+	 * gracefully (`agent_end`) without issuing another provider request — the post-dequeue
+	 * steering admission veto. The polled messages stay unconsumed by this loop invocation.
+	 */
+	shouldStopAfterSteering?: () => boolean | Promise<boolean>;
+
+	/**
+	 * MiniMax host seam: converts an unexpected provider tool call into a terminal text response.
+	 * When a SUCCESSFUL response carries a structural tool call the host did not declare, the
+	 * call blocks are stripped, this text is appended once after the provider text, and the
+	 * stop reason becomes "stop" — no execution and no second hop. Error and aborted responses
+	 * are never normalized. Omit to preserve the normal missing-tool error/result loop.
+	 */
+	unexpectedToolCallFallback?: string;
+
+	/**
+	 * MiniMax host seam (reactive subagents §1.7): the accepted-owner-input
+	 * generation of the owning conversation. The sequential executor captures
+	 * it BEFORE the first call of a batch and re-reads it at every inter-call
+	 * boundary; a changed value means a trusted owner input was accepted while
+	 * earlier calls of THIS batch were running, so the not-yet-started calls
+	 * must not start blind. Monotonic per conversation; must not throw.
+	 */
+	ownerInputGeneration?: () => number | Promise<number>;
+
+	/**
+	 * MiniMax host seam: called immediately before the validated, admitted tool starts executing —
+	 * after argument validation and `beforeToolCall` admission, before the first effect.
+	 * Denied, blocked, skipped, and cancelled calls never reach it; the actual execute call is
+	 * exactly one. Synchronous by design: it must not block or mutate the run.
+	 */
+	onToolExecutionStart?: (context: BeforeToolCallContext) => void;
+
+	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
 	 * - "parallel": preflight tool calls sequentially, then execute allowed tools concurrently;
@@ -277,35 +366,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	toolExecution?: ToolExecutionMode;
 
-	/** Optional host formatting for a tool omitted from the current catalog. */
-	missingToolMessage?: (toolName: string) => string | undefined;
-
-	/**
-	 * Optional host lookup for a tool the model called although the current catalog omits it.
-	 *
-	 * Called once for each such tool call, before its batch starts. A returned tool with the
-	 * same name runs that call like a catalog tool (argument preparation and validation, hooks,
-	 * execution mode); `undefined` keeps the missing-tool result. The tools sent to the model
-	 * are unchanged.
-	 */
-	resolveMissingTool?: (toolCall: AgentToolCall) => AgentTool<any> | undefined;
-
-	/**
-	 * Converts an unexpected provider tool call into a terminal text response.
-	 * Omit to preserve the normal missing-tool error/result loop.
-	 */
-	unexpectedToolCallFallback?: string;
-
 	/**
 	 * Called before a tool is executed, after arguments have been validated.
 	 *
 	 * Return `{ block: true }` to prevent execution. The loop emits an error tool result instead.
+	 * A blocked result can also set `terminate: true` to participate in the batch early-termination rule.
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
-
-	/** Called immediately before the validated, admitted tool starts executing. */
-	onToolExecutionStart?: (context: BeforeToolCallContext) => void;
 
 	/**
 	 * Called after a tool finishes executing, before `tool_execution_end` and tool-result message events are emitted.
@@ -314,6 +382,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * - `content` replaces the full content array
 	 * - `details` replaces the full details payload
 	 * - `isError` replaces the error flag
+	 * - `usage` replaces the tool result usage
 	 * - `terminate` replaces the early-termination hint
 	 *
 	 * Any omitted fields keep their original values. No deep merge is performed.
@@ -324,8 +393,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 /**
  * Thinking/reasoning level for models that support it.
- * Note: "xhigh" and "max" are only supported by selected model families. Use model thinking-level metadata
- * from @earendil-works/pi-ai to detect support for a concrete model.
+ * Note: "xhigh" and "max" are only supported by selected model families. Use model
+ * thinking-level metadata from @earendil-works/pi-ai to detect support for a concrete model.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -361,16 +430,30 @@ export type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessag
  * assigned arrays before storing them.
  */
 export interface AgentState {
-	/** System prompt sent with each model request. */
-	systemPrompt: string;
+	/**
+	 * Current system prompt, replayed from the transcript's system messages.
+	 *
+	 * Read-only: to change the prompt, append a system message with `content` or `sections`.
+	 * In `initialState`, this seeds the leading system message.
+	 */
+	readonly systemPrompt: string;
 	/** Active model used for future turns. */
 	model: Model<any>;
 	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
-	/** Available tools. Assigning a new array copies the top-level array. */
+	/**
+	 * Executable tools. Assigning a new array copies the top-level array.
+	 *
+	 * Differences from the tools declared in the transcript are announced to the model
+	 * with a system message before the next request.
+	 */
 	set tools(tools: AgentTool<any>[]);
 	get tools(): AgentTool<any>[];
-	/** Conversation transcript. Assigning a new array copies the top-level array. */
+	/**
+	 * Conversation transcript. Assigning a new array copies the top-level array.
+	 *
+	 * System messages in the transcript carry the prompt and tool declarations.
+	 */
 	set messages(messages: AgentMessage[]);
 	get messages(): AgentMessage[];
 	/**
@@ -388,11 +471,23 @@ export interface AgentState {
 }
 
 /** Final or partial result produced by a tool. */
-export interface AgentToolResult<T> {
+export interface AgentToolResult<T = JsonValue | undefined> {
 	/** Text or image content returned to the model. */
 	content: (TextContent | ImageContent)[];
 	/** Arbitrary structured details for logs or UI rendering. */
 	details: T;
+	/**
+	 * Machine-readable result matching the tool's `outputSchema`, for programmatic callers. Not sent
+	 * to the model; `content` remains the model-facing result.
+	 */
+	structuredContent?: JsonValue;
+	/** Usage from the final tool execution itself, if available. Not used for main LLM context accounting. */
+	usage?: Usage;
+	/**
+	 * Report a failure without throwing. The model sees `content` as an error result, like a thrown
+	 * error, but `details` and `structuredContent` are kept for the UI and programmatic callers.
+	 */
+	isError?: boolean;
 	/**
 	 * Hint that the agent should stop after the current tool batch.
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
@@ -400,25 +495,67 @@ export interface AgentToolResult<T> {
 	terminate?: boolean;
 }
 
-/** Callback used by tools to stream partial execution updates. */
+/** Final outcome of a tool call after hooks ran. */
+export interface AgentToolCallOutcome {
+	toolCall: AgentToolCall;
+	result: AgentToolResult<any>;
+	isError: boolean;
+	/** Milliseconds `execute()` took, measured with a monotonic clock; absent when the tool did not run. */
+	durationMs?: number;
+	/**
+	 * MiniMax host seam: a hook requested whole-agent stop for this call's batch. Carried for
+	 * observation/settlement; the loop consumes it at the batch boundary (see
+	 * {@link BeforeToolCallResult.terminateAgent}).
+	 */
+	terminateAgent?: boolean;
+}
+
+/**
+ * Callback used by tools to stream partial execution updates.
+ *
+ * The callback is scoped to the current `execute()` invocation. Calls made after
+ * the tool promise settles are ignored.
+ */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
-/** Tool definition used by the agent runtime. */
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
+/**
+ * The arguments type of a tool with parameter schema `TParameters`: pi-schema's `Static<TParameters>` (the builders'
+ * type, TypeBox's for the common TypeBox kinds, else `unknown`), and `any` for `AgentTool<any>`.
+ */
+export type AgentToolParams<TParameters> = IsAny<TParameters> extends true ? any : Static<TParameters>;
+
+// `0 extends 1 & T` is resolved too early for a `T` constrained to `object`; this form waits for the argument.
+type IsAny<T> = boolean extends (T extends never ? true : false) ? true : false;
+
+/**
+ * Tool definition used by the agent runtime. `parameters` is any JSON Schema object; see {@link AgentToolParams} for
+ * the type `execute` receives.
+ */
+export interface AgentTool<TParameters extends object = object, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
 	label: string;
 	/**
 	 * Optional compatibility shim for raw tool-call arguments before schema validation.
 	 * Must return an object that matches `TParameters`.
 	 */
-	prepareArguments?: (args: unknown) => Static<TParameters>;
-	/** Execute the tool call. Throw on failure instead of encoding errors in `content`. */
+	prepareArguments?: (args: unknown) => AgentToolParams<TParameters>;
+	/**
+	 * JSON Schema of `structuredContent` in successful results. Tools that declare it should always
+	 * set `structuredContent`.
+	 */
+	outputSchema?: object;
+	/**
+	 * Execute the tool call. Throw on failure, or return a result with `isError: true`; do not only
+	 * describe the failure in `content`.
+	 */
 	execute: (
 		toolCallId: string,
-		params: Static<TParameters>,
+		params: AgentToolParams<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
+	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
 	 * - "sequential": this tool must execute one at a time with other tool calls.
@@ -431,11 +568,9 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 
 /** Context snapshot passed into the low-level agent loop. */
 export interface AgentContext {
-	/** System prompt included with the request. */
-	systemPrompt: string;
 	/** Transcript visible to the model. */
 	messages: AgentMessage[];
-	/** Tools available for this run. */
+	/** Tools available for execution in this run. */
 	tools?: AgentTool<any>[];
 }
 
@@ -453,32 +588,20 @@ export type AgentEvent =
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
-	// Message lifecycle - emitted for user, assistant, and toolResult messages
+	// Message lifecycle - emitted for system, user, assistant, and toolResult messages
 	| { type: "message_start"; message: AgentMessage }
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	// Tool execution lifecycle
-	| {
-			type: "tool_execution_start";
-			toolCallId: string;
-			toolName: string;
-			args: any;
-			parentToolCallId?: string;
-		}
-	| {
-			type: "tool_execution_update";
-			toolCallId: string;
-			toolName: string;
-			args: any;
-			partialResult: any;
-			parentToolCallId?: string;
-		}
+	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
 	| {
 			type: "tool_execution_end";
 			toolCallId: string;
 			toolName: string;
 			result: any;
 			isError: boolean;
-			parentToolCallId?: string;
-		};
+			/** Milliseconds `execute()` took, measured with a monotonic clock; absent when the tool did not run. */
+			durationMs?: number;
+	  };

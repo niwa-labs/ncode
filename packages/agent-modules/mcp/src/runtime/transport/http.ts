@@ -1,40 +1,47 @@
 /**
- * HTTP / SSE MCP transport for Mavis runtimes.
+ * HTTP / SSE MCP transport for Mavis runtimes — pi-mcp `StreamableHttpTransport`.
  *
- * Ported from the retired `packages/daemon/src/mcp/runtime/transport/http.ts`.
- * Built on top of `@modelcontextprotocol/sdk` rather than hand-rolling fetch
- * loops — the SDK handles request/response framing, SSE reconnect, and
- * Streamable-HTTP session continuity. We inject headers (e.g. archon
- * identity) via `requestInit` and optionally thread the host fetch through
- * the SDK transport for proxy / enterprise-CA aware environments.
+ * W08 PORT-PI-1.3: the old `@modelcontextprotocol/sdk` SSE/StreamableHTTP
+ * wrappers are ABSORBED by `@earendil-works/pi-mcp` (streamable HTTP with
+ * SSE reconnect, session handling, `McpSessionExpiredError`). Mcode behaviors
+ * preserved through this facade:
+ *
+ *   * `protectHeadersOnRedirect` — the old manual-redirect fetch wrapper is
+ *     kept verbatim: package-configured headers must not follow a cross-origin
+ *     redirect (credential leak guard). pi transports take a plain `fetch`.
+ *   * Host fetch threading (proxy / enterprise-CA aware environments).
+ *   * Bearer auth via pi `AuthProvider` — the pool bridges `tokenProvider`
+ *     (mcode credentials, one copy per profile) into it.
  */
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import type { AuthProvider, McpFetch, McpTransport, StreamableHttpTransportOptions } from '@earendil-works/pi-mcp';
+import { StreamableHttpTransport } from '@earendil-works/pi-mcp';
 import type { HttpTransportConfig, SseTransportConfig } from '../types.js';
 
 export interface McpHttpTransportOptions {
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
+  authProvider?: AuthProvider;
 }
 
 export function createHttpTransport(
   config: HttpTransportConfig | SseTransportConfig,
   options?: McpHttpTransportOptions,
-): Transport {
+): McpTransport {
   const url = parseTransportUrl(config.url);
-  const requestInit = buildRequestInit(config.headers, options?.headers);
+  const headers = mergeHeaders(config.headers, options?.headers);
   const fetchImpl = config.protectHeadersOnRedirect
     ? protectConfiguredHeadersOnRedirect(options?.fetchImpl ?? fetch, config.headers)
     : options?.fetchImpl;
-  const transportOptions = {
-    ...(requestInit ? { requestInit } : {}),
-    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+  const transportOptions: StreamableHttpTransportOptions = {
+    url,
+    ...(headers ? { headers } : {}),
+    ...(fetchImpl ? { fetch: fetchImpl as McpFetch } : {}),
+    ...(options?.authProvider ? { authProvider: options.authProvider } : {}),
   };
-  if (config.type === 'sse') {
-    return new SSEClientTransport(url, transportOptions);
-  }
-  return new StreamableHTTPClientTransport(url, transportOptions);
+  // pi-mcp speaks streamable HTTP. Legacy `sse` configs keep their historical
+  // transport-type label; the pinned upstream dropped the separate SSE client,
+  // and streamable HTTP handles SSE responses over the same endpoint.
+  return new StreamableHttpTransport(transportOptions);
 }
 
 function protectConfiguredHeadersOnRedirect(
@@ -86,14 +93,6 @@ function redirectedRequestInit(request: Request, status: number, headers: Header
     ...(switchToGet ? {} : { body: request.body, duplex: 'half' as const }),
     redirect: 'manual',
   };
-}
-
-function buildRequestInit(
-  configHeaders?: Record<string, string>,
-  extraHeaders?: Record<string, string>,
-): RequestInit | undefined {
-  const headers = mergeHeaders(configHeaders, extraHeaders);
-  return headers ? { headers } : undefined;
 }
 
 function mergeHeaders(

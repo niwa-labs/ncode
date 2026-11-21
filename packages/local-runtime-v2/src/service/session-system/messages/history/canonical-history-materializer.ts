@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, rename, rm } from 'node:fs/promises';
+import { access, mkdir, open, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+
+import { createLogger } from '@mavis/logging';
+// Ш6 (integration plan): the streaming reader of the legacy mcode v2 session
+// directory — `messages.jsonl` canonical history — used to read the target
+// file without materializing it whole.
+import { openV2Session } from '@mavis/v2-adapter';
 
 import {
   canonicalActiveHistoryRevision,
@@ -8,11 +14,15 @@ import {
   type CanonicalHistoryEnvelope,
   type CanonicalHistoryFileAdapter,
 } from '../../sessions/representation/canonical-history-contract.js';
+import { decodeCanonicalHistoryEnvelope } from '../../../../infra/file/canonical-history.js';
 import {
   normalizeLegacyHistoryForMessages,
   type LegacyHistoryNormalizationResult,
 } from './legacy-history-normalizer.js';
 import type { SessionHistoryPaths } from './session-history-paths.js';
+
+/** Spec §4 registry: `mcode:turn` is local-runtime-v2's namespace. */
+const materializerLog = createLogger('mcode:turn');
 
 type CanonicalHistoryMigrationSource = 'ledger-snapshot' | 'sqlite-rows' | 'sqlite-blob' | 'empty';
 
@@ -25,10 +35,62 @@ interface CanonicalHistoryMigrationCheckpoint {
 }
 
 interface CanonicalHistoryLegacySources {
-  readLedgerSnapshot(sessionId: string): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
-  readSqliteRows(sessionId: string): Promise<readonly CanonicalHistoryEnvelope[]>;
-  readSqliteBlob(sessionId: string): Promise<readonly CanonicalHistoryEnvelope[]>;
+  /**
+   * Integration plan R4: every source read may receive an optional progress
+   * listener. Streaming sources report `{recordsRead}` as they deliver; the
+   * array-returning implementations of today simply ignore the callback (the
+   * materializer still emits its own phase-level events around the read).
+   */
+  readLedgerSnapshot(
+    sessionId: string,
+    onProgress?: CanonicalHistorySourceProgressListener,
+  ): Promise<readonly CanonicalHistoryEnvelope[] | undefined>;
+  readSqliteRows(
+    sessionId: string,
+    onProgress?: CanonicalHistorySourceProgressListener,
+  ): Promise<readonly CanonicalHistoryEnvelope[]>;
+  readSqliteBlob(
+    sessionId: string,
+    onProgress?: CanonicalHistorySourceProgressListener,
+  ): Promise<readonly CanonicalHistoryEnvelope[]>;
 }
+
+/** Progress reported by one legacy source while its records are being read. */
+export interface CanonicalHistorySourceProgress {
+  /** Which authoritative source is delivering. */
+  readonly source: 'ledger-snapshot' | 'sqlite-rows' | 'sqlite-blob';
+  /** Records delivered so far by this source read. */
+  readonly recordsRead: number;
+}
+
+/** Receives {@link CanonicalHistorySourceProgress} from a legacy source read. */
+export type CanonicalHistorySourceProgressListener = (
+  progress: CanonicalHistorySourceProgress,
+) => void;
+
+/**
+ * Phase-level progress of one materialization (integration plan R4: the
+ * phases follow the import pipeline of the test architecture §10.3 — scan →
+ * normalize → verify → complete; externalization/seed belong to the import
+ * sink and the durable provider, not to this module).
+ */
+export interface CanonicalHistoryMaterializerProgress {
+  readonly sessionId: string;
+  readonly phase: 'scan' | 'normalize' | 'verify' | 'complete';
+  /** The authoritative source once it is selected (absent while scanning). */
+  readonly source?: CanonicalHistoryMigrationSource;
+  /** Records delivered by the selected source so far (absent before selection). */
+  readonly recordsRead?: number;
+  /** Source bytes observed so far, when the reader reports a byte cursor. */
+  readonly bytesRead?: number;
+  /** Records in the verified canonical target (set on `complete`). */
+  readonly targetRecords?: number;
+}
+
+/** Receives {@link CanonicalHistoryMaterializerProgress} phases. */
+export type CanonicalHistoryMaterializerProgressListener = (
+  progress: CanonicalHistoryMaterializerProgress,
+) => void;
 
 interface CanonicalHistoryMigrationCheckpoints {
   getCheckpoint(sessionId: string): Promise<CanonicalHistoryMigrationCheckpoint | undefined>;
@@ -45,6 +107,23 @@ interface CanonicalHistoryMaterializerOptions {
   readonly paths: SessionHistoryPaths;
   readonly files: CanonicalHistoryFileAdapter;
   readonly legacyHistory?: CanonicalHistoryLegacyMigration;
+  /**
+   * Ш6: read the target `messages.jsonl` (the legacy mcode v2 canonical
+   * history) through `@mavis/v2-adapter` — streaming, line-bounded, with the
+   * adapter's format validation — instead of the whole-file parse. Every
+   * decoded record still passes the canonical envelope decoder, so the
+   * accepted-record set and the produced values are exactly the legacy
+   * read's. Composed only by the durable provider; the JSONL (legacy default)
+   * materialization keeps its exact path.
+   */
+  readonly readTargetViaV2Adapter?: boolean;
+  /**
+   * Integration plan R4: optional progress channel of the materialization.
+   * Receives the `scan → normalize → verify → complete` phases with the
+   * observed counters; sources receive a scoped listener through their
+   * extended signatures. Diagnostic only — no behavior depends on it.
+   */
+  readonly onProgress?: CanonicalHistoryMaterializerProgressListener;
   readonly nowMs: () => number;
 }
 
@@ -70,6 +149,13 @@ export async function ensureCanonicalHistoryMaterialized(
     return;
   }
 
+  const emitProgress = (
+    phase: CanonicalHistoryMaterializerProgress['phase'],
+    fields: Partial<Omit<CanonicalHistoryMaterializerProgress, 'sessionId' | 'phase'>> = {},
+  ): void => {
+    options.onProgress?.({ sessionId: options.sessionId, phase, ...fields });
+  };
+
   const checkpoint = await options.legacyHistory.checkpoints.getCheckpoint(options.sessionId);
   if (checkpoint) {
     if (!(await targetExists(options))) {
@@ -78,15 +164,37 @@ export async function ensureCanonicalHistoryMaterialized(
     return;
   }
 
-  const target = await options.files.readTarget(options.paths.messages);
-  const selected = await selectLegacySource(options);
+  emitProgress('scan');
+  const target = options.readTargetViaV2Adapter === true
+    ? await readTargetViaV2Adapter(options, emitProgress)
+    : await options.files.readTarget(options.paths.messages);
+  const selected = await selectLegacySource(options, emitProgress);
+  emitProgress('scan', {
+    source: selected.source,
+    recordsRead: selected.records.length,
+  });
   const normalized = normalizeSelectedHistory(options.sessionId, selected.records);
+  emitProgress('normalize', {
+    source: selected.source,
+    recordsRead: selected.records.length,
+  });
   const materialized =
     target === undefined
       ? await publishInitialTarget(options, normalized.items)
       : await verifyExistingTarget(options, target, normalized.items);
+  // The declared phase sequence is scan → normalize → verify → complete
+  // (diagnostic only); the verification step below was previously silent.
+  emitProgress('verify', {
+    source: selected.source,
+    recordsRead: selected.records.length,
+  });
   const verified = await verifyMaterializedTarget(options, materialized.records);
   const revision = canonicalActiveHistoryRevision(verified);
+  emitProgress('complete', {
+    source: selected.source,
+    recordsRead: selected.records.length,
+    targetRecords: verified.length,
+  });
   await writeMaterializationReport(options, {
     source: selected.source,
     inputMessageCount: selected.records.length,
@@ -110,17 +218,91 @@ async function targetExists(options: CanonicalHistoryMaterializerOptions): Promi
     : (await options.files.readTarget(options.paths.messages)) !== undefined;
 }
 
-async function selectLegacySource(options: CanonicalHistoryMaterializerOptions): Promise<{
+/**
+ * Ш6: the target observation read through `@mavis/v2-adapter`. The adapter
+ * contributes the streaming, line-bounded file read and its envelope format
+ * validation; the canonical envelope decoder remains the single validation
+ * and value authority, so an accepted file decodes to exactly the records the
+ * legacy `files.readTarget` produces. Tolerance matches the legacy
+ * `readActive` reader: a malformed line (JSON/shape through the adapter, or a
+ * canonical decode rejection) is skipped and counted, never fatal.
+ */
+async function readTargetViaV2Adapter(
+  options: CanonicalHistoryMaterializerOptions,
+  emitProgress: (phase: CanonicalHistoryMaterializerProgress['phase'], fields: Omit<CanonicalHistoryMaterializerProgress, 'sessionId' | 'phase'>) => void,
+): Promise<readonly CanonicalHistoryEnvelope[] | undefined> {
+  const exists = options.files.targetExists
+    ? await options.files.targetExists(options.paths.messages)
+    : await sessionMessagesFileExists(options.paths.messages);
+  if (!exists) return undefined;
+  const reader = openV2Session(options.paths.sessionDir);
+  const records: CanonicalHistoryEnvelope[] = [];
+  let skipped = 0;
+  let bytesRead = 0;
+  const result = await reader.readEnvelopes(
+    (envelope, _lineNo, _physicalLine, consumedBytes) => {
+      bytesRead = consumedBytes;
+      try {
+        records.push(decodeCanonicalHistoryEnvelope(envelope));
+      } catch {
+        skipped += 1;
+      }
+    },
+    {
+      formatErrors: 'skip',
+      onFormatError: () => {
+        skipped += 1;
+      },
+    },
+  );
+  emitProgress('scan', { recordsRead: records.length, bytesRead });
+  materializerLog.debug('canonical target read through the v2 adapter', {
+    sessionId: options.sessionId,
+    lines: result.lines,
+    skipped,
+  });
+  return records;
+}
+
+async function sessionMessagesFileExists(messagesPath: string): Promise<boolean> {
+  try {
+    await access(messagesPath);
+    return true;
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      (error as { readonly code?: unknown }).code === 'ENOENT'
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function selectLegacySource(
+  options: CanonicalHistoryMaterializerOptions,
+  emitProgress: (phase: CanonicalHistoryMaterializerProgress['phase'], fields: Omit<CanonicalHistoryMaterializerProgress, 'sessionId' | 'phase'>) => void,
+): Promise<{
   readonly source: CanonicalHistoryMigrationSource;
   readonly records: readonly CanonicalHistoryEnvelope[];
 }> {
   const legacy = options.legacyHistory;
   if (!legacy) return { source: 'empty', records: [] };
+  // R4: the selected source receives a scoped progress listener, so a
+  // streaming implementation can report its record cursor without knowing
+  // this module; today's array-returning readers ignore the callback and the
+  // materializer emits the phase event after the read returns.
+  const onSourceProgress: CanonicalHistorySourceProgressListener = (progress) => {
+    emitProgress('scan', { source: progress.source, recordsRead: progress.recordsRead });
+  };
   const selected = await selectCanonicalHistorySource({
     readTarget: async () => undefined,
-    readAuthoritativeLedgerSnapshot: () => legacy.sources.readLedgerSnapshot(options.sessionId),
-    readSqliteRows: () => legacy.sources.readSqliteRows(options.sessionId),
-    readSqliteBlob: () => legacy.sources.readSqliteBlob(options.sessionId),
+    readAuthoritativeLedgerSnapshot: () =>
+      legacy.sources.readLedgerSnapshot(options.sessionId, onSourceProgress),
+    readSqliteRows: () => legacy.sources.readSqliteRows(options.sessionId, onSourceProgress),
+    readSqliteBlob: () => legacy.sources.readSqliteBlob(options.sessionId, onSourceProgress),
   });
   if (selected.source === 'target') {
     throw new Error(`Canonical history source selection is invalid: ${options.sessionId}`);

@@ -479,7 +479,16 @@ export class TurnMetricsRecorder {
       }
       let providerError: unknown;
       let hasProviderError = false;
-      const callerOnProviderError = streamOptions?.onProviderError;
+      // Patch registry PR-02 (ledger №18, verdict `take` — zero hits in the
+      // pin): `onProviderError(error, model)` is the minimax raw-error seam,
+      // not yet reapplied onto the pin's `SimpleStreamOptions`. Read it
+      // structurally so the raw observation lights up the moment the seam
+      // lands (W01-C/W06) without widening the pin type from product code.
+      const callerOnProviderError = (
+        streamOptions as {
+          readonly onProviderError?: (error: unknown, providerModel: typeof model) => void;
+        } | undefined
+      )?.onProviderError;
       const observedStreamOptions = {
         ...streamOptions,
         onProviderError(error: unknown, observedModel: typeof model): void {
@@ -675,11 +684,6 @@ export class TurnMetricsRecorder {
 
   getLLMFailureObservation(): LLMFailureObservation | undefined {
     return this.llmFailure;
-  }
-
-  /** A recovered provider error must not become the turn's failure provenance. */
-  forgetLLMFailureObservation(): void {
-    this.llmFailure = undefined;
   }
 
   tryRecordTerminalFailure(provenance: TurnFailureProvenance): boolean {
@@ -1078,6 +1082,7 @@ function observeLLMFailure(
     ...(thrown !== undefined ? { raw: thrown } : {}),
     finishReason: final?.stopReason,
     errorMessage: final?.errorMessage,
+    ...(final?.rawStopReason ? { rawStopReason: final.rawStopReason } : {}),
     explicitAbort: final?.stopReason === 'aborted',
   });
   return { normalized, metricKind: toLLMMetricErrorKind(normalized.facts) };

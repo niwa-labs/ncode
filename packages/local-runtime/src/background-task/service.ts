@@ -48,12 +48,41 @@ export interface LocalBackgroundTaskServiceOptions {
   }) => void;
 }
 
+/**
+ * How often a bounded task_output wait re-probes the accepted-owner-input
+ * generation while parked (owner-input wake, owner bug 2026-11-06). One in-
+ * memory Map read per slice; the slice bounds the added wake latency, and a
+ * slice timeout falls back to the regular re-read so no output wake is lost
+ * between probes.
+ */
+const OWNER_INPUT_PROBE_INTERVAL_MS = 250;
+
+/**
+ * The accepted-owner-input generation probe of the steering composition's
+ * native task-wait binding (verdict 09 §1.7, wave 3). Late-bound by the
+ * runtime host next to `nativeTaskWaits`; a generation change during a bounded
+ * task_output wait releases it early — the owner's steer reaches the model in
+ * the SAME turn (canon 09), so the read must not park the turn behind it.
+ * Unset on hosts without the binding (JSONL): the wait runs to its full bound.
+ */
+type OwnerInputGenerationProbe = (ownerSessionId: string) => number;
+
 export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
   private runtimeOwner?: BackgroundTaskRuntimeOwner;
   private readonly startupRecovery: StartupTaskRecovery;
+  private ownerInputGeneration?: OwnerInputGenerationProbe;
 
   bindRuntimeOwner(owner: BackgroundTaskRuntimeOwner): void {
     this.runtimeOwner = owner;
+  }
+
+  /**
+   * Late-binds the owner-input generation probe (durable mode only — the
+   * native task-wait binding exists there). jsonl/legacy hosts never bind it,
+   * so bounded waits keep the exact legacy full-wait behavior.
+   */
+  bindOwnerInputGeneration(probe: OwnerInputGenerationProbe): void {
+    this.ownerInputGeneration = probe;
   }
 
   private readonly store: TaskStore;
@@ -152,6 +181,33 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
     });
   }
 
+  /**
+   * Wave 3 recovery (§5.4 №16 rupture "terminal persist до enqueue"): the
+   * terminal subagent rows whose delivery never left this process — the
+   * scheduler retries in memory only, so a crash after the durable persist
+   * leaves an honest terminal with `deliveredAt` unset and NOBODY left to
+   * deliver it. Candidates are the rows owned by a DEAD runtime owner: a
+   * live owner still retries on its own, and the caller schedules delivery
+   * for what this returns. Read-only; scheduling stays with the host.
+   */
+  async listUndeliveredTerminalTasksOfDeadOwners(): Promise<BackgroundTask[]> {
+    if (!this.runtimeOwner) return [];
+    const list = await this.store.list({
+      kinds: ['subagent'],
+      statuses: ['succeeded', 'failed', 'canceled', 'lost'],
+      undeliveredOnly: true,
+      limit: 500,
+    });
+    return list.items.filter((task) => {
+      const ownerId = task.metadata?.runtimeOwnerId;
+      return (
+        typeof ownerId === 'string' &&
+        ownerId !== this.runtimeOwner!.ownerId &&
+        this.runtimeOwner!.isOwnerAlive(ownerId) === false
+      );
+    });
+  }
+
   async markDelivered(ownerSessionId: string, taskIds: string[]): Promise<BackgroundTask[]> {
     const deliveredAt = this.nowMs();
     const delivered: BackgroundTask[] = [];
@@ -225,6 +281,19 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
     if (readOptions?.signal?.aborted) throw taskWaitAbortError(readOptions.signal);
     const waitMs = clampTaskOutputWaitMs(readOptions?.waitMs);
     const deadline = Date.now() + waitMs;
+    // Owner-input wake (owner bug 2026-11-06): the generation of the READING
+    // conversation, captured once per read. A trusted owner input accepted
+    // while the wait is parked bumps it and releases the wait early — the
+    // steer is delivered into the same turn, so a blocking read must not park
+    // the model behind it. No probe (JSONL, no owner session, no wait): the
+    // loop behaves exactly as before.
+    const ownerInputBaseline =
+      waitMs > 0 && ctx && this.ownerInputGeneration
+        ? {
+            sessionId: ctx.sessionId,
+            generation: this.ownerInputGeneration(ctx.sessionId),
+          }
+        : undefined;
 
     for (;;) {
       // Register before reading the durable snapshot so output arriving between
@@ -253,7 +322,35 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
         if (remainingMs <= 0) {
           return { ...read, status: task.status, task, timedOut: true };
         }
-        const outcome = await waiter!.wait(remainingMs);
+        const outcome = await this.waitBoundedOutput(
+          waiter!,
+          remainingMs,
+          ownerInputBaseline,
+        );
+        if (outcome === 'owner_input' && ownerInputBaseline) {
+          // Release with the freshest snapshot, exactly like the timeout path:
+          // the model gets the output-so-far plus the still-running status, and
+          // the completion notice still arrives automatically (delivery is
+          // keyed by the terminal run — an early read never consumes it).
+          const [latestTask, latestRead] = await Promise.all([
+            this.get(ctx ?? taskId, ctx ? taskId : undefined),
+            this.outputStore.read(taskId, readOptions),
+          ]);
+          logger.info(
+            {
+              event: 'task_output_wait_released_by_owner_input',
+              taskId,
+              ownerSessionId: ownerInputBaseline.sessionId,
+            },
+            'Bounded task_output wait released early by accepted owner input',
+          );
+          return {
+            ...latestRead,
+            ...(latestTask ? { status: latestTask.status, task: latestTask } : {}),
+            timedOut: false,
+            releasedFromOwnerInput: true,
+          };
+        }
         if (outcome === 'timeout') {
           const latestTask = await this.get(ctx ?? taskId, ctx ? taskId : undefined);
           const latestRead = await this.outputStore.read(taskId, readOptions);
@@ -267,6 +364,36 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
         waiter?.cancel();
       }
     }
+  }
+
+  /**
+   * One parked stretch of the bounded read. Without the owner-input probe this
+   * is the legacy single waiter wait. With it, the wait is sliced at
+   * {@link OWNER_INPUT_PROBE_INTERVAL_MS} and the generation is re-read after
+   * every slice; a change resolves `'owner_input'`. A slice timeout falls back
+   * to the caller's loop (fresh read + re-register), so output arriving
+   * between probes wakes the read exactly once through the normal path.
+   */
+  private async waitBoundedOutput(
+    waiter: { wait(timeoutMs: number): Promise<'event' | 'timeout'> },
+    remainingMs: number,
+    ownerInputBaseline:
+      | { sessionId: string; generation: number }
+      | undefined,
+  ): Promise<'event' | 'timeout' | 'owner_input'> {
+    if (!ownerInputBaseline || !this.ownerInputGeneration) {
+      return waiter.wait(remainingMs);
+    }
+    for (let left = remainingMs; left > 0; ) {
+      const slice = Math.min(left, OWNER_INPUT_PROBE_INTERVAL_MS);
+      const outcome = await waiter.wait(slice);
+      if (outcome === 'event') return 'event';
+      if (this.ownerInputGeneration(ownerInputBaseline.sessionId) !== ownerInputBaseline.generation) {
+        return 'owner_input';
+      }
+      left -= slice;
+    }
+    return 'timeout';
   }
 
   async stop(
@@ -342,6 +469,24 @@ export class LocalBackgroundTaskService implements LocalTaskControlAdapter {
 
   async finalizeOutput(taskId: string, summary?: string): Promise<void> {
     await this.outputStore.finalize(taskId, summary);
+  }
+
+  /**
+   * The task's entire output, paged through the exact store `task_output` reads
+   * (same source, no separate limit): the wake envelope carries the result body
+   * so the model does not spend an extra turn on `task_output`. Empty for a
+   * task that never wrote output.
+   */
+  async readFullOutput(taskId: string): Promise<string> {
+    const chunks: string[] = [];
+    let offset = 0;
+    for (;;) {
+      const read = await this.outputStore.read(taskId, { offset });
+      if (read.content) chunks.push(read.content);
+      if (!read.truncated || read.nextOffset === undefined || read.nextOffset <= offset) break;
+      offset = read.nextOffset;
+    }
+    return chunks.join('');
   }
 
   private patchStatus(

@@ -31,6 +31,11 @@
  * The gate collapses that to one rule, applied once at the very end
  * of `LocalPermissionFacade.checkPermission`:
  *
+ *   - `behavior === 'ask' && verdict.bypassImmune` → **passes through in
+ *     every mode** (first check). Bypass-immune asks are the "неотключаемые"
+ *     exception (§3): no mode, including `bypassPermissions`, may silently
+ *     auto-allow them. They surface to the user without allow-always /
+ *     deny-always options and cannot be hook-approved.
  *   - `mode !== 'bypassPermissions'` → pass through unchanged.
  *   - `mode === 'bypassPermissions'`:
  *       - `behavior === 'deny'` → unchanged. Deny is reported back to
@@ -67,6 +72,9 @@ export function applyAskGate(
   verdict: LocalPermissionCheckResult,
   mode: PermissionMode,
 ): LocalPermissionCheckResult {
+  // Bypass-immune asks are the single exception to "bypassPermissions =
+  // no card ever": they survive every mode and reach the user (§3).
+  if (verdict.behavior === 'ask' && verdict.bypassImmune) return verdict;
   if (mode !== 'bypassPermissions') return verdict;
   if (verdict.behavior !== 'ask') return verdict;
   // Preserve `rewrittenInput` (e.g. `rm` → `mavis-trash` rewrite) so

@@ -1,14 +1,26 @@
 /**
  * Minimal MCP runtime types for the shared MCP substrate.
  *
- * Adapted from the retired `packages/daemon/src/mcp/types.ts`. We trim the
- * legacy daemon surface (OAuth2 flow, manifest entries, lock-file write
- * mediator) down to what Mavis runtimes need to spawn MCP transports, run
- * `tools/list` / `tools/call`, and recover stderr.
+ * W08 PORT-PI-1.3 (§4 map, row «MCP substrate/disclosure», plan :504): the old
+ * `@modelcontextprotocol/sdk` transport/client engine is ABSORBED by the pinned
+ * `@earendil-works/pi-mcp` package. `@mavis/mcp` remains the product FACADE:
+ * connection pool policy (keys, semaphores, idle reaper, generations), mcode
+ * config/credentials shaping (token overrides), name registry, and managed
+ * routing stay here; the wire protocol, transports, and client are pi-mcp.
+ *
+ * Kept from the retired daemon surface: pool option/override shapes, metric
+ * port contract, logger port, stderr-line observers. The client/transport
+ * types now come from pi-mcp.
  */
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type {
+  CallToolResult,
+  McpClient,
+  McpTransport,
+  Resource,
+  ResourceTemplate,
+  ReadResourceResult,
+  Tool,
+} from '@earendil-works/pi-mcp';
 
 export interface StdioTransportConfig {
   type: 'stdio';
@@ -67,16 +79,22 @@ export interface McpToolInfo {
   inputSchema: Record<string, unknown>;
 }
 
+/** Resource descriptor surfaced by pi-mcp `resources/list`. */
+export type McpResourceInfo = Resource;
+
+/** Resource template descriptor surfaced by pi-mcp `resources/templates/list`. */
+export type McpResourceTemplateInfo = ResourceTemplate;
+
+/** Result of `resources/read` through the pool. */
+export type McpReadResourceResult = ReadResourceResult;
+
 /**
- * Lossless tool-call result from the MCP SDK.
- *
- * Keep this as the protocol-owned type rather than maintaining a local flat
- * approximation: standard results may contain audio, resource links, embedded
- * text/blob resources, and structuredContent in addition to text/images.
+ * Lossless tool-call result, pi-mcp protocol type (MCP 2026-07-28 shape:
+ * content, isError, structuredContent as any JSON value, _meta).
  */
 export type McpToolCallResult = CallToolResult;
 
-export type McpConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type McpConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error' | 'needs-auth';
 
 export type McpConnectionKey = string;
 
@@ -85,17 +103,23 @@ export interface McpConnection {
   key: McpConnectionKey;
   name: string;
   state: McpConnectionState;
-  client: Client | null;
-  transport: Transport | null;
+  /** pi-mcp client — the one protocol engine per connection. */
+  client: McpClient | null;
+  /** pi-mcp transport owned by the client while connected. */
+  transport: McpTransport | null;
   tools: McpToolInfo[] | null;
   lastUsed: number;
   error?: string;
 }
 
+/** Host-supplied bearer token source, bridged to the pi-mcp `AuthProvider`. */
+export type McpTokenProvider = () => Promise<string | undefined>;
+
 /**
  * Per-call overrides layered on top of the transport config at spawn time.
  * `env` is merged into the stdio child's process env; `headers` is merged
- * into the http/sse transport `requestInit`.
+ * into the http/sse transport headers; `tokenProvider` becomes the bearer
+ * `AuthProvider` for http/sse (mcode credentials, one copy per profile).
  */
 export interface McpConnectionTokenOverrides {
   /**
@@ -111,19 +135,18 @@ export interface McpConnectionTokenOverrides {
   serverOverride?: ResolvedMcpServer;
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  /** Bearer token source for http/sse auth. Read per request; never persisted by the pool. */
+  tokenProvider?: McpTokenProvider;
 }
 
 export interface McpCallOptions {
   /** Per-call timeout in ms. Falls back to per-server config, then MCP_DEFAULTS.timeout. */
   timeout?: number;
   /**
-   * Per-call abort signal, forwarded to the underlying MCP `client.callTool`.
-   * The SDK reacts to abort by rejecting the pending JSON-RPC promise with an
-   * `McpError` and sending a `notifications/cancelled` frame to the server, so
-   * the caller returns immediately instead of waiting for the pool timeout.
-   * Wire this from a turn-level AbortSignal so an abort during a long-running
-   * remote MCP tool call (e.g. generation endpoints) unblocks the pi turn
-   * without waiting for the tool to complete.
+   * Per-call abort signal, forwarded to the pi-mcp client request. The client
+   * reacts to abort by rejecting the pending JSON-RPC promise and sending a
+   * `notifications/cancelled` frame to the server, so the caller returns
+   * immediately instead of waiting for the pool timeout.
    */
   signal?: AbortSignal;
 }
@@ -173,3 +196,15 @@ export interface McpPoolMetrics {
  * bad observer can never wedge the stderr drain loop.
  */
 export type StderrLineObserver = (serverName: string, line: string) => void;
+
+/** Map a pi-mcp tool descriptor to the pool's cached tool shape. */
+export function toMcpToolInfo(tool: Tool): McpToolInfo {
+  return {
+    name: tool.name,
+    ...(tool.description !== undefined ? { description: tool.description } : {}),
+    inputSchema:
+      typeof tool.inputSchema === 'object' && tool.inputSchema !== null
+        ? (tool.inputSchema as Record<string, unknown>)
+        : {},
+  };
+}

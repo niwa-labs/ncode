@@ -136,6 +136,45 @@ export interface RuntimeProtocolError extends Omit<IProtocolError, 'code'> {
 }
 
 /**
+ * Who resolved a tool call's permission check and how (§4 `decidedBy`).
+ *
+ * Wire shape (ACP `_meta["minimax-code/permission"]`, runtime tool-call
+ * status payloads): all five keys are ALWAYS present on a emitted mark —
+ * `ruleKind: null` means "no rule was involved", not "unknown".
+ *
+ *   - `rule`    — a `permission.json` rule (`ruleKind` = its scope) or a
+ *                 built-in checker policy (`ruleKind: 'builtin'`: safe-bash
+ *                 fast-allow, fs inside workspace, final-deny, checker deny);
+ *   - `classifier` — the managed-auto cloud classifier allowed the call;
+ *   - `mode`    — a permission mode waived the check (bypass step 2a,
+ *                 ask-gate downgrade, `off`);
+ *   - `hook`    — a plugin hook (canPluginAutoApprove / PreToolUse) decided;
+ *   - `user`   — the client answered a permission request (one-time or
+ *                 persistent reply) or never answered (`reason:
+ *                 "unanswered: <cancelled|error|closed|not_current|no_prompt>"`).
+ */
+export interface RuntimePermissionMark {
+  decision: 'allow' | 'deny';
+  decidedBy: 'classifier' | 'rule' | 'mode' | 'hook' | 'user';
+  ruleKind: 'builtin' | 'session' | 'agent' | 'global' | null;
+  /** Effective permission mode of the check that produced this mark. */
+  mode: 'default' | 'auto' | 'bypassPermissions' | 'acceptEdits' | 'dontAsk' | 'off';
+  /** Non-empty human-readable reason; the runtime always sends it. */
+  reason: string;
+}
+
+/**
+ * Turn-local, fail-open source of {@link RuntimePermissionMark}s keyed by the
+ * pi `AgentToolCall.id`. The v2 permission gate records one mark per resolved
+ * tool call; the event bridge stamps it onto every status event of that call
+ * (Start normally predates the decision — the mark is guaranteed on the
+ * final Finished/Failed status).
+ */
+export interface TurnPermissionMarkSource {
+  get(toolCallId: string): RuntimePermissionMark | undefined;
+}
+
+/**
  * Tool-call state the bridge stages per assistant turn. Wire serialisation
  * happens in {@link toolCallFromRuntime} (event-bridge/converters.ts) which
  * folds `args` / `result` / `error` down to JSON strings on the legacy
@@ -160,6 +199,8 @@ export interface RuntimeToolCall {
   plugin_provenances?: IPluginCapabilityProvenance[];
   /** Tool execution wall-clock in ms (bridge-measured); non-prod / debug only. */
   duration_ms?: number;
+  /** §4 `decidedBy` mark; present once the permission gate resolved this call. */
+  permission?: RuntimePermissionMark;
 }
 
 /**

@@ -1,4 +1,6 @@
+import { getCurrentSystemMessage, type SystemMessage } from '@earendil-works/pi-ai';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -22,7 +24,13 @@ import {
   type CanonicalHistoryLegacyMigration,
 } from './canonical-history-materializer.js';
 import {
+  CanonicalHistoryIndexWriteError,
+  createCanonicalHistoryIndexAdapter,
+  type CanonicalHistoryIndexAdapter,
+} from './mutation/canonical-history-index.js';
+import {
   HistoryScannerError,
+  createCanonicalHistoryScanner,
   scanCanonicalHistoryArtifacts,
 } from './mutation/canonical-history-scanner.js';
 import { isUserMessageId } from '../../shared/user-message-id.js';
@@ -92,8 +100,6 @@ interface SessionCanonicalHistoryCompactionChangeBase extends Omit<
   readonly summary: string;
   /** Source identity for a structurally preserved real-user tail. */
   readonly currentUserSourceIndex?: number;
-  /** Hidden markers placed directly before that tail; absent means 1. */
-  readonly placedMarkerCount?: number;
 }
 
 export type SessionCanonicalHistoryCompactionChange = SessionCanonicalHistoryCompactionChangeBase &
@@ -108,7 +114,27 @@ export type SessionCanonicalHistoryCompactionChange = SessionCanonicalHistoryCom
       }
     | {
         readonly method: 'llm_checkpoint';
-        readonly replacementSourceIndexes?: never;
+        /**
+         * Source lineage of the RETAINED TAIL (everything after the summary):
+         * one strictly increasing active index per kept message. Absent for
+         * the legacy whole-history plans ([summary] alone, or [summary] plus
+         * the current-user tail). Present for the unified scheduler's cut,
+         * whose summary covers only the prefix BEFORE the retained window —
+         * the window itself must be committed verbatim from its source
+         * envelopes, never rebuilt from a projection.
+         */
+        readonly replacementSourceIndexes?: readonly number[];
+      }
+    | {
+        /**
+         * Wave 3 (canon 05 §2.2/§2.4, item 3.2): the deterministic fallback
+         * summary (no provider call) — the breaker-open path of the SAME
+         * unified pipeline. The cut shape is identical to the LLM
+         * checkpoint's (summary + verbatim retained window); only the
+         * durable `producedBy` differs, honestly.
+         */
+        readonly method: 'deterministic_fallback';
+        readonly replacementSourceIndexes: readonly number[];
       }
   );
 
@@ -120,7 +146,10 @@ export interface SessionCanonicalHistoryCommit {
   readonly identityVector: readonly string[];
 }
 
-type HistorySnapshotTransform = (snapshot: SessionCanonicalHistorySnapshot) => SessionCanonicalHistorySnapshot;
+/** Ownership-transfer seam shared by the JSONL and durable providers. */
+export type HistorySnapshotTransform = (
+  snapshot: SessionCanonicalHistorySnapshot,
+) => SessionCanonicalHistorySnapshot;
 
 export interface SessionSystemCanonicalHistoryProvider {
   /** Internal synchronous ownership transfer; ordinary reads remain detached and mutable. */
@@ -136,6 +165,20 @@ export interface SessionSystemCanonicalHistoryProvider {
   compact(change: SessionCanonicalHistoryCompactionChange): Promise<SessionCanonicalHistoryCommit>;
   initialize(sessionId: string): Promise<void>;
   delete(sessionId: string): Promise<void>;
+  /**
+   * Wave 2 (canon 05 §2.2, item 2.4): applies a TEXT offload plan as
+   * `history.v2.offload` events (the durable provider's seam; the JSONL
+   * compatibility provider does not implement it — the legacy axis is
+   * frozen there). `undefined` without the seam.
+   */
+  offloadToolText?(
+    sessionId: string,
+    items: readonly {
+      readonly envelopeIndex: number;
+      readonly replacement: string;
+      readonly reference: string;
+    }[],
+  ): Promise<void>;
 }
 
 export interface SessionSystemCanonicalHistoryProviderOptions {
@@ -215,6 +258,8 @@ export function createSessionSystemCanonicalHistoryProvider(
   const locations =
     options.locations ??
     createSessionHistoryLocationResolver({ dataDir: options.dataDir, sessions: options.sessions });
+  const indexes = new Map<string, CanonicalHistoryIndexAdapter>();
+  const scanHistory = createCanonicalHistoryScanner();
   const verifiedRecovery = new WeakMap<readonly CanonicalHistoryEnvelope[], number>();
 
   return view();
@@ -229,7 +274,8 @@ export function createSessionSystemCanonicalHistoryProvider(
       inspectActive: (sessionId) => inLane(sessionId, () => inspectActiveSnapshot(sessionId)),
       initialize: (sessionId) =>
         inLane(sessionId, async () => {
-          await ensureInitialized(sessionId, 'allocate');
+          const paths = await ensureInitialized(sessionId, 'allocate');
+          await syncIndex(sessionId, paths);
         }),
       delete: (sessionId) =>
         inLane(sessionId, async () => {
@@ -313,6 +359,7 @@ export function createSessionSystemCanonicalHistoryProvider(
               `Canonical compaction generation verification failed: ${change.sessionId}`,
             );
           }
+          await syncIndex(change.sessionId, paths, true, committed);
           const result = {
             ...historySnapshot(committed, true, transform),
             generation: committedGeneration,
@@ -354,6 +401,7 @@ export function createSessionSystemCanonicalHistoryProvider(
         records = recovery.records;
       }
     }
+    await syncIndex(sessionId, paths, true, records);
     return historySnapshot(records, allowPendingToolCallTail, transform);
   }
 
@@ -386,6 +434,35 @@ export function createSessionSystemCanonicalHistoryProvider(
     return paths;
   }
 
+  async function syncIndex(
+    sessionId: string,
+    paths: SessionHistoryPaths,
+    allowMissingParent = false,
+    verifiedRecords?: readonly CanonicalHistoryEnvelope[],
+  ): Promise<void> {
+    const active = verifiedRecords ?? (await files.readActiveStrict(paths.messages));
+    const adapter = indexes.get(sessionId) ?? createCanonicalHistoryIndexAdapter(paths.sessionDir);
+    indexes.set(sessionId, adapter);
+    try {
+      await adapter.loadOrRebuild(
+        {
+          sessionId,
+          activeGeneration: activeGeneration(active),
+          activeRevision: canonicalActiveHistoryRevision(active),
+        },
+        // Only the default reader owns reusable immutable records. Preserve the
+        // independent on-disk scanner for externally supplied adapters.
+        (scannerPaths) => options.files
+          ? scanCanonicalHistoryArtifacts(scannerPaths)
+          : scanHistory(scannerPaths, files),
+        { activePath: paths.messages, snapshotsPath: paths.snapshots, sessionId },
+      );
+    } catch (error) {
+      if (error instanceof CanonicalHistoryIndexWriteError) return;
+      if (allowMissingParent && isMissingParentScannerError(error)) return;
+      throw error;
+    }
+  }
   async function inLane<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     return ioLane.run(sessionId, operation);
   }
@@ -430,7 +507,12 @@ async function appendWithInterruptedToolRoundRecovery(input: {
   await input.files.append(input.path, input.appended, input.existing);
 }
 
-function appendEnvelopes(change: SessionCanonicalHistoryChange): CanonicalHistoryEnvelope[] {
+/**
+ * Pure canonical-envelope plan of one append. Shared with the durable
+ * provider (`durable-canonical-history-provider.ts`) so both storage layouts
+ * produce identical message identities from the same change.
+ */
+export function appendEnvelopes(change: SessionCanonicalHistoryChange): CanonicalHistoryEnvelope[] {
   const identityHints = appendIdentityHints(change);
   return change.messages.map((message, index) =>
     envelope({
@@ -505,11 +587,15 @@ function assertAppendIdentityBoundary(
   }
 }
 
-function replacementEnvelopes(
+/** Pure full-replacement plan; shared with the durable provider. */
+export function replacementEnvelopes(
   change: SessionCanonicalHistoryChange,
   existing: readonly CanonicalHistoryEnvelope[],
 ): CanonicalHistoryEnvelope[] {
-  const entries = change.replacementEntries;
+  const checkpointId = change.metadata && typeof change.metadata === 'object'
+    ? Reflect.get(change.metadata, 'committedReplacementId') : undefined;
+  const entries = checkpointId === undefined ? change.replacementEntries
+    : committedCheckpointDelivery(change, existing, checkpointId);
   if (!entries || entries.length !== change.messages.length) {
     throw new TypeError('Canonical history replacement identity plan is required.');
   }
@@ -543,6 +629,43 @@ function replacementEnvelopes(
     };
   });
   return preserveHistoryArtifact(existing, replacement);
+}
+
+/** Resolve delivery identities under the canonical writer lane, after the checkpoint commit. */
+function committedCheckpointDelivery(
+  change: SessionCanonicalHistoryChange,
+  existing: readonly CanonicalHistoryEnvelope[],
+  checkpointId: unknown,
+): readonly EnvelopeReplacementEntry[] {
+  const summary = existing[0]?.message;
+  if (typeof checkpointId !== 'string' || !summary || summary.role !== 'compactionSummary' ||
+    Reflect.get(summary, 'compactionId') !== checkpointId ||
+    !isDeepStrictEqual(change.messages[0], summary)) {
+    throw new TypeError('Committed checkpoint delivery does not match canonical history.');
+  }
+  const available = new Map<string, CanonicalHistoryEnvelope[]>();
+  const keyOf = (message: CanonicalHistoryMessage) => `${message.role}:${message.timestamp ?? ''}`;
+  for (const record of existing) {
+    const key = keyOf(record.message);
+    const records = available.get(key) ?? [];
+    records.push(record); available.set(key, records);
+  }
+  let used = 0;
+  const entries = change.messages.map((value, index): EnvelopeReplacementEntry => {
+    const message = historyMessage(value);
+    const records = available.get(keyOf(message));
+    const source = records?.findIndex((record) => isDeepStrictEqual(record.message, message)) ?? -1;
+    if (source >= 0) {
+      used += 1;
+      return { message, identity: { kind: 'preserve', messageId: records!.splice(source, 1)[0]!.message_id } };
+    }
+    if (message.role !== 'custom' || Reflect.get(message, 'display') !== false) {
+      throw new TypeError('Committed checkpoint delivery may add only host notices.');
+    }
+    return { message, identity: { kind: 'new', seed: `checkpoint-delivery:${checkpointId}:${index}` } };
+  });
+  if (used !== existing.length) throw new TypeError('Committed checkpoint delivery would drop canonical messages.');
+  return entries;
 }
 
 function resolveReplacementIdentity(input: {
@@ -587,6 +710,13 @@ function assertExternalUserIdentity(
   }
 }
 
+/**
+ * Shared with the durable provider's wave-1 event writer: the content- and
+ * operation-addressed envelope identity both storage layouts compute for the
+ * same compaction change.
+ */
+export { envelope as buildCanonicalEnvelope };
+
 function envelope(input: {
   readonly change: SessionCanonicalHistoryChange;
   readonly message: unknown;
@@ -614,6 +744,13 @@ function messageIdFromSeed(seed: string): string {
   return `msg-${createHash('sha256').update(seed).digest('base64url')}`;
 }
 
+/**
+ * Shared with the durable provider's wave-1 event writer: the canonical
+ * normalization of one message (the compaction summary envelope is built
+ * through the same identity convention on both storage layouts).
+ */
+export { historyMessage as normalizeHistoryMessage };
+
 function historyMessage(value: unknown): CanonicalHistoryMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('Canonical history contains a non-object message.');
@@ -629,6 +766,21 @@ function historyMessage(value: unknown): CanonicalHistoryMessage {
     !Number.isFinite(timestamp)
   ) {
     throw new TypeError('Canonical history contains an invalid Pi message.');
+  }
+  if (role === 'assistant') {
+    const content = Reflect.get(value, 'content');
+    if (typeof content === 'string') {
+      // Canonical assistant content is a block array (the sequence validator
+      // rejects a bare string). A Pi-style plain-text content is lifted into
+      // one text block HERE — at the shared append/replace boundary — so the
+      // JSONL and durable providers store, and hash, the identical canonical
+      // form instead of one side failing validation.
+      const normalized: Record<string, unknown> = {
+        ...value,
+        content: [{ type: 'text', text: content }],
+      };
+      return detached(normalized) as CanonicalHistoryMessage;
+    }
   }
   return detached(value) as CanonicalHistoryMessage;
 }
@@ -647,7 +799,8 @@ function readMinimalCompactionSummary(value: object): MinimalNativeCompactionSum
   return { role: 'compactionSummary', summary };
 }
 
-function assertChange(
+/** Shared change validation (JSONL provider and durable provider). */
+export function assertChange(
   change: SessionCanonicalHistoryChange,
   reason: SessionCanonicalHistoryChange['reason'],
 ): void {
@@ -656,20 +809,64 @@ function assertChange(
   }
 }
 
-function compactionReplacementEnvelopes(
+/** Pure typed-compaction replacement plan; shared with the durable provider. */
+export function compactionReplacementEnvelopes(
   change: SessionCanonicalHistoryCompactionChange,
   active: readonly CanonicalHistoryEnvelope[],
 ): CanonicalHistoryEnvelope[] {
   const currentUserTail = readCurrentUserTail(change, active);
   const baseMessages = currentUserTail?.baseMessages ?? change.messages;
-  if (change.method === 'llm_checkpoint') {
-    const replacement = baseMessages.map((message, index) =>
-      envelope({ change, message, turnId: `${change.turnId}:compaction`, index }),
-    );
-    if (replacement.length !== 1 || replacement[0]?.message.role !== 'compactionSummary') {
+  if (change.method === 'llm_checkpoint' || change.method === 'deterministic_fallback') {
+    // The plan opens with EXACTLY one native summary. A retained tail (the
+    // unified scheduler's cut window) follows, each message committed verbatim
+    // from its active source envelope; the legacy whole-history plans ([summary]
+    // alone, or [summary] plus the current-user tail) carry no tail messages.
+    if (baseMessages.length === 0) {
       throw new TypeError('Canonical checkpoint compaction must contain one native summary.');
     }
-    return currentUserTail ? [...replacement, ...currentUserTail.envelopes] : replacement;
+    const summaryEnvelope = envelope({
+      change,
+      message: baseMessages[0],
+      turnId: `${change.turnId}:compaction`,
+      index: 0,
+    });
+    if (summaryEnvelope.message.role !== 'compactionSummary') {
+      throw new TypeError('Canonical checkpoint compaction must contain one native summary.');
+    }
+    const keptMessages = baseMessages.slice(1);
+    if (keptMessages.length === 0) {
+      assertCheckpointPlanCoversTrailingActive(change, active, currentUserTail, -1);
+      return withCheckpointSystemBaseline(change, active, currentUserTail?.user
+        ? active.indexOf(currentUserTail.user) : active.length,
+        currentUserTail ? [summaryEnvelope, ...currentUserTail.envelopes] : [summaryEnvelope]);
+    }
+    const sourceIndexes = validateCheckpointKeptSourceIndexes(change, active, keptMessages.length);
+    const kept = keptMessages.map((message, index) => {
+      const sourceIndex = sourceIndexes[index];
+      const source = active[sourceIndex];
+      if (!source) {
+        throw new TypeError('Canonical checkpoint compaction source identity is missing.');
+      }
+      const normalized = historyMessage(message);
+      // The retained tail is a VERBATIM window of the source history — the
+      // commit must never rewrite it (the summarized prefix above is the only
+      // place content may change).
+      if (!sameJson(source.message, normalized)) {
+        throw new TypeError(
+          `Canonical checkpoint compaction kept tail diverges from its source: ${source.message_id}`,
+        );
+      }
+      return { ...withoutHistoryArtifact(source), message: normalized };
+    });
+    assertCheckpointPlanCoversTrailingActive(
+      change,
+      active,
+      currentUserTail,
+      sourceIndexes[sourceIndexes.length - 1] ?? -1,
+    );
+    return withCheckpointSystemBaseline(change, active, sourceIndexes[0], [
+      summaryEnvelope, ...kept, ...(currentUserTail ? currentUserTail.envelopes : []),
+    ]);
   }
   const sourceIndexes = validateToolReplacementSourceIndexes(change, active, baseMessages.length);
   const retainedExternalUsers = new Set<string>();
@@ -694,6 +891,80 @@ function compactionReplacementEnvelopes(
   return currentUserTail ? [...replacement, ...currentUserTail.envelopes] : replacement;
 }
 
+/**
+ * Anti-drop guard of the checkpoint plan: the commit replaces the WHOLE active
+ * history, so every trailing envelope must be accounted for — the kept tail's
+ * last source (the unified cut) or the current-user tail's source (the В1
+ * barrier delivery) must be the LAST active envelope. A plan built from a
+ * stale snapshot (owner input appended between the plan and the apply) would
+ * otherwise silently drop the appended messages: refused here, fail-closed.
+ * The legacy whole-history [summary] plan (manual compaction) intentionally
+ * replaces everything and always covers the trailing envelope.
+ */
+function assertCheckpointPlanCoversTrailingActive(
+  change: SessionCanonicalHistoryCompactionChange,
+  active: readonly CanonicalHistoryEnvelope[],
+  currentUserTail: ReturnType<typeof readCurrentUserTail>,
+  lastKeptSourceIndex: number,
+): void {
+  const covered = Math.max(
+    lastKeptSourceIndex,
+    currentUserTail ? (change.currentUserSourceIndex ?? -1) : -1,
+    lastKeptSourceIndex === -1 && !currentUserTail ? active.length - 1 : -1,
+  );
+  if (covered !== active.length - 1) {
+    throw new TypeError(
+      'Canonical checkpoint compaction plan is stale: canonical history grew past the planned replacement range and appended messages would be dropped. Rebuild the plan against the current history.',
+    );
+  }
+}
+
+/** Source-lineage validation of the checkpoint kept tail (strictly increasing, in range, tail-exclusive). */
+/** Persist Pi's replay baseline in the checkpoint transaction, before delivery. */
+export function withCheckpointSystemBaseline(
+  change: SessionCanonicalHistoryCompactionChange,
+  active: readonly CanonicalHistoryEnvelope[],
+  cutIndex: number,
+  replacement: CanonicalHistoryEnvelope[],
+): CanonicalHistoryEnvelope[] {
+  const systems = active.slice(0, cutIndex).map((record) => record.message)
+    .filter((message) => message.role === 'system' && Reflect.get(message, 'sections') !== undefined);
+  const current = getCurrentSystemMessage(systems as unknown as SystemMessage[]);
+  if (!current?.sections) return replacement;
+  const baseline = envelope({ change,
+    message: { role: 'system', content: '', sections: current.sections, timestamp: current.timestamp },
+    turnId: `${change.turnId}:compaction`, index: 1,
+  });
+  return [replacement[0], baseline, ...replacement.slice(1)];
+}
+
+function validateCheckpointKeptSourceIndexes(
+  change: Extract<
+    SessionCanonicalHistoryCompactionChange,
+    { readonly method: 'llm_checkpoint' | 'deterministic_fallback' }
+  >,
+  active: readonly CanonicalHistoryEnvelope[],
+  expectedLength: number,
+): readonly number[] {
+  const indexes = change.replacementSourceIndexes;
+  if (!Array.isArray(indexes) || indexes.length !== expectedLength) {
+    throw new TypeError('Canonical checkpoint compaction kept-tail source lineage is incomplete.');
+  }
+  let previous = -1;
+  indexes.forEach((index) => {
+    if (
+      !Number.isSafeInteger(index) ||
+      index <= previous ||
+      index >= active.length ||
+      (change.currentUserSourceIndex !== undefined && index >= change.currentUserSourceIndex)
+    ) {
+      throw new TypeError('Canonical checkpoint compaction kept-tail source lineage is invalid.');
+    }
+    previous = index;
+  });
+  return indexes;
+}
+
 function readCurrentUserTail(
   change: SessionCanonicalHistoryCompactionChange,
   active: readonly CanonicalHistoryEnvelope[],
@@ -709,32 +980,24 @@ function readCurrentUserTail(
   if (!Number.isSafeInteger(sourceIndex) || sourceIndex < 0 || sourceIndex >= active.length) {
     throw new TypeError('Canonical current-user tail source lineage is invalid.');
   }
-  const markerCount = change.placedMarkerCount ?? 1;
-  if (!Number.isSafeInteger(markerCount) || markerCount < 1) {
-    throw new TypeError('Canonical current-user tail marker count is invalid.');
-  }
-  const tailLength = markerCount + 1;
-  if (change.messages.length < tailLength) {
+  if (change.messages.length < 2) {
     throw new TypeError('Canonical current-user tail is incomplete.');
   }
-  const baseLength = change.messages.length - tailLength;
-  const markers = change.messages.slice(baseLength, -1);
+  const marker = change.messages.at(-2);
   const userMessage = change.messages.at(-1);
   const source = requireExternalCurrentUserSource(active[sourceIndex]);
-  const normalizedMarkers = markers.map(requireHiddenTypedCustom);
+  const normalizedMarker = requireHiddenTypedCustom(marker);
   const normalizedUser = requireExactCurrentUserMessage(userMessage, source);
   return {
-    baseMessages: change.messages.slice(0, baseLength),
+    baseMessages: change.messages.slice(0, -2),
     user: source,
     envelopes: [
-      ...normalizedMarkers.map((message, offset) =>
-        envelope({
-          change,
-          message,
-          turnId: `${change.turnId}:compaction`,
-          index: baseLength + offset,
-        }),
-      ),
+      envelope({
+        change,
+        message: normalizedMarker,
+        turnId: `${change.turnId}:compaction`,
+        index: change.messages.length - 2,
+      }),
       { ...withoutHistoryArtifact(source), message: normalizedUser },
     ],
   };
@@ -863,7 +1126,8 @@ function preserveHistoryArtifact(
   });
 }
 
-function markHistoryArtifact(
+/** Marks a replacement's generation lineage on its first record; shared with the durable provider. */
+export function markHistoryArtifact(
   replacement: readonly CanonicalHistoryEnvelope[],
   marker: NonNullable<CanonicalHistoryEnvelope['history_artifact']>,
 ): CanonicalHistoryEnvelope[] {
@@ -885,7 +1149,8 @@ function withoutHistoryArtifact(record: CanonicalHistoryEnvelope): CanonicalHist
   };
 }
 
-function activeGeneration(records: readonly CanonicalHistoryEnvelope[]): number {
+/** Reads the compaction generation carried by the active lineage marker; shared with the durable provider. */
+export function activeGeneration(records: readonly CanonicalHistoryEnvelope[]): number {
   const artifactGeneration = records[0]?.history_artifact?.generation;
   if (artifactGeneration !== undefined) return artifactGeneration;
   const first = records[0]?.message;
@@ -898,7 +1163,8 @@ function activeGeneration(records: readonly CanonicalHistoryEnvelope[]): number 
     : 0;
 }
 
-function safeCompactionId(value: string): string {
+/** Snapshot-safe compaction id; shared with the durable provider for marker parity. */
+export function safeCompactionId(value: string): string {
   const sanitized = value.trim().replaceAll(/[^A-Za-z0-9._-]/gu, '-');
   if (!sanitized) throw new TypeError('Compaction id is required.');
   const normalized = /^[A-Za-z0-9]/u.test(sanitized) ? sanitized : `c${sanitized}`;

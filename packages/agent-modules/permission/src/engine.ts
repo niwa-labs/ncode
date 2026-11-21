@@ -31,7 +31,11 @@ import {
   isInteractiveTool,
 } from './context.js';
 import { decideUnknownToolPathCapabilities } from './tools/path-capability.js';
-import { reducePermissionDecision, type PermissionCheckOptions } from './permission-core.js';
+import {
+  bypassImmuneCategoryOverlay,
+  reducePermissionDecision,
+  type PermissionCheckOptions,
+} from './permission-core.js';
 
 export type { ToolCheckResult } from './types.js';
 
@@ -190,7 +194,9 @@ export class PermissionEngine {
    *   1d. Tool returns deny → DENY
    *   1e. requiresUserInteraction → ASK
    *   1f. Content-specific ask rule → ASK (bypass-immune)
-   *   1g. Safety check → ASK (unless bypass mode applies)
+   *   1g. Safety check → ASK (unless bypass mode applies; categories in
+   *       BYPASS_IMMUNE_SAFETY_CATEGORIES stay a bypass-immune ASK in every
+   *       mode)
    *
    * **Step 2 — Allow check** (fast path):
    *   2a. bypassPermissions mode → ALLOW
@@ -302,6 +308,10 @@ export class PermissionEngine {
       return { behavior: 'deny', reason: toolCheckResult.reason };
     }
 
+    // Step-1g category immunity also rides on the rule asks below (1b / MCP /
+    // 1f content rule): a broader ask rule must not mask it.
+    const immuneOverlay = bypassImmuneCategoryOverlay(toolCheckResult);
+
     // 1b. Whole tool in ask rules? → ASK (sandbox exception)
     const askRule = hasWholeToolRule(context, toolName, 'ask');
     if (askRule) {
@@ -321,6 +331,7 @@ export class PermissionEngine {
           ruleMatchers: this.resolveRuleMatchers(toolCheckResult),
           candidateScopes: this.resolveCandidateScopes(toolCheckResult),
           rewrittenInput: toolCheckResult?.rewrittenInput,
+          ...immuneOverlay,
         };
       }
     }
@@ -334,6 +345,7 @@ export class PermissionEngine {
         reason: { type: 'rule', rule: mcpAskRule },
         ruleContents: this.resolveRuleContents(toolName, input),
         candidateScopes: this.resolveCandidateScopes(undefined),
+        ...immuneOverlay,
       };
     }
 
@@ -391,17 +403,21 @@ export class PermissionEngine {
         ruleMatchers: this.resolveRuleMatchers(toolCheckResult),
         candidateScopes: this.resolveCandidateScopes(toolCheckResult),
         rewrittenInput: toolCheckResult?.rewrittenInput,
+        ...immuneOverlay,
       };
     }
 
     // 1g. Safety check? → ASK in normal modes.
     // Bypass mode may override approvable safety checks unless the checker
-    // explicitly marked them as bypass-immune above.
+    // explicitly marked them as bypass-immune above (1f) or the safety
+    // category belongs to BYPASS_IMMUNE_SAFETY_CATEGORIES: those asks are
+    // неотключаемые — they survive every mode, skip the auto classifier and
+    // are surfaced to the user without allow-always/deny-always options.
     if (
       toolCheckResult &&
       toolCheckResult.behavior === 'ask' &&
       toolCheckResult.reason.type === 'safetyCheck' &&
-      !isBypassMode(context)
+      (immuneOverlay.bypassImmune || !isBypassMode(context))
     ) {
       logger.debug(ctx, `Step 1g: Safety check triggered: toolName=${toolName}`);
       return {
@@ -412,6 +428,7 @@ export class PermissionEngine {
         candidateScopes: this.resolveCandidateScopes(toolCheckResult),
         rewrittenInput: toolCheckResult?.rewrittenInput,
         skipAutoClassifier: toolCheckResult.skipAutoClassifier,
+        ...immuneOverlay,
       };
     }
 

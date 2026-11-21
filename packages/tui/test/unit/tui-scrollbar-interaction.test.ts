@@ -156,7 +156,7 @@ describe("Scrollbar interaction boundaries", () => {
   it.each([1, 3])(
     "routes the last content columns with a %i-column gutter to content",
     async (gutter) => {
-      const handleMouse = vi.fn((_event: TuiMouseEvent) => true);
+      const handleMouse = vi.fn((_event: TuiMouseEvent) => ({ handled: true } as const));
       const content = {
         render: (width: number) =>
           Array.from({ length: CONTENT_LINES }, () => "x".repeat(width)),
@@ -172,7 +172,7 @@ describe("Scrollbar interaction boundaries", () => {
         terminal.sendInput(sgrRelease(x, ROWS - 1));
         await terminal.waitForRender();
         expect(handleMouse).toHaveBeenCalledWith(
-          expect.objectContaining({ action: "press", x }),
+          expect.objectContaining({ type: "press", x }),
         );
         expect(scrollView.scrollTop).toBe(0);
       }
@@ -209,7 +209,7 @@ describe("Scrollbar interaction boundaries", () => {
     "preserves content and bounded mouse targets at width %i",
     async (columns) => {
       const widths: number[] = [];
-      const handleMouse = vi.fn(() => true);
+      const handleMouse = vi.fn(() => ({ handled: true } as const));
       const content = {
         render: (width: number) => {
           widths.push(width);

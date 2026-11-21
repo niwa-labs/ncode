@@ -15,6 +15,7 @@
     "@earendil-works/pi-coding-agent": "workspace:*",
     "@mavis/agent-core": "workspace:^",
     "@mavis/agent-tools": "workspace:^",
+    "@mavis/cas": "workspace:*",
     "@mavis/config": "workspace:^",
     "@mavis/conversation-contract": "workspace:^",
     "@mavis/context-manager": "workspace:^",
@@ -26,7 +27,6 @@
     "@mavis/shared": "workspace:^",
     "@mavis/skills": "workspace:^",
     "@mavis/system-reminder": "workspace:^",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "12.11.1",
     "croner": "^9",
     "diff": "^8.0.4",
@@ -46,6 +46,7 @@
     "@larksuiteoapi/node-sdk": "^1.60.0"
   },
   "devDependencies": {
+    "@mavis/logging": "workspace:*",
     "@types/js-yaml": "^4",
     "@types/lazystream": "^1.0.0",
     "@types/node": "^20",
@@ -55,5 +56,8 @@
     "vitest": "^2"
   },
   "private": true,
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
 }

@@ -1,5 +1,4 @@
 import type {
-  ConversationPluginAgentDefinition,
   ConversationTaskModelSelection,
   RuntimeConversation,
 } from '@mavis/conversation-contract';
@@ -11,14 +10,32 @@ import type { LocalBackgroundTaskService } from '../background-task/service.js';
 import type { LocalRuntimeConfig } from '../config/types.js';
 import type { LocalSessionRecord } from '../sessions/controller.js';
 import type { LocalRuntimeApiHostOptions } from './host-helpers.js';
+import type { LocalNativeTaskWaits } from './native-task-wait.js';
 
 /** Product capabilities used by Task and background Bash adapters. */
 export interface LocalTaskRunnerHost extends SubagentTelemetryHost {
   readonly agentResolver: AgentReferenceResolver;
   readonly runtimeConversation?: RuntimeConversation;
+  /**
+   * Native task-wait binding (verdict 09 §1.4), late-bound by the durable V2
+   * runtime once its steering composition exists. Absent (jsonl mode,
+   * embeddings): the foreground task tool keeps the legacy always-inline
+   * contract and never releases on owner input.
+   */
+  readonly nativeTaskWaits?: LocalNativeTaskWaits;
+  /**
+   * Per-session permission-mode registry (spec §2.5): task child Sessions
+   * inherit the parent's mode at creation. Late-bound by the V2 runtime;
+   * absent hosts keep today's behavior (children follow the process mode).
+   */
+  readonly sessionPermissionModes?: {
+    inherit(childSessionId: string, parentSessionId: string): void;
+  };
   readonly agentRoutes: {
     createSession(input: {
       agentName?: string;
+      /** Plugin-declared subagent backing this Task Session. */
+      taskPluginAgent?: import('@mavis/conversation-contract').ConversationTaskPluginAgent;
       workspaceDir: string;
       sessionType?: 'root' | 'branch';
       sessionKind?: 'task';
@@ -32,7 +49,6 @@ export interface LocalTaskRunnerHost extends SubagentTelemetryHost {
       effectiveModel?: LocalSessionRecord['effectiveModel'];
       effectiveModelVariant?: LocalSessionRecord['effectiveModelVariant'];
       taskModelSelection?: ConversationTaskModelSelection;
-      pluginAgentDefinition?: ConversationPluginAgentDefinition;
     }): Promise<LocalSessionRecord>;
     listLocalAgents(): Promise<Array<{ name: string; displayName: string }>>;
   };

@@ -11,6 +11,7 @@ import {
   type CanonicalPluginRoot,
 } from './filesystem.js';
 import { PluginReaderError, readerFail } from './reader-errors.js';
+import { AGENT_NAME } from './agent-plugin-reader.js';
 import { readCompatiblePluginAgents } from './agent/compatible.js';
 import { readPluginHooks } from './hook/reader.js';
 import type {
@@ -18,6 +19,7 @@ import type {
   PluginReaderDiagnostic,
   PluginSkill,
   ReadPluginPackage,
+  PluginAgent,
 } from './types.js';
 
 const CLAUDE_MANIFEST_PATH = '.\u0063\u006c\u0061\u0075\u0064\u0065-plugin/plugin.json';
@@ -47,14 +49,30 @@ export async function readCompatiblePluginPackage(
     defaultPath: 'hooks/hooks.json',
     manifestPath: manifestRelativePath,
   });
-  const agentResult =
-    kind !== 'CODEX'
-      ? await readCompatiblePluginAgents(root, {
-          pluginName: name,
-          declared: manifest.agents,
-          skills,
-        })
-      : { agents: [], diagnostics: [] };
+  // OUR strict agent-name rule (35e32998) applies to every compatible kind:
+  // an agent whose name segments violate it is dropped with an explicit
+  // diagnostic instead of being accepted (upstream NAME_SEGMENT is looser).
+  const compatibleAgents = await readCompatiblePluginAgents(root, {
+    pluginName: name,
+    declared: manifest.agents,
+    skills,
+  });
+  const agents: PluginAgent[] = [];
+  const agentDiagnostics: PluginReaderDiagnostic[] = [...compatibleAgents.diagnostics];
+  for (const agent of compatibleAgents.agents) {
+    const segments = agent.name.split(':').slice(1);
+    const invalid = segments.find((segment) => !AGENT_NAME.test(segment));
+    if (invalid !== undefined) {
+      agentDiagnostics.push({
+        code: 'AGENT_SCHEMA_INVALID',
+        capability: 'AGENT',
+        name: invalid,
+      });
+      continue;
+    }
+    agents.push(agent);
+  }
+  const agentResult = { agents, diagnostics: agentDiagnostics };
   if (
     mcp.servers.length + skills.length + hookResult.hooks.length + agentResult.agents.length ===
     0

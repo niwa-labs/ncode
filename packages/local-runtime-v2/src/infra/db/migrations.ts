@@ -35,6 +35,17 @@ import { migration as m0033 } from './migrations/session/migration-0033-converge
 import { migration as m0034 } from './migrations/session/migration-0034-restore-shared-project-schema-compatibility.js';
 import { migration as m0035 } from './migrations/session/migration-0035-converge-published-schema-collisions.js';
 
+/**
+ * Version numbers are globally unique across subsystems (runtime, cron, plugin,
+ * session, miniapp, agent, canvas) and intentionally contain gaps: a version
+ * consumed by an earlier published build is never reused. Version 19 is retired —
+ * existing Desktop databases already carry the m0019 marker, so re-registering it
+ * would be silently skipped there (see the migration-0020 and migration-0023
+ * headers; collisions from published builds are instead handled by new repair
+ * versions such as 27–31). A fresh database therefore applies exactly these 35
+ * migrations, versions 1–18 and 20–36: a missing number in
+ * pending_migration_versions (e.g. no 19) in logs is expected, not a lost migration.
+ */
 export const ALL_MIGRATIONS: readonly MigrationEntry[] = [
   m0001,
   m0002,

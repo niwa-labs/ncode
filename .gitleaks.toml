@@ -74,3 +74,47 @@ condition = "AND"
 paths = ['''(^|/)packages/local-runtime/test/unit/error-reporting-privacy\.test\.ts$''']
 regexTarget = "match"
 regexes = ['''^SECRET = 'SYNTHETIC_PRIVATE_4cd7'$''']
+
+[[rules.allowlists]]
+description = "RFC WebSocket handshake fixture from Pi v1.5.2"
+condition = "AND"
+paths = ['''(^|/)third_party/chord/test/node/http/upgrades\.test\.ts$''']
+regexTarget = "match"
+regexes = [
+  '''^nSec\-WebSocket\-Key:\ dGhlIHNhbXBsZSBub25jZQ==\\r$''',
+]
+
+[[rules.allowlists]]
+description = "Record keys from the Chord schema archive fixture at Pi v1.5.2"
+condition = "AND"
+paths = ['''(^|/)third_party/chord/test/schema/stored/archive\.jsonl$''']
+regexTarget = "match"
+regexes = [
+  '''^key":"01a1943d\-176c\-71f3\-a32c\-b9cbc67247a3"$''',
+  '''^key":"01a1943d\-176e\-71f3\-a32c\-b9cc7f5426c6"$''',
+  '''^key":"01a1943d\-176f\-71f3\-a32c\-b9cf6bb98dc7"$''',
+]
+
+[[rules.allowlists]]
+description = "Base64 JSON parser fixtures from Pi v1.5.2"
+condition = "AND"
+paths = ['''(^|/)third_party/pi\-mono/packages/ai/test/data/json\-test\-suite\.json$''']
+regexTarget = "match"
+regexes = [
+  '''^y_object_duplicated_key\.json":\ "eyJhIjoiYiIsImEiOiJjIn0="$''',
+  '''^y_object_duplicated_key_and_value\.json":\ "eyJhIjoiYiIsImEiOiJiIn0="$''',
+  '''^y_object_escaped_null_in_key\.json":\ "eyJmb29cdTAwMDBiYXIiOiA0Mn0="$''',
+]
+
+[[rules.allowlists]]
+description = "Verified SHA-256 digests of generated provider catalog files"
+condition = "AND"
+paths = ['''(^|/)third_party/pi\-mono/packages/ai/src/providers/data/\.manifest\.json$''']
+regexTarget = "match"
+regexes = [
+  '''^qwen\-token\-plan\-cn\.json":"80824536f0c3cd83ab27424df2d664738cbe3f971b4e568a625432288fa53229"$''',
+  '''^qwen\-token\-plan\.json":"0630bf7fea9d8579c7ac990e32c40c3685f9db20b6dbfaf745b361fe5203113c"$''',
+  '''^xiaomi\-token\-plan\-ams\.json":"34fe47b0a79fec7843a01d542cb64b736e651a3e6691cc851183e5ce3eae0118"$''',
+  '''^xiaomi\-token\-plan\-cn\.json":"e69f9704b450dbb34b6db61a7b224dab5e5a91a39af3e505ecca4db8bfdc04f0"$''',
+  '''^xiaomi\-token\-plan\-sgp\.json":"fd28cc293208617127ff888873772b7b52160538caa07ca3af641f3208d3ad20"$''',
+]

@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStorage } from '@earendil-works/pi-coding-agent/auth-storage';
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +9,7 @@ import type {
   LocalCustomProviderConfig,
   LocalRuntimeConfig,
 } from "./contracts.js";
-import { CodexOAuthManager, CodexOAuthError } from "./codex-oauth.js";
+import { CodexLoginCallbacks, CodexOAuthManager, CodexOAuthError } from "./codex-oauth.js";
 
 function createConfig(enabled: boolean): LocalRuntimeConfig {
   return {
@@ -162,12 +164,12 @@ describe("CodexOAuthManager", () => {
     const config = createConfig(true);
     const completion = deferred();
     let connected = false;
-    let loginCallbacks: Parameters<AuthStorage["login"]>[1] | undefined;
+    let loginCallbacks: CodexLoginCallbacks | undefined;
     const fetchImpl = vi.fn<typeof fetch>();
     const login = vi.fn(
       async (
         _provider: string,
-        callbacks: Parameters<AuthStorage["login"]>[1],
+        callbacks: CodexLoginCallbacks,
       ) => {
         loginCallbacks = callbacks;
         callbacks.onAuth({ url: "https://auth.openai.test/authorize" });
@@ -217,12 +219,12 @@ describe("CodexOAuthManager login edge cases", () => {
   it("deduplicates concurrent login starts", async () => {
     const config = createConfig(true);
     const completion = deferred();
-    let callbacks: Parameters<AuthStorage["login"]>[1] | undefined;
+    let callbacks: CodexLoginCallbacks | undefined;
     let connected = false;
     const login = vi.fn(
       async (
         _provider: string,
-        nextCallbacks: Parameters<AuthStorage["login"]>[1],
+        nextCallbacks: CodexLoginCallbacks,
       ) => {
         callbacks = nextCallbacks;
         await completion.promise;
@@ -279,7 +281,7 @@ describe("CodexOAuthManager login edge cases", () => {
     const login = vi.fn(
       async (
         _provider: string,
-        callbacks: Parameters<AuthStorage["login"]>[1],
+        callbacks: CodexLoginCallbacks,
       ) => {
         if (callbackKind === "auth") callbacks.onAuth({ url: "   " });
         else
@@ -422,7 +424,7 @@ describe("CodexOAuthManager reconciliation and credentials", () => {
     expect(config.defaultModel).toBe("custom_provider:openai-codex/existing");
   });
 
-  it("removes only supported credentials", () => {
+  it("removes only supported credentials", async () => {
     const config = createConfig(true);
     const removeOAuth = vi.fn();
     const manager = new CodexOAuthManager({
@@ -436,10 +438,10 @@ describe("CodexOAuthManager reconciliation and credentials", () => {
       catalogGetter: async () => codexCatalog(),
     });
 
-    expect(() => manager.removeCredentials("other")).toThrowError(
-      expect.objectContaining({ code: "PROVIDER_AUTH_UNAVAILABLE" }),
-    );
-    manager.removeCredentials("openai-codex");
+    await expect(manager.removeCredentials("other")).rejects.toMatchObject({
+      code: "PROVIDER_AUTH_UNAVAILABLE",
+    });
+    await manager.removeCredentials("openai-codex");
     expect(removeOAuth).toHaveBeenCalledWith("openai-codex");
   });
 });
@@ -664,7 +666,7 @@ describe("Codex OAuth catalog credential lifecycle", () => {
         });
       const { manager } = connectedManager(config, catalogGetter);
       const oldRefresh = manager.refreshModels().catch(() => undefined);
-      manager.removeCredentials("openai-codex");
+      await manager.removeCredentials("openai-codex");
       delete config.custom_provider["openai-codex"];
       const reconnect = manager.startLogin();
       expect(catalogGetter).toHaveBeenCalledTimes(2);
@@ -696,7 +698,7 @@ describe("Codex OAuth catalog credential lifecycle", () => {
       }),
     );
     const start = manager.startLogin();
-    manager.removeCredentials("openai-codex");
+    await manager.removeCredentials("openai-codex");
     completion.resolve();
     await expect(start).resolves.toMatchObject({ state: "disconnected" });
     expect(config.custom_provider?.["openai-codex"]).toBeUndefined();
@@ -739,102 +741,138 @@ describe("Codex OAuth catalog credential lifecycle", () => {
 });
 
 describe("Codex OAuth profile credentials", () => {
-  it("uses the current profile auth storage with refresh and host fetch before model discovery", async () => {
+  function profileHarness(options?: { readonly refreshStatus?: number }) {
+    const dir = mkdtempSync(join(tmpdir(), "codex-oauth-profile-"));
+    const authPath = join(dir, "codex-auth.json");
+    const seed = AuthStorage.create(authPath);
     const config = createConfig(true);
-    const storage = AuthStorage.inMemory({
-      "openai-codex": {
-        type: "oauth",
+    config.dataDir = dir;
+    return { dir, authPath, seed, config };
+  }
+
+  function accountJwt(accountId: string): string {
+    // The pin flow decodes the JWT payload with atob (standard base64).
+    return Buffer.from(
+      JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
+    ).toString("base64");
+  }
+
+  it("uses the current profile auth storage with refresh and host fetch before model discovery", async () => {
+    const h = profileHarness();
+    try {
+      await h.seed.modify("openai-codex", async () => ({
+        type: "oauth" as const,
         access: "old",
         refresh: "refresh",
         expires: 0,
         accountId: "account-old",
-      },
-    });
-    const createStorage = vi
-      .spyOn(AuthStorage, "create")
-      .mockReturnValue(storage);
-    const getKey = vi
-      .spyOn(storage, "getApiKey")
-      .mockImplementation(async () => {
-        storage.set("openai-codex", {
-          type: "oauth",
-          access: "fresh",
-          refresh: "refresh",
-          expires: Date.now() + 60_000,
-          accountId: "account-new",
-        });
-        return "fresh";
+      }));
+      const storage = AuthStorage.create(h.authPath);
+      const createStorage = vi
+        .spyOn(AuthStorage, "create")
+        .mockReturnValue(storage);
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/oauth/token")) {
+          expect(String(init?.body)).toContain("grant_type=refresh_token");
+          return Response.json({
+            access_token: `test.${accountJwt("account-new")}.test`,
+            refresh_token: "test-refresh",
+            expires_in: 3600,
+          });
+        }
+        if (url.includes("/codex/models")) {
+          return Response.json({
+            models: [
+              {
+                slug: "gpt-6-astra",
+                display_name: "GPT-6 Astra",
+                visibility: "list",
+                context_window: 272_000,
+                max_context_window: 872_000,
+                supported_reasoning_levels: [{ effort: "ultra" }],
+              },
+            ],
+          });
+        }
+        throw new Error(`Unexpected endpoint: ${url}`);
       });
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          models: [
-            {
-              slug: "gpt-6-astra",
-              display_name: "GPT-6 Astra",
-              visibility: "list",
-              context_window: 272_000,
-              max_context_window: 872_000,
-              supported_reasoning_levels: [{ effort: "ultra" }],
-            },
-          ],
-        }),
-      ),
-    );
-    const manager = new CodexOAuthManager({
-      configGetter: () => config,
-      fetchImpl,
-      updateByokConfig: createUpdater(config),
-    });
-    await manager.startLogin();
-    expect(createStorage).toHaveBeenCalledWith(
-      join(config.dataDir, "codex-auth.json"),
-    );
-    expect(getKey).toHaveBeenCalledWith("openai-codex", {
-      includeFallback: false,
-      fetch: fetchImpl,
-    });
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "https://chatgpt.com/backend-api/codex/models?client_version=0.162.0",
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: "Bearer fresh",
-          "ChatGPT-Account-ID": "account-new",
-        }),
-      }),
-    );
-    expect(
-      config.custom_provider?.["openai-codex"]?.models?.["gpt-6-astra"],
-    ).toMatchObject({
-      limit: { context: 272_000 },
-      thinking: { effortOptions: ["ultra"] },
-    });
-    expect(JSON.stringify(config)).not.toContain("fresh");
+      const manager = new CodexOAuthManager({
+        configGetter: () => h.config,
+        fetchImpl,
+        updateByokConfig: createUpdater(h.config),
+      });
+      await manager.startLogin();
+      expect(createStorage).toHaveBeenCalledWith(
+        join(h.config.dataDir, "codex-auth.json"),
+      );
+      // The refresh went through the HOST fetch BEFORE model discovery.
+      const refreshCall = fetchImpl.mock.calls.find(([url]) =>
+        String(url).endsWith("/oauth/token"),
+      );
+      const discoveryCall = fetchImpl.mock.calls.find(([url]) =>
+        String(url).includes("/codex/models"),
+      );
+      expect(refreshCall).toBeDefined();
+      expect(discoveryCall).toBeDefined();
+      expect(
+        fetchImpl.mock.calls.indexOf(refreshCall!),
+      ).toBeLessThan(fetchImpl.mock.calls.indexOf(discoveryCall!));
+      expect(discoveryCall![1]?.headers).toMatchObject({
+        Authorization: "Bearer test." + accountJwt("account-new") + ".test",
+        "ChatGPT-Account-ID": "account-new",
+      });
+      expect(
+        h.config.custom_provider?.["openai-codex"]?.models?.["gpt-6-astra"],
+      ).toMatchObject({
+        limit: { context: 272_000 },
+        thinking: { effortOptions: ["ultra"] },
+      });
+      expect(JSON.stringify(h.config)).not.toContain("test-refresh");
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true });
+    }
   });
 
   it("does not use an API key or fallback when OAuth credentials cannot be refreshed", async () => {
-    const config = createConfig(true);
-    const storage = AuthStorage.inMemory({
-      "openai-codex": {
-        type: "oauth",
+    const h = profileHarness();
+    try {
+      await h.seed.modify("openai-codex", async () => ({
+        type: "oauth" as const,
         access: "old",
         refresh: "refresh",
         expires: 0,
-        accountId: "account",
-      },
-    });
-    vi.spyOn(AuthStorage, "create").mockReturnValue(storage);
-    vi.spyOn(storage, "getApiKey").mockResolvedValue(undefined);
-    const fetchImpl = vi.fn<typeof fetch>();
-    const manager = new CodexOAuthManager({
-      configGetter: () => config,
-      fetchImpl,
-      updateByokConfig: createUpdater(config),
-    });
-    await expect(manager.startLogin()).rejects.toMatchObject({
-      code: "OAUTH_CREDENTIALS_UNAVAILABLE",
-    });
-    expect(fetchImpl).not.toHaveBeenCalled();
+        accountId: "account-old",
+      }));
+      vi.spyOn(AuthStorage, "create").mockReturnValue(AuthStorage.create(h.authPath));
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/oauth/token")) {
+          return new Response("invalid_grant", { status: 400 });
+        }
+        throw new Error(`Unexpected endpoint: ${url}`);
+      });
+      const manager = new CodexOAuthManager({
+        configGetter: () => h.config,
+        fetchImpl,
+        updateByokConfig: createUpdater(h.config),
+      });
+      await expect(manager.startLogin()).rejects.toMatchObject({
+        code: "OAUTH_CREDENTIALS_UNAVAILABLE",
+      });
+      // Only the refresh attempt ran; no discovery, no API-key fallback.
+      expect(
+        fetchImpl.mock.calls.some(([url]) => String(url).includes("/codex/models")),
+      ).toBe(false);
+      expect(h.config.custom_provider).toBeUndefined();
+      // The stored credential is preserved for a later retry (pin semantics).
+      expect(await AuthStorage.create(h.authPath).read("openai-codex")).toMatchObject({
+        type: "oauth",
+        access: "old",
+      });
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -864,7 +902,7 @@ describe("Codex device-code login", () => {
               chatgpt_account_id: "account-test",
             },
           }),
-        ).toString("base64url");
+        ).toString("base64");
         return Response.json({
           access_token: `test.${payload}.test`,
           refresh_token: "test-refresh",
@@ -899,7 +937,7 @@ describe("Codex device-code login", () => {
     await expect(
       h.manager.startLogin({ method: "device_code" }),
     ).resolves.toEqual(start);
-    expect(h.storage.getAll()["openai-codex"]).toBeUndefined();
+    expect(await h.storage.read("openai-codex")).toBeUndefined();
     expect(
       h.fetchImpl.mock.calls.filter(([url]) =>
         String(url).endsWith("/usercode"),
@@ -914,7 +952,7 @@ describe("Codex device-code login", () => {
     await vi.waitFor(() =>
       expect(h.manager.getStatus().state).toBe("connected"),
     );
-    expect(h.storage.getAll()["openai-codex"]).toMatchObject({
+    expect(await h.storage.read("openai-codex")).toMatchObject({
       type: "oauth",
       accountId: "account-test",
     });
@@ -941,7 +979,6 @@ describe("Codex device-code login", () => {
 
   it("cancels a pending request and prevents a late response from persisting credentials or configuring models", async () => {
     const h = deviceHarness();
-    const piLogin = vi.spyOn(AuthStorage.prototype, "login");
     const start = await h.manager.startLogin({ method: "device_code" });
     await vi.waitFor(() => expect(h.fetchImpl).toHaveBeenCalledTimes(2));
     const pollSignal = h.fetchImpl.mock.calls[1]![1]?.signal;
@@ -955,9 +992,10 @@ describe("Codex device-code login", () => {
         code_verifier: "late-verifier",
       }),
     );
-    await piLogin.mock.results[0]!.value;
-    await Promise.resolve();
-    expect(h.storage.getAll()["openai-codex"]).toBeUndefined();
+    // Let the aborted flow and any late exchange attempt settle: the
+    // two-phase adapter copies credentials only after the signal check.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await h.storage.read("openai-codex")).toBeUndefined();
     expect(h.config.custom_provider).toBeUndefined();
     expect(h.manager.getStatus()).toEqual({
       state: "disconnected",
@@ -971,6 +1009,15 @@ describe("Codex device-code login", () => {
     h.manager.cancelLogin(first.loginId!);
     const second = await h.manager.startLogin({ method: "device_code" });
     expect(second.loginId).not.toEqual(first.loginId);
+    // Regression pin (W06): the cancelled first attempt settles AFTER the
+    // second swapped in its host fetch — its exit must not restore the real
+    // global fetch while the second is in flight. Both device-code requests
+    // have to go through the injected host fetch, never the network.
+    expect(
+      h.fetchImpl.mock.calls.filter(([url]) =>
+        String(url).endsWith("/deviceauth/usercode"),
+      ),
+    ).toHaveLength(2);
     expect(h.manager.cancelLogin(first.loginId!)).toEqual(second);
     await expect(
       h.manager.startLogin({ method: "browser" }),
@@ -986,7 +1033,7 @@ describe("Codex device-code login", () => {
     const login = vi.fn(
       async (
         _provider: string,
-        callbacks: Parameters<AuthStorage["login"]>[1],
+        callbacks: CodexLoginCallbacks,
       ) => {
         callbacks.onDeviceCode({
           userCode: "ABCD-EFGH",

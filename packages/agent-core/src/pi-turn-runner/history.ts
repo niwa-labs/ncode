@@ -9,12 +9,42 @@ export interface turnHistory {
     metadata: PiBeforeLlmCallReplaceMetadata,
   ): Promise<void>;
   flushTail(): Promise<void>;
+  /**
+   * Explicit delivery-cursor reconciliation after the host removed messages
+   * from `agent.state.messages` outside a canonical replacement (a rejected
+   * response-control attempt, the overflow recovery's failed-tail surgery).
+   *
+   * Two cases exist and they need OPPOSITE handling:
+   * - the removed tail was never delivered (the discard path skips
+   *   `flushTail` for rejected `message_end`s) — the cursor already sits at
+   *   the new live length and this call is a no-op snap;
+   * - the removed tail WAS already delivered (the overflow recovery removes
+   *   the failed assistant only after its `message_end` flushed it to
+   *   `onHistory`) — the durable side owns those records now, and the cursor
+   *   must snap BACK to the live length so the replacement tail (the
+   *   recovery answer) is delivered as a fresh delta. A stale cursor would
+   *   swallow it: `total <= lastSnapshotLength` when the removal and the
+   *   replacement have the same length.
+   *
+   * This is deliberately NOT `min(oldCursor, newLength)`: the cursor indexes
+   * delivery progress, not a message identity, and the explicit snap to the
+   * live transcript is the only value that keeps subsequent deltas correct
+   * after an out-of-band removal.
+   */
+  reconcileRemoval(): void;
 }
 
 export function newHistory(turn: turnState, agent: Agent): turnHistory {
   // Cursor into agent.state.messages. Initial history belongs to the caller
   // and must not be re-sent through onHistoryChangedHook.
-  let lastSnapshotLength = turn.initialMessages.length;
+  //
+  // pi 48c8f322: the agent keeps the system prompt (and per-request tool
+  // declarations) as transcript-resident `system` messages — they precede the
+  // caller's initial messages at construction and may be re-inserted mid-run
+  // by declareToolChanges. Named-section system updates are canonical and
+  // replayable; tool-only declarations stay runtime-owned. The cursor starts
+  // after the construction-time history, so neither baseline is duplicated.
+  let lastSnapshotLength = agent.state.messages.length;
   let deliveryFailed = false;
 
   const notify = async (change: PiHistoryChangedHookInput): Promise<void> => {
@@ -28,6 +58,7 @@ export function newHistory(turn: turnState, agent: Agent): turnHistory {
     if (deliveryFailed) return false;
     try {
       await notify(change);
+      if (turn.hooks.onHistory.length > 0) await turn.input.contextWire?.commitResponses?.(change.messages);
       return true;
     } catch (err) {
       deliveryFailed = true;
@@ -88,13 +119,40 @@ export function newHistory(turn: turnState, agent: Agent): turnHistory {
         previousMessages,
         metadata,
       });
-      if (delivered) lastSnapshotLength = messages.length;
+      // The cursor indexes agent.state.messages, which (at pi 48c8f322)
+      // carries the transcript-resident system block on top of the canonical
+      // replacement — so it must snap to the LIVE transcript length at
+      // delivery time, not to the canonical `messages.length`. Callers update
+      // the transcript before delivering the replacement.
+      if (delivered) lastSnapshotLength = agent.state.messages.length;
     },
     async flushTail(): Promise<void> {
       if (deliveryFailed) return;
       const total = agent.state.messages.length;
       if (total <= lastSnapshotLength) return;
-      const delta = agent.state.messages.slice(lastSnapshotLength, total);
+      const delta = agent.state.messages
+        .slice(lastSnapshotLength, total)
+        .filter((message) => message.role !== 'system' || message.sections !== undefined);
+      if (delta.length === 0) {
+        // A system-only tail (e.g. a tool-declaration update) is runtime
+        // bookkeeping, not conversation history. Advance the cursor without
+        // emitting an empty change.
+        lastSnapshotLength = total;
+        return;
+      }
+      // Incident 03 (2026-11-05) delivery gate: a non-toolResult message
+      // (a cadence reminder appended by a before-LLM hook, the empty partial
+      // assistant of an aborted stream) must never be delivered over an
+      // unclosed trailing tool round — it would land on top of assistant
+      // calls that have no results yet, which the canonical sequence
+      // validator rejects ("tool results must immediately follow their
+      // assistant call"). In durable mode the abort-cascade delta used to be
+      // committed first and rejected after, leaving the session permanently
+      // unreadable. The delta is HELD instead: the cursor stays put, so the
+      // messages ride the next flush once the round closed; if the round
+      // never closes (the turn died), they are dropped with it — the abort
+      // reconcile owns closing the round honestly.
+      if (deltaHeldByOpenToolRound(agent.state.messages, lastSnapshotLength, delta)) return;
       const delivered = await deliver({
         sessionId: turn.input.sessionId,
         turnId: turn.input.turnId,
@@ -103,6 +161,9 @@ export function newHistory(turn: turnState, agent: Agent): turnHistory {
       });
       if (delivered) lastSnapshotLength = total;
     },
+    reconcileRemoval(): void {
+      lastSnapshotLength = agent.state.messages.length;
+    },
   };
 }
 
@@ -110,6 +171,83 @@ function readMessageRole(message: AgentMessage): string {
   return typeof message.role === 'string' && message.role.length > 0
     ? truncateHistoryText(message.role, MAX_HISTORY_ROLE_LENGTH)
     : 'unknown';
+}
+
+/**
+ * True when delivering `delta` would place a non-toolResult message over an
+ * unclosed trailing tool round (incident 03 delivery gate). The pending calls
+ * come from the DELIVERED transcript prefix (strict backward walk over the
+ * records below `deliveredLength`, system-role bookkeeping excluded exactly
+ * like delivery) — never from the undelivered tail, so a HELD delta cannot
+ * mask the round it is holding for: the hold stays stable until a delta that
+ * closes the round reaches the canonical side, or the turn ends and the held
+ * messages drop with it. The delta is then walked forward: tool results
+ * consume the pending calls, and any other message while calls are still
+ * pending holds the WHOLE delta — a delta is an ordered slice, so partial
+ * delivery would split it.
+ */
+function deltaHeldByOpenToolRound(
+  transcript: readonly AgentMessage[],
+  deliveredLength: number,
+  delta: readonly AgentMessage[],
+): boolean {
+  const pending = deliveredOpenToolCallIds(transcript, deliveredLength);
+  if (pending.size === 0) return false;
+  for (const message of delta) {
+    if (message.role === 'toolResult') {
+      pending.delete(message.toolCallId);
+      continue;
+    }
+    // A non-toolResult message with calls still pending holds the WHOLE
+    // delta (a delta is an ordered slice; partial delivery would split it).
+    // Once the slice itself closed the round, the rest delivers.
+    if (pending.size > 0) return true;
+    return false;
+  }
+  return false;
+}
+
+/** Tool-call ids of the delivered transcript tail that have no result yet. */
+function deliveredOpenToolCallIds(
+  transcript: readonly AgentMessage[],
+  deliveredLength: number,
+): Set<string> {
+  const seenResults = new Set<string>();
+  for (let index = deliveredLength; index > 0; ) {
+    const message = transcript[index - 1];
+    if (!message) return new Set();
+    // Transcript-resident system records are runtime bookkeeping, not
+    // conversation history — they never sit between a round and its results.
+    if (message.role === 'system') {
+      index -= 1;
+      continue;
+    }
+    if (message.role === 'toolResult') {
+      seenResults.add(message.toolCallId);
+      index -= 1;
+      continue;
+    }
+    if (message.role !== 'assistant') return new Set();
+    const pending = new Set<string>();
+    if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (
+          block &&
+          typeof block === 'object' &&
+          !Array.isArray(block) &&
+          Reflect.get(block, 'type') === 'toolCall'
+        ) {
+          const callId = Reflect.get(block, 'id');
+          if (typeof callId === 'string' && callId) pending.add(callId);
+        }
+      }
+    }
+    for (const callId of pending) {
+      if (seenResults.has(callId)) pending.delete(callId);
+    }
+    return pending;
+  }
+  return new Set();
 }
 
 function readToolName(message: AgentMessage): string[] {

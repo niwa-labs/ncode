@@ -13,7 +13,7 @@ import type {
   LocalTurnPreparation,
 } from './contracts.js';
 import { captureAgentHostSession } from './session-read.js';
-import { copyCanonicalHistoryForPiCompatibility } from '../history/canonical-history-validation.js';
+import { piCompatibleTurnHistory } from '../history/canonical-history-validation.js';
 import { readSessionAgentExecutionSnapshot } from './session-agent-execution-snapshot.js';
 import { continuationRunnerHistory } from '../history/continuation-history.js';
 
@@ -78,6 +78,7 @@ type TurnPreflightDependencies<TAgent extends AgentExecutionSnapshot> = Pick<
   | 'history'
   | 'preparation'
   | 'internalTurnPromptReads'
+  | 'piCompatibleHistorySnapshots'
   | 'logger'
 >;
 
@@ -166,7 +167,10 @@ export class TurnPreflight<TAgent extends AgentExecutionSnapshot = AgentExecutio
       session,
       agent,
       preparation,
-      history: copyCanonicalHistoryForPiCompatibility(runnerHistory.messages),
+      history: piCompatibleTurnHistory(
+        runnerHistory.messages,
+        this.dependencies.piCompatibleHistorySnapshots === true,
+      ),
       canonicalUserInput: effectiveUserInput,
       ...(plan ? { plan } : {}),
       ...(preparation.promptRead ? { promptRead: preparation.promptRead } : {}),

@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The paths entries below compile neighbor-package SOURCES (the same
+    // resolution the standalone typecheck derives), so mirror the two flags
+    // `tsconfig.standalone.json` overrides for exactly that purpose: `.ts`
+    // extension imports and override modifiers are legal in that source tree.
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

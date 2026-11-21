@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { streamSimple } from "../src/stream.ts";
+import { getModel, streamSimple } from "../src/compat.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
 
 interface AnthropicThinkingPayload {
-	model?: string;
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
 }
@@ -84,44 +82,10 @@ describe("Anthropic forceAdaptiveThinking compat override", () => {
 		expect(payload.output_config).toEqual({ effort: "medium" });
 	});
 
-	it.each([
-		"claude-opus-5[1m]",
-		"claude-sonnet-5",
-		"claude-fable-5",
-		"claude-mythos-5",
-		"claude-mythos-preview",
-	])("omits thinking while preserving effort for default-thinking model %s", async (modelId) => {
-		const model = {
-			...makeCustomModel(),
-			id: modelId,
-		};
-		const payload = await capturePayload(model, { reasoning: "medium" });
-
-		expect(payload.model).toBe(model.id);
-		expect(payload).not.toHaveProperty("thinking");
-		expect(payload.output_config).toEqual({ effort: "medium" });
-	});
-
-	it("does not treat an arbitrary bracket suffix as a default-thinking model", async () => {
-		const model = { ...makeCustomModel(), id: "claude-opus-5[foo]" };
-		const payload = await capturePayload(model, { reasoning: "medium" });
-
-		expect(payload.thinking?.type).toBe("enabled");
-		expect(payload.output_config).toBeUndefined();
-	});
-
-	it("keeps an explicit disabled thinking parameter for models that allow it", async () => {
-		const model = { ...makeCustomModel(), id: "claude-opus-5" };
-		const payload = await capturePayload(model);
-
-		expect(payload.thinking).toEqual({ type: "disabled" });
-		expect(payload.output_config).toBeUndefined();
-	});
-
-	it("omits thinking with native xhigh effort for Claude Fable 5", async () => {
+	it("uses adaptive thinking with native xhigh effort for Claude Fable 5", async () => {
 		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "xhigh" });
 
-		expect(payload).not.toHaveProperty("thinking");
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "xhigh" });
 	});
 

@@ -53,7 +53,7 @@ export function normalizeEditsForLineNumberRetry(
  * sent.
  */
 export async function executeEditWithLineNumberRetry(
-  tool: AgentTool,
+  tool: AgentTool<any>,
   input: EditInputShape,
   signal?: AbortSignal,
 ): Promise<AgentToolResult<Record<string, unknown>>> {

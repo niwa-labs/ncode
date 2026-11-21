@@ -16,6 +16,7 @@ const TUI_ACP_GOAL_METHODS = [
 
 export const TUI_ACP_EXTENSION_METHODS = [
   'session/activate',
+  'session/history',
   'mcode/session/activate',
   'mcode/session/steer',
   'mcode/session/queue/list',
@@ -23,6 +24,7 @@ export const TUI_ACP_EXTENSION_METHODS = [
   'mcode/session/queue/update',
   'mcode/session/queue/delete',
   'mcode/session/queue/steer',
+  'mcode/session/turn_status',
   ...TUI_ACP_GOAL_METHODS,
   'mcode/session/delegation/get',
   'mcode/session/delegation/stop',
@@ -67,6 +69,26 @@ export interface RegisterTuiAcpExtensionsOptions {
 export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOptions): void {
   const createRequestId = options.createRequestId ?? randomUUID;
   const resolve = (sessionId: string) => requireSession(options.resolveSession, sessionId);
+  /**
+   * Durable session resolution for the queue family. Queue operations are
+   * session-id operations against the Runtime's durable queue — they must
+   * not depend on THIS process's ACP attachment map: a follow_up
+   * integration (or a client after reconnect) enqueues into a session that
+   * was created by another process or resumed elsewhere. Resolve the
+   * attachment first (cheap, already authorized by load), then fall back to
+   * the Runtime's durable record; only a session unknown to the Runtime is
+   * a Resource not found. Mirrors the attachment-free semantics of
+   * `mcode/session/steer` in this same file.
+   */
+  const resolvePersisted = async (sessionId: string): Promise<TuiSession> => {
+    const attached = options.resolveSession(sessionId);
+    if (attached) return attached;
+    try {
+      return await options.runtime.getSession(sessionId);
+    } catch {
+      throw acp.RequestError.resourceNotFound(sessionId);
+    }
+  };
   const requireGoalEnabled = () => {
     if (!options.runtime.isGoalEnabled()) {
       throw acp.RequestError.invalidParams(
@@ -95,62 +117,107 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
 
   options.app.onRequest('mcode/session/steer', parseTextRequest, async ({ params }) => {
     resolve(params.sessionId);
+    const steerViaRuntime = async (
+      input: Parameters<TuiAcpRuntime['steer']>[0],
+    ): Promise<Awaited<ReturnType<TuiAcpRuntime['steer']>>> => {
+      try {
+        // The Turn constraint travels as DATA (expectActiveTurnId), not as the
+        // preDelivery callback: in daemon mode this input crosses a JSON wire
+        // where a function is silently dropped, and the daemon then dies on
+        // `preDelivery.accept is not a function` — the steer never arrives.
+        // The runtime enforces the pin where the active Turn actually lives.
+        return await options.runtime.steer(input);
+      } catch (error) {
+        // Surface WHY the steer was not delivered instead of the connection
+        // layer's bare "Internal error". Class identity is lost over the wire,
+        // so the refusal is recognized by its stable error name.
+        const cause = error instanceof Error ? error.message : String(error);
+        const remoteName = (error as { readonly errorName?: unknown }).errorName;
+        const errorName =
+          typeof remoteName === 'string' ? remoteName : error instanceof Error ? error.name : '';
+        if (errorName === 'ConversationTurnRejectedError') {
+          throw acp.RequestError.invalidParams(
+            undefined,
+            `Steering was not delivered to the active ACP prompt Turn: ${cause}`,
+          );
+        }
+        throw acp.RequestError.internalError(undefined, cause);
+      }
+    };
+    const unexpectedSteerResultError = (
+      result: Awaited<ReturnType<TuiAcpRuntime['steer']>>,
+    ): acp.RequestError => {
+      if (result.mode === 'activated') {
+        void result.completion.catch(() => undefined);
+        return acp.RequestError.invalidParams(
+          undefined,
+          'Steering cannot activate a new Turn for an ACP prompt.',
+        );
+      }
+      return acp.RequestError.invalidParams(
+        undefined,
+        'The steer result did not match the active ACP prompt Turn.',
+      );
+    };
     const expectedTurnId = options.activePromptTurnId(params.sessionId);
-    if (!expectedTurnId) {
+    if (expectedTurnId) {
+      const result = await steerViaRuntime({
+        sessionId: params.sessionId,
+        source: 'api',
+        message: { content: params.text },
+        producerId: 'mcode-acp',
+        idempotencyKey: params.clientRequestId ?? createRequestId(),
+        expectActiveTurnId: expectedTurnId,
+      });
+      // The durable receipt is the AUTHORITATIVE answer to a replayed
+      // clientRequestId: its original Turn may since have finished or been
+      // superseded, so a duplicate reports that Turn as-is instead of
+      // matching the currently active one. Only a NEW delivery ('steered')
+      // must join the Turn this prompt pinned.
+      if (
+        result.mode === 'activated' ||
+        (result.mode !== 'duplicate' && result.turnId !== expectedTurnId)
+      ) {
+        throw unexpectedSteerResultError(result);
+      }
+      return { turnId: result.turnId, mode: result.mode };
+    }
+    if (!params.clientRequestId) {
       throw acp.RequestError.invalidParams(
         undefined,
         'Steering requires an admitted, active ACP prompt Turn for this Session.',
       );
     }
-    const result = await options.runtime.steer({
+    // No admitted prompt Turn for a NEW delivery — but a replayed
+    // clientRequestId is answered by its durable receipt, which outlives the
+    // prompt and its Turn (finished Turn, later Turn, reconnected client).
+    // Probe the receipt read-only (receiptLookupOnly can neither deliver nor
+    // activate a Turn); with no receipt the request is still refused and
+    // consumes nothing.
+    const probed = await steerViaRuntime({
       sessionId: params.sessionId,
       source: 'api',
       message: { content: params.text },
       producerId: 'mcode-acp',
-      idempotencyKey: params.clientRequestId ?? createRequestId(),
-      preDelivery: {
-        accept: ({ mode, turnId }) => {
-          if (
-            mode !== 'steered' ||
-            turnId !== expectedTurnId ||
-            options.activePromptTurnId(params.sessionId) !== expectedTurnId
-          ) {
-            throw acp.RequestError.invalidParams(
-              undefined,
-              'The active ACP prompt Turn changed before steering was admitted.',
-            );
-          }
-        },
-      },
+      idempotencyKey: params.clientRequestId,
+      receiptLookupOnly: true,
     });
-    if (result.mode === 'activated') {
-      void result.completion.catch(() => undefined);
-      throw acp.RequestError.invalidParams(
-        undefined,
-        'Steering cannot activate a new Turn for an ACP prompt.',
-      );
-    }
-    if (result.turnId !== expectedTurnId) {
-      throw acp.RequestError.invalidParams(
-        undefined,
-        'The steer result did not match the active ACP prompt Turn.',
-      );
-    }
-    return { turnId: result.turnId, mode: result.mode };
+    if (probed.mode !== 'duplicate') throw unexpectedSteerResultError(probed);
+    return { turnId: probed.turnId, mode: probed.mode };
   });
 
   options.app.onRequest('mcode/session/queue/list', parseSessionRequest, async ({ params }) => {
-    resolve(params.sessionId);
+    await resolvePersisted(params.sessionId);
     return { items: await options.runtime.listQueuedMessages(params.sessionId) };
   });
 
   options.app.onRequest('mcode/session/queue/enqueue', parseTextRequest, async ({ params }) => {
-    resolve(params.sessionId);
+    await resolvePersisted(params.sessionId);
     return options.runtime.enqueueMessage(params.sessionId, params.text);
   });
 
   options.app.onRequest('mcode/session/queue/update', parseQueueTextRequest, async ({ params }) => {
-    resolve(params.sessionId);
+    await resolvePersisted(params.sessionId);
     return {
       item:
         (await options.runtime.updateQueuedMessageContent(
@@ -162,15 +229,34 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
   });
 
   options.app.onRequest('mcode/session/queue/delete', parseQueueItemRequest, async ({ params }) => {
-    resolve(params.sessionId);
+    await resolvePersisted(params.sessionId);
     return {
       item: (await options.runtime.deleteQueuedMessage(params.sessionId, params.itemId)) ?? null,
     };
   });
 
   options.app.onRequest('mcode/session/queue/steer', parseQueueItemRequest, async ({ params }) => {
-    resolve(params.sessionId);
+    await resolvePersisted(params.sessionId);
     return options.runtime.steerQueuedMessage(params.sessionId, params.itemId);
+  });
+
+  // Durable liveness probe (incident 2026-11-15: a kagero run sat six
+  // minutes on "active" with zero wire events and no cheap way to tell a
+  // thinking model from a stalled stream). Resolves the session like the
+  // queue family — an integrator polls THIS after a resume, on a session
+  // another process created — and answers with the admitted active Turn,
+  // the latest durable turn activity, and the queue depth in one read.
+  options.app.onRequest('mcode/session/turn_status', parseSessionRequest, async ({ params }) => {
+    await resolvePersisted(params.sessionId);
+    const [turnStatus, queue] = await Promise.all([
+      options.runtime.getTurnStatus?.(params.sessionId),
+      options.runtime.getQueueSnapshot(params.sessionId),
+    ]);
+    return {
+      activeTurn: turnStatus?.activeTurn ?? null,
+      latestActivity: turnStatus?.latestActivity ?? null,
+      queue: { pendingCount: queue.pendingCount, paused: queue.paused },
+    };
   });
 
   options.app.onRequest('mcode/session/goal/get', parseSessionRequest, async ({ params }) => {

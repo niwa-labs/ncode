@@ -11,11 +11,16 @@ import type { TuiComposerDraft } from '../../features/composer/draft.js';
 import type { TuiWorkspaceRoots } from '../../features/composer/workspace-roots.js';
 import { TuiLoginRegionPicker } from '../../features/auth/login-region-picker.js';
 import { TuiPermissionModePicker } from '../../features/interaction/permission-mode-picker.js';
+import { TuiDeleteGuardPicker } from '../../features/interaction/delete-guard-picker.js';
+import { formatTuiDeleteGuardLabel } from '../../../application/permission-mode.js';
+import { TuiSandboxPicker } from '../../features/interaction/sandbox-picker.js';
 import {
-  TuiSettingsPicker,
-  type TuiSettingsSwitch,
-  type TuiSettingsSwitchState,
-} from '../../features/settings/picker.js';
+  describeTuiSandboxMode,
+  formatTuiSandboxModeLabel,
+  parseTuiSandboxFilesystemModeArgument,
+  type TuiSandboxFilesystemMode,
+} from '../../../application/sandbox-mode.js';
+import { TuiSettingsPicker } from '../../features/settings/picker.js';
 import { TuiHotkeysPicker } from '../../features/settings/hotkeys-picker.js';
 import { submittedEditorContent, submittedEditorTransport, type Editor } from '../../widgets/editor/editor.js';
 import type { TuiInteractionSurface } from '../../shell/interaction-surface.js';
@@ -34,6 +39,7 @@ import type { TuiUpdateFlow } from './update-flow.js';
 import type { TuiGoalFlow } from './goal-flow.js';
 import type { TuiPlanModeFlow } from '../interaction/plan-mode-flow.js';
 import type { TuiPermissionModeFlow } from '../interaction/permission-mode-flow.js';
+import type { TuiSandboxPolicyFlow } from '../interaction/sandbox-policy-flow.js';
 import type { MavisRegion } from '@mavis/config';
 import type { McodeAuthPort } from '../../../auth/application.js';
 import { markTuiAuthorizationUrl } from '../../../auth/authorization-url.js';
@@ -54,7 +60,7 @@ import {
 import { rebuildSessionMutationTransport } from '../../features/session-mutation/transport.js';
 import { toTuiTranscriptAttachments } from '../../features/composer/attachments.js';
 import { resolveTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
-import type { TuiEditMessageAttachment, TuiPtcSetting, TuiSession } from '../../../runtime/port.js';
+import type { TuiEditMessageAttachment, TuiSession } from '../../../runtime/port.js';
 import type { TuiAttachment, TuiTransportAttachment } from '../../../types/invocation.js';
 import { sessionMutationText } from '../../features/session-mutation/copy.js';
 import { parseTuiBashInput } from '../../commands/bash-input.js';
@@ -82,22 +88,7 @@ export interface TuiCommandFlowOptions {
   readonly goalFlow?: Pick<TuiGoalFlow, 'execute' | 'resumeBlocked'>;
   readonly planModeFlow?: TuiPlanModeFlow;
   readonly permissionModeFlow?: TuiPermissionModeFlow;
-  /**
-   * Global next-message suggestion switch; absent, or resolving undefined, when
-   * the Runtime cannot read or persist it.
-   */
-  readonly promptSuggestionSetting?: {
-    read(): Promise<boolean | undefined>;
-    write(enabled: boolean): Promise<boolean | undefined>;
-  };
-  /**
-   * Programmatic Tool Calling switch (`beta.ptc`, shared with Desktop); absent,
-   * or resolving undefined, when the Runtime cannot read or persist it.
-   */
-  readonly ptcSetting?: {
-    read(): Promise<TuiPtcSetting | undefined>;
-    write(enabled: boolean): Promise<TuiPtcSetting | undefined>;
-  };
+  readonly sandboxPolicyFlow?: TuiSandboxPolicyFlow;
   readonly auth?: McodeAuthPort;
   readonly openExternalTarget?: TuiExternalTargetOpener;
   readonly interactionFlow: TuiInteractionFlow;
@@ -185,6 +176,8 @@ export class TuiCommandFlow {
   private loginRegionPicker: TuiLoginRegionPicker | undefined;
   private pendingLoginContinuation: 'checkin' | undefined;
   private permissionModePicker: TuiPermissionModePicker | undefined;
+  private deleteGuardPicker: TuiDeleteGuardPicker | undefined;
+  private sandboxPicker: TuiSandboxPicker | undefined;
   private settingsPicker: TuiSettingsPicker | undefined;
   private hotkeysPicker: TuiHotkeysPicker | undefined;
   private submissionCounter = 0;
@@ -514,9 +507,6 @@ export class TuiCommandFlow {
         return 'consumed';
       }
     }
-    if (await this.holdSubmissionWhileRunningElsewhere()) {
-      return this.restoreSeed(seed, input);
-    }
     if (this.options.interactionFlow.hasPending()) {
       if (command && !seed) {
         this.options.editor.setText(input);
@@ -646,6 +636,25 @@ export class TuiCommandFlow {
             }
           }
           if (this.options.queueEnabled) {
+            // Owner bug 2026-11-06 (input lost): slash-shaped input that
+            // reaches this park point is by definition NOT a catalog command
+            // — the dispatch above already handled (or refused) every
+            // recognized one, settings commands included. Parking it silently
+            // as queue text is exactly how a settings command "never applied":
+            // the queue admits it as a plain message and nothing happens.
+            // Refuse the parking with a visible warning and keep the draft;
+            // the Enter steer intent above (canon verdict 09) stays untouched.
+            if (!options.forceMessage && isSlashCommandAttempt(command)) {
+              if (optimisticRequestId) {
+                this.options.controller.removeOptimisticUserMessage?.(optimisticRequestId);
+              }
+              this.options.planModeFlow?.rejectSubmission(submission.submissionId);
+              this.options.append(unrecognizedSlashQueueMessage(command), 'warning');
+              this.options.onChanged();
+              return {
+                disposition: await this.restorePreparedSubmission(seed, submission, input),
+              };
+            }
             if (optimisticRequestId) {
               this.options.controller.removeOptimisticUserMessage?.(optimisticRequestId);
             }
@@ -837,7 +846,56 @@ export class TuiCommandFlow {
       await this.completeSubmittedResources(submission);
       return 'consumed';
     }
+    if (submitStatus === 'queue-required' && options.busyAction === 'steer') {
+      // The daemon may still own a live Turn after the local view went idle.
+      // Preserve Enter's guidance intent rather than silently queueing it.
+      if (optimisticRequestId) {
+        this.options.controller.removeOptimisticUserMessage?.(optimisticRequestId);
+      }
+      let accepted = false;
+      try {
+        if (!submission.clientIntent && !submission.reviewRequest) {
+          await this.options.controller.requireLoginForAgentAction();
+          accepted = await this.options.activeRunFlow.steer(submission.transportContent ?? command, {
+            requireActiveTurn: true,
+            ...(submission.transportContent ? { displayContent: command } : {}),
+            attachments: submission.transportAttachments ?? submission.attachments,
+            transcriptAttachments: submission.attachments,
+          });
+        }
+      } catch (error) {
+        this.appendProtectedActionError(error, "Couldn't send guidance to the active response.");
+      }
+      this.options.planModeFlow?.rejectSubmission(submission.submissionId);
+      if (!accepted) return this.restorePreparedSubmission(seed, submission, input);
+      options.onRuntimeAccepted?.();
+      this.options.onMessageAdmitted?.({
+        attachmentCount: submission.attachments.length,
+        isFirstMessage,
+      });
+      await this.completeSubmittedResources(submission);
+      return 'consumed';
+    }
     if (submitStatus === 'queue-required' && this.options.queueEnabled) {
+      // Same owner rule as the live-run park above (bug 2026-11-06): an
+      // unrecognized slash command is never parked as queue text — warn and
+      // keep the draft instead.
+      if (!options.forceMessage && isSlashCommandAttempt(command)) {
+        if (optimisticRequestId) {
+          this.options.controller.removeOptimisticUserMessage?.(optimisticRequestId);
+        }
+        this.options.planModeFlow?.rejectSubmission(submission.submissionId);
+        this.options.append(unrecognizedSlashQueueMessage(command), 'warning');
+        this.options.onChanged();
+        if (prepared.atomic) {
+          this.restoreSubmission(submission);
+        } else {
+          this.options.composerDraft.restoreSubmission({
+            attachments: submission.attachments,
+          });
+        }
+        return 'retained';
+      }
       if (optimisticRequestId) {
         this.options.controller.removeOptimisticUserMessage?.(optimisticRequestId);
       }
@@ -1017,41 +1075,6 @@ export class TuiCommandFlow {
       !chat.retiringTurnId &&
       !this.options.runtimeStopping(),
     );
-  }
-
-  /**
-   * Another live MCode process owns the running Turn, so this process can only
-   * watch it: messages would fail as steer or pile up behind it. Runtime events
-   * from that process never reach this one, so re-read the run on each attempt;
-   * once it has ended, refresh the transcript and keep the draft for an explicit
-   * resend instead of sending it automatically.
-   */
-  private async holdSubmissionWhileRunningElsewhere(): Promise<boolean> {
-    const activeRunFlow = this.options.activeRunFlow;
-    if (!activeRunFlow.currentSnapshot?.()?.runningElsewhere) return false;
-    const sessionId = this.options.controller.snapshot().session?.sessionId;
-    await activeRunFlow.refresh(true);
-    const current = activeRunFlow.currentSnapshot();
-    const ended =
-      current !== undefined &&
-      current.sessionId === sessionId &&
-      current.state !== 'running' &&
-      current.state !== 'decision-blocked';
-    if (!ended) {
-      if (current && !current.runningElsewhere) return false;
-      this.options.setHint(
-        'This Session is running in another MCode process and is read-only here. Your draft is preserved.',
-      );
-      this.options.onChanged();
-      return true;
-    }
-    this.options.runProjection.reconcileRuntimeTurn(undefined);
-    await this.options.controller.reconcileOwnerHistory().catch(() => undefined);
-    this.options.setHint(
-      'The other MCode process finished; Session refreshed. Press Enter to send your draft.',
-    );
-    this.options.onChanged();
-    return true;
   }
 
   private async restorePreparedSubmission(
@@ -1325,44 +1348,51 @@ export class TuiCommandFlow {
         }
         await this.options.permissionModeFlow.set(mode);
       },
-      suggestions: async ({ args }) => {
-        const setting = this.options.promptSuggestionSetting;
-        const reportUnavailable = () =>
-          this.options.append('Next-message suggestions are unavailable in this host.', 'warning');
-        if (!setting) {
-          reportUnavailable();
+      'delete-guard': async ({ args }) => {
+        if (!this.options.permissionModeFlow) {
+          this.options.append('Delete guard is unavailable in this host.', 'warning');
           return;
         }
         const action = args.trim().toLocaleLowerCase();
-        if (action && action !== 'on' && action !== 'off') {
-          this.options.append('Usage: /suggestions [on | off]', 'warning');
+        if (!action) {
+          this.showDeleteGuardPicker();
+          return;
+        }
+        const flow = this.options.permissionModeFlow;
+        if (action === 'status') {
+          this.options.append(formatDeleteGuardStatus(flow.snapshot().deleteGuardEnabled));
+          return;
+        }
+        if (action !== 'on' && action !== 'off') {
+          this.options.append('Usage: /delete-guard [status | on | off]', 'warning');
           return 'retained';
         }
-        let enabled: boolean | undefined;
-        try {
-          enabled = action ? await setting.write(action === 'on') : await setting.read();
-        } catch (error) {
+        await flow.setDeleteGuardEnabled(action === 'on');
+      },
+      sandbox: async ({ args }) => {
+        if (!this.options.sandboxPolicyFlow) {
+          this.options.append('Sandbox is unavailable in this host.', 'warning');
+          return;
+        }
+        const flow = this.options.sandboxPolicyFlow;
+        const action = args.trim();
+        if (!action) {
+          this.showSandboxPicker();
+          return;
+        }
+        if (action.toLocaleLowerCase() === 'status') {
+          this.options.append(formatSandboxStatus(flow.snapshot().mode));
+          return;
+        }
+        const mode = parseTuiSandboxFilesystemModeArgument(action);
+        if (!mode) {
           this.options.append(
-            formatTuiActionFailure(error, {
-              summary: action
-                ? "Couldn't save the next-message suggestion setting."
-                : "Couldn't read the next-message suggestion setting.",
-              nextStep: 'Check config.yaml syntax and permissions, then retry.',
-            }),
-            'error',
+            'Usage: /sandbox [status | read_only | workspace_write | delete_guard | full_access]',
+            'warning',
           );
           return 'retained';
         }
-        if (enabled === undefined) {
-          reportUnavailable();
-          return;
-        }
-        this.options.setHint(
-          enabled
-            ? 'Next-message suggestions on · shown after each turn · /suggestions off to stop'
-            : 'Next-message suggestions off · /suggestions on to resume',
-        );
-        this.options.onChanged();
+        await flow.set(mode);
       },
       login: () => {
         this.pendingLoginContinuation = undefined;
@@ -1694,6 +1724,70 @@ export class TuiCommandFlow {
     this.options.surface.show(picker);
   }
 
+  private showDeleteGuardPicker(): void {
+    const flow = this.options.permissionModeFlow;
+    if (!flow) {
+      this.options.append('Delete guard is unavailable in this host.', 'warning');
+      return;
+    }
+    if (flow.snapshot().deleteGuardEnabled === undefined) {
+      this.options.append(formatDeleteGuardStatus(undefined));
+      return;
+    }
+    if (this.deleteGuardPicker) {
+      this.options.surface.close(this.deleteGuardPicker);
+      this.deleteGuardPicker = undefined;
+    }
+    const picker = new TuiDeleteGuardPicker(
+      () => flow.snapshot().deleteGuardEnabled,
+      (enabled) => {
+        if (this.deleteGuardPicker !== picker) return;
+        this.options.surface.close(picker);
+        this.deleteGuardPicker = undefined;
+        void flow.setDeleteGuardEnabled(enabled);
+      },
+      () => {
+        this.options.surface.close(picker);
+        if (this.deleteGuardPicker === picker) this.deleteGuardPicker = undefined;
+      },
+      this.options.onChanged,
+    );
+    this.deleteGuardPicker = picker;
+    this.options.surface.show(picker);
+  }
+
+  private showSandboxPicker(): void {
+    const flow = this.options.sandboxPolicyFlow;
+    if (!flow) {
+      this.options.append('Sandbox is unavailable in this host.', 'warning');
+      return;
+    }
+    if (flow.snapshot().mode === undefined) {
+      this.options.append(formatSandboxStatus(undefined));
+      return;
+    }
+    if (this.sandboxPicker) {
+      this.options.surface.close(this.sandboxPicker);
+      this.sandboxPicker = undefined;
+    }
+    const picker = new TuiSandboxPicker(
+      () => flow.snapshot().mode,
+      (mode) => {
+        if (this.sandboxPicker !== picker) return;
+        this.options.surface.close(picker);
+        this.sandboxPicker = undefined;
+        void flow.set(mode);
+      },
+      () => {
+        this.options.surface.close(picker);
+        if (this.sandboxPicker === picker) this.sandboxPicker = undefined;
+      },
+      this.options.onChanged,
+    );
+    this.sandboxPicker = picker;
+    this.options.surface.show(picker);
+  }
+
   private showSettingsPicker(): void {
     if (this.settingsPicker) {
       this.options.surface.close(this.settingsPicker);
@@ -1732,47 +1826,9 @@ export class TuiCommandFlow {
         this.options.surface.close(picker);
         if (this.settingsPicker === picker) this.settingsPicker = undefined;
       },
-      {
-        switches: this.settingsSwitches(),
-        onChanged: () => this.options.onChanged(),
-        onClosedFailure: (message) => this.options.append(message, 'warning'),
-      },
     );
     this.settingsPicker = picker;
     this.options.surface.show(picker);
-  }
-
-  /** On/off preferences owned by the Runtime; a host without one leaves its row out. */
-  private settingsSwitches(): TuiSettingsSwitch[] {
-    const switches: TuiSettingsSwitch[] = [];
-    const suggestions = this.options.promptSuggestionSetting;
-    if (suggestions) {
-      const project = (enabled: boolean | undefined) =>
-        enabled === undefined ? undefined : { enabled };
-      switches.push({
-        id: 'prompt-suggestions',
-        label: 'Next-message suggestions',
-        description: 'Suggest a next message after each Turn; Tab accepts it.',
-        read: async () => project(await suggestions.read()),
-        write: async (enabled) => project(await suggestions.write(enabled)),
-        describeFailure: (action) =>
-          `Couldn't ${action === 'read' ? 'read' : 'save'} this setting. Check config.yaml, then retry.`,
-      });
-    }
-    const ptc = this.options.ptcSetting;
-    if (ptc) {
-      switches.push({
-        id: 'ptc',
-        label: 'Programmatic Tool Calling',
-        tag: 'Beta',
-        description: 'The Agent composes tool calls in run_code programs. Shared with Desktop.',
-        read: async () => projectPtcSwitch(await ptc.read()),
-        write: async (enabled) => projectPtcSwitch(await ptc.write(enabled)),
-        describeFailure: (action) =>
-          `Couldn't ${action === 'read' ? 'read' : 'save'} beta.ptc. Check config.yaml, then retry.`,
-      });
-    }
-    return switches;
   }
 
   private showHotkeysPicker(): void {
@@ -2027,25 +2083,56 @@ function isBareSlashCommand(input: string): boolean {
   );
 }
 
+/**
+ * Slash-shaped input that reads as a command attempt: the first token starts
+ * with one slash and carries no path separators after it, so `/autocompact
+ * 80000` counts while `/usr/bin/tool args` or a bare `/` stay plain
+ * messages. Only consulted at the queue park points, where every RECOGNIZED
+ * catalog command has already been dispatched above — reaching here with
+ * this shape means the command is unknown to this build (owner bug
+ * 2026-11-06: a settings command parked silently in the Queue and never
+ * applied).
+ */
+function isSlashCommandAttempt(input: string): boolean {
+  const token = input.trim().split(/\s+/u, 1)[0] ?? '';
+  return token.startsWith('/') && token.length > 1 && !token.slice(1).includes('/');
+}
+
+/** The owner-facing refusal that replaces the silent Queue parking. */
+function unrecognizedSlashQueueMessage(input: string): string {
+  const token = input.trim().split(/\s+/u, 1)[0] ?? input.trim();
+  return (
+    `${token} is not a recognized MCode command — it was not queued. ` +
+    'Check the spelling in /help; send it as a plain message (without the slash) if it is meant as text.'
+  );
+}
+
 function isAvailableWhileStopping(input: string, catalog: TuiCommandCatalog): boolean {
   const command = catalog.resolve(input)?.name;
   return command === 'help' || command === 'quit' || command === 'stop';
 }
 
 /**
- * A Session keeps the tool call mode it was created (or last compacted) with,
- * so the switch always says where a change applies instead of implying it is live.
+ * `undefined` is reported as "managed by host" rather than as an enabled or
+ * disabled guard: the TUI must never claim a protection the runtime may not
+ * actually be enforcing.
  */
-export function projectPtcSwitch(
-  setting: TuiPtcSetting | undefined,
-): TuiSettingsSwitchState | undefined {
-  if (!setting) return undefined;
-  // The switch shows and flips the saved choice; --ptc only adds a note.
-  return {
-    enabled: setting.saved,
-    note:
-      setting.launchOverride && !setting.saved
-        ? 'Saved off; --ptc keeps PTC on in this process anyway.'
-        : 'Applies to new Sessions and after /compact; this Session keeps its mode.',
-  };
+function formatDeleteGuardStatus(enabled: boolean | undefined): string {
+  if (enabled === undefined) return 'Delete guard is managed by host.';
+  const label = formatTuiDeleteGuardLabel(enabled);
+  const detail =
+    enabled
+      ? 'Deletes move to trash and can be restored.'
+      : 'Deletes are permanent and cannot be undone.';
+  return `Delete guard: ${label}. ${detail}`;
+}
+
+/**
+ * `undefined` is reported as "managed by host" rather than as a level: the
+ * sandbox is enforced outside permission checks, so naming a level the host is
+ * not applying would misdescribe what actually runs.
+ */
+function formatSandboxStatus(mode: TuiSandboxFilesystemMode | undefined): string {
+  if (mode === undefined) return 'Sandbox is managed by host.';
+  return `Sandbox: ${formatTuiSandboxModeLabel(mode)}. ${describeTuiSandboxMode(mode)}`;
 }

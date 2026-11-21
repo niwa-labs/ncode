@@ -131,7 +131,11 @@ describe("terminal output backpressure", () => {
     const failed = expect(terminal.drainOutput()).rejects.toBe(error);
     h.pending.shift()!.callback(error, 0);
     await failed;
-    expect(onError).toHaveBeenCalledExactlyOnceWith(error);
+    // toHaveBeenCalledExactlyOnceWith needs vitest ≥ 3.2; the package-local
+    // gate pins vitest ^2. One call with exactly these args, spelled so both
+    // the package gate and the repository gate (vitest 4) enforce it.
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(error);
     expect(terminal.outputPending).toBe(false);
     expect(() => terminal.write("later")).not.toThrow();
     expect(h.pending).toHaveLength(0);
@@ -296,7 +300,8 @@ describe("terminal output backpressure", () => {
       await done;
       expect(input).not.toHaveBeenCalled();
       stdin.emit("data", "z");
-      expect(input).toHaveBeenCalledExactlyOnceWith("z");
+      expect(input).toHaveBeenCalledOnce();
+      expect(input).toHaveBeenCalledWith("z");
     } finally {
       while (h.pending.length) h.complete();
       await vi.advanceTimersByTimeAsync(1000);

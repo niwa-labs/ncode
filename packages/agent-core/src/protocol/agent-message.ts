@@ -75,6 +75,8 @@ export interface ToolCall {
   tool_call_duration_ms?: number;
   /** Plugin owners resolved by the turn-local runtime attribution snapshot. */
   plugin_provenances?: import('@mavis/protocol').IPluginCapabilityProvenance[];
+  /** §4 `decidedBy` mark; present once the permission gate resolved this call. */
+  permission?: import('./runtime-event.js').RuntimePermissionMark;
 }
 
 /**

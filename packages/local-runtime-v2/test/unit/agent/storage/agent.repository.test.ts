@@ -1079,6 +1079,53 @@ function registerBuiltinCanonicalPublicationTests(): void {
     },
   );
 
+  it("renders the run_code prompt section only when the turn gate asked for it (ptcRequested)", async () => {
+    const { repository } = await createRepository();
+    const service = new LocalAgentService({
+      repository,
+      nowMs: () => 10,
+      promptMode: "tui",
+    });
+    service.bindBuiltinModelGroupResolver(async () => ({
+      model: "provider/model",
+      effort: "high",
+      contextWindow: 32_000,
+    }));
+    await service.ensureBuiltinRows({ nowMs: 10 });
+    const input = {
+      exactOwnerName: "mavis",
+      surface: "cli" as const,
+      promptProfile: "tui" as const,
+      appMode: "coding" as const,
+      capabilities: {
+        tools: [],
+        features: { mavis: false, delegation: false, webSearch: false },
+      },
+      memoryEnabled: false,
+      cronEnabled: false,
+    };
+    const on = await service.renderProfile({ ...input, ptcRequested: true });
+    expect(on.corePrompt).toContain("# Tool calls in this turn");
+    expect(on.corePrompt.indexOf("# Tool calls in this turn")).toBeLessThan(
+      on.corePrompt.indexOf("# Harness"),
+    );
+    const off = await service.renderProfile(input);
+    expect(off.corePrompt).not.toContain("Tool calls in this turn");
+    // The section render carries the turn's own tool switches: the gated-off
+    // tools stay out of the section even when the gate is on.
+    const gated = await service.renderProfile({
+      ...input,
+      ptcRequested: true,
+      capabilities: {
+        tools: ["read"],
+        features: { mavis: false, delegation: false, webSearch: false },
+      },
+    });
+    expect(gated.corePrompt).toContain("# Tool calls in this turn");
+    expect(gated.corePrompt).toContain("- `tools.read` to read files");
+    expect(gated.corePrompt).not.toContain("`tools.bash` only for builds");
+  });
+
   it("rebuilds a legacy partial-policy Builtin with the resolver-provided M3 thinking group and removes stale Mavis/main files", async () => {
     const { repository, dataDir } = await createRepository();
     const mavisBuiltin = join(

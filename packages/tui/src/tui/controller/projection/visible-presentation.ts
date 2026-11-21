@@ -1,3 +1,4 @@
+import { subscriptionWaitText } from '@mavis/shared/llm-retry-event';
 import type { TuiChatSnapshot } from '../chat-controller.js';
 import type { TuiActivityControl, TuiActivityLineState } from '../../shell/activity-line.js';
 import type { TuiComposerState, TuiShellState, TuiSurface } from '../../shell/index.js';
@@ -47,12 +48,16 @@ export interface ResolveTuiVisiblePresentationInput {
   readonly selectedEffort?: string;
   readonly permissionMode?: TuiPermissionModeSnapshot;
   readonly planMode?: TuiPlanModeSnapshot;
+  /**
+   * W4 (§4.6): the daemon connection state in server mode. Rendered by the
+   * status line as an honest exception line; `undefined` on the default
+   * in-process path (`MCODE_SERVER_MODE=off`).
+   */
+  readonly daemonConnection?: TuiShellState['daemonConnection'];
   /** Present while a paired BTW side conversation exists; identifies the visible half. */
   readonly sideConversation?: TuiSideConversationPresentation;
   /** Earliest observed start of a Turn, kept across Session projection switches. */
   readonly turnStartedAtMs?: (turnId: string) => number | undefined;
-  /** Next-message suggestion for the visible Session, offered only on an idle, empty composer. */
-  readonly promptSuggestion?: string;
 }
 
 export interface TuiVisiblePresentation {
@@ -160,7 +165,7 @@ function resolveVisibleActivity(input: ResolveTuiVisiblePresentationInput): TuiA
       phase: 'retrying',
       runId,
       ...controls,
-      message: `Retrying model request · ${String(input.llmRetry.retryAttempt)}/${String(
+      message: input.llmRetry.error?.reason === 'usage_limit' ? subscriptionWaitText(input.llmRetry) : `Retrying model request · ${String(input.llmRetry.retryAttempt)}/${String(
         input.llmRetry.maxRetries,
       )}${retryDelay !== undefined ? ` · next in ${formatRetryDelay(retryDelay)}` : ''}${
         retryReason ? ` · ${retryReason}` : ''
@@ -253,11 +258,9 @@ function resolveVisibleComposer(input: ResolveTuiVisiblePresentationInput): TuiC
       : input.runtimeQueuedCount > 0
         ? `Message · ${formatTuiKeybinding('tui.input.submit', input.keybindings)} send`
         : undefined);
-  const promptSuggestion = resolveVisiblePromptSuggestion(input, mode, hint);
   return {
     surface: input.surface,
     mode,
-    ...(promptSuggestion ? { placeholder: promptSuggestion, promptSuggestion } : {}),
     ...(input.sideConversation
       ? {
           ...(input.sideConversation.view === 'side'
@@ -285,31 +288,6 @@ function resolveVisibleComposer(input: ResolveTuiVisiblePresentationInput): TuiC
       : { draftCharacterCount: input.draftCharacterCount }),
     ...(input.draftLineCount === undefined ? {} : { draftLineCount: input.draftLineCount }),
   };
-}
-
-/**
- * A suggestion only replaces the placeholder of an idle main conversation with
- * an empty draft: a run, a blocked prompt, a hint, a goal draft, attachments or
- * a side conversation each own the composer instead.
- */
-function resolveVisiblePromptSuggestion(
-  input: ResolveTuiVisiblePresentationInput,
-  mode: TuiComposerState['mode'],
-  hint: string | undefined,
-): string | undefined {
-  const suggestion = input.promptSuggestion?.trim();
-  if (
-    !suggestion ||
-    mode !== 'message' ||
-    input.surface !== 'conversation' ||
-    input.sideConversation ||
-    input.compacting ||
-    hint?.trim() ||
-    input.attachmentCount > 0 ||
-    (input.draftCharacterCount ?? 0) > 0
-  )
-    return undefined;
-  return suggestion;
 }
 
 function resolvePlanTransitionHint(planMode: TuiPlanModeSnapshot | undefined): string | undefined {
@@ -362,6 +340,7 @@ function resolveStableShell(input: ResolveTuiVisiblePresentationInput): TuiShell
     permissionModeUpdating: input.permissionMode?.updating ?? false,
     planMode: input.planMode?.displayMode,
     planModeTransition: input.planMode?.transition,
+    ...(input.daemonConnection ? { daemonConnection: input.daemonConnection } : {}),
   };
 }
 

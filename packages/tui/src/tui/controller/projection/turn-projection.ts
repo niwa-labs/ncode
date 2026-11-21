@@ -1,3 +1,4 @@
+import { createLogger } from '@mavis/logging';
 import type { TuiMessage, TuiStreamEvent } from '../../../runtime/port.js';
 import type {
   TranscriptAttachment,
@@ -15,6 +16,8 @@ import { TuiTodoProjection } from './turn-todo-projection.js';
 import { TuiUserProjection } from './turn-user-projection.js';
 import { formatTuiRuntimeFailure } from '../runtime/runtime-error-presentation.js';
 
+const turnLog = createLogger('tui:turn');
+
 export type OptimisticUserCommitMode = 'immediate' | 'runtime-message';
 
 interface TuiTurnProjectionOptions {
@@ -25,6 +28,8 @@ interface TuiTurnProjectionOptions {
 }
 
 export class TuiTurnProjection {
+  private lastProgressLogAt = 0;
+  private projectedEvents = 0;
   private readonly transcript: TranscriptStore;
   private readonly now: () => number;
   private readonly onChange: () => void;
@@ -147,11 +152,27 @@ export class TuiTurnProjection {
   }
 
   applyStreamEvent(turnId: string, event: TuiStreamEvent): string | undefined {
+    this.projectedEvents += 1;
+    const progressAt = Date.now();
+    if (progressAt - this.lastProgressLogAt >= 5_000 || event.type === 'message' || event.type === 'session-status') {
+      this.lastProgressLogAt = progressAt;
+      turnLog.info('turn-projection-progress', {
+        turnId, eventType: event.type, cursor: event.cursor, events: this.projectedEvents,
+      });
+    }
     if (event.type === 'heartbeat' || event.type === 'done' || event.type === 'resync-required') {
       return undefined;
     }
     if (event.type === 'messages-rewound') {
       this.removeTurn(event.turnId ?? turnId);
+      return undefined;
+    }
+    if (event.type === 'assistant-discarded') {
+      // Identity-scoped retraction of ONE rejected attempt: only its own
+      // transient cells go, never the turn, a legitimate preamble, or an
+      // identical-text answer with a different id.
+      this.liveProjection.discardAssistantMessage(event.turnId ?? turnId, event.messageId);
+      this.onChange();
       return undefined;
     }
     if (event.type === 'messages-replaced') {

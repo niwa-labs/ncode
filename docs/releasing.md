@@ -1,4 +1,6 @@
-# Releasing MiniMax Code
+# Releasing upstream MiniMax Code
+
+This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
 
 ## Tag-triggered CLI installation packages
 

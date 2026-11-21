@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalBashTool } from '@mavis/agent-tools/desktop';
-import { createLocalBashOperations } from '@earendil-works/pi-coding-agent/tools';
-import { getShellConfig } from '@earendil-works/pi-coding-agent/shell';
+// Port-mode (W01): the pin exposes only `.`/`./rpc-entry`; both symbols moved
+// to the package root.
+import { createLocalBashOperations, getShellConfig } from '@earendil-works/pi-coding-agent';
 import { createChildBashLifecycle } from '../../src/background-task/child-bash-lifecycle.js';
 import { LocalBackgroundTaskService } from '../../src/background-task/service.js';
 import {

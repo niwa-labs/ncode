@@ -1,4 +1,3 @@
-import { resolve } from 'node:path';
 import { Command, InvalidArgumentError } from 'commander';
 import type { MavisRegion } from '@mavis/config';
 import { TuiContributionRegistry } from '../contributions/index.js';
@@ -7,11 +6,14 @@ import {
   applyExecCliContract,
   applyExecReviewCliContract,
   applyInteractiveCliContract,
+  applyProfileCliOption,
   resolveInteractiveLaunchRequest,
   type RawTuiInteractiveOptions,
   type TuiInteractiveLaunchRequest,
 } from './contract.js';
 import type { McodeProviderCliRequest } from './provider-command.js';
+import type { McodeProfileCliRequest } from './profile-command.js';
+import type { McodeDaemonCliRequest } from './run-daemon-command.js';
 import {
   isModelProviderApiFormat,
   MCODE_PROVIDER_API_FORMATS,
@@ -47,13 +49,25 @@ export interface CreateTuiProgramOptions {
     commandOptions: RawTuiExecOptions,
     lane?: string,
   ) => Promise<void>;
-  runAcp?: (lane?: string, systemPromptOverrides?: SystemPromptOverrides) => Promise<void>;
-  runLogin: (region?: MavisRegion, openBrowser?: boolean, lane?: string) => Promise<void>;
-  runLogout: (region?: MavisRegion) => Promise<void>;
+  runAcp?: (
+    lane?: string,
+    systemPromptOverrides?: SystemPromptOverrides,
+    profile?: string,
+    noDaemon?: boolean,
+  ) => Promise<void>;
+  runLogin: (
+    region?: MavisRegion,
+    openBrowser?: boolean,
+    lane?: string,
+    profile?: string,
+  ) => Promise<void>;
+  runLogout: (region?: MavisRegion, profile?: string) => Promise<void>;
   runUpdate: () => Promise<void>;
   runProvider?: (request: McodeProviderCliRequest, lane?: string) => Promise<void>;
+  runProfile?: (request: McodeProfileCliRequest, lane?: string) => Promise<void>;
   runPlugin?: (request: McodePluginCliRequest, lane?: string) => Promise<void>;
   runTelemetry?: (action: McodeTelemetryCliAction) => Promise<void>;
+  runDaemon?: (request: McodeDaemonCliRequest) => Promise<void>;
   resolveLane?: typeof resolveTuiManagedBackendLane;
   allowStartupEnvironmentSelection?: boolean;
   commandContributions?: readonly TuiCliCommandContribution[];
@@ -73,6 +87,14 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     activeLane
       ? requirePluginRunner(options)(request, activeLane)
       : requirePluginRunner(options)(request);
+  const runDaemon = (request: McodeDaemonCliRequest) =>
+    (options.runDaemon ?? defaultRunDaemon)(request);
+  const runProfile = (request: McodeProfileCliRequest) =>
+    options.runProfile
+      ? activeLane
+        ? options.runProfile(request, activeLane)
+        : options.runProfile(request)
+      : defaultRunProfile(request);
   const program = applyInteractiveCliContract(
     new Command()
       .name('mcode')
@@ -95,10 +117,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .command('init')
     .description('Analyze the codebase and generate AGENTS.md with the Runtime init Skill')
     .argument('[directory]', 'project directory', '.')
-    // Session Project resolution only accepts absolute workspace paths, so the
-    // default '.' and any relative directory must be resolved at the CLI boundary.
     .action((directory: string) =>
-      options.launchTui(withLane({ initialPrompt: '/init', workspaceDir: resolve(directory) })),
+      options.launchTui(withLane({ initialPrompt: '/init', workspaceDir: directory })),
     );
 
   const exec = program.command('exec').description('Run one prompt without starting the TUI');
@@ -125,17 +145,31 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
   const acp = applySystemPromptCliOptions(
     program
       .command('acp')
-      .description('Run MiniMax Code as an Agent Client Protocol server over stdio'),
+      .description('Run MiniMax Code as an Agent Client Protocol server over stdio')
+      .option(
+        '--no-daemon',
+        'host the runtime in this process without the daemon (overrides MCODE_SERVER_MODE)',
+      ),
   )
     .allowExcessArguments(false)
-    .action((commandOptions: RawSystemPromptOptions, command: Command) => {
-      const runAcp = requireAcpRunner(options);
-      const systemPromptOverrides = resolveSystemPromptOverrides(
-        inheritSystemPromptOptions(command, commandOptions),
-      );
-      if (systemPromptOverrides) return runAcp(activeLane, systemPromptOverrides);
-      return activeLane ? runAcp(activeLane) : runAcp();
-    });
+    .action(
+      (
+        commandOptions: RawSystemPromptOptions & { profile?: string; daemon?: boolean },
+        command: Command,
+      ) => {
+        const runAcp = requireAcpRunner(options);
+        const systemPromptOverrides = resolveSystemPromptOverrides(
+          inheritSystemPromptOptions(command, commandOptions),
+        );
+        const profile = commandOptions.profile;
+        const noDaemon = commandOptions.daemon === false;
+        if (systemPromptOverrides)
+          return runAcp(activeLane, systemPromptOverrides, profile, noDaemon);
+        return activeLane
+          ? runAcp(activeLane, undefined, profile, noDaemon)
+          : runAcp(undefined, undefined, profile, noDaemon);
+      },
+    );
 
   acp
     .command('login')
@@ -143,10 +177,20 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .option('--region <region>', 'account region: cn or global', parseLoginRegion)
     .option('--no-browser', 'print the authorization URL without opening a browser')
     .allowExcessArguments(false)
-    .action((commandOptions: { region?: MavisRegion; browser?: boolean }) =>
+    .action((commandOptions: { region?: MavisRegion; browser?: boolean; profile?: string }) =>
       activeLane
-        ? options.runLogin(commandOptions.region, commandOptions.browser !== false, activeLane)
-        : options.runLogin(commandOptions.region, commandOptions.browser !== false),
+        ? options.runLogin(
+            commandOptions.region,
+            commandOptions.browser !== false,
+            activeLane,
+            commandOptions.profile,
+          )
+        : options.runLogin(
+            commandOptions.region,
+            commandOptions.browser !== false,
+            undefined,
+            commandOptions.profile,
+          ),
     );
 
   program
@@ -155,10 +199,20 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .option('--region <region>', 'account region: cn or global', parseLoginRegion)
     .option('--no-browser', 'print the authorization URL without opening a browser')
     .allowExcessArguments(false)
-    .action((commandOptions: { region?: MavisRegion; browser?: boolean }) =>
+    .action((commandOptions: { region?: MavisRegion; browser?: boolean; profile?: string }) =>
       activeLane
-        ? options.runLogin(commandOptions.region, commandOptions.browser !== false, activeLane)
-        : options.runLogin(commandOptions.region, commandOptions.browser !== false),
+        ? options.runLogin(
+            commandOptions.region,
+            commandOptions.browser !== false,
+            activeLane,
+            commandOptions.profile,
+          )
+        : options.runLogin(
+            commandOptions.region,
+            commandOptions.browser !== false,
+            undefined,
+            commandOptions.profile,
+          ),
     );
 
   program
@@ -166,7 +220,9 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .description('Sign out of the MiniMax account used by this CLI')
     .option('--region <region>', 'account region: cn or global', parseLoginRegion)
     .allowExcessArguments(false)
-    .action((commandOptions: { region?: MavisRegion }) => options.runLogout(commandOptions.region));
+    .action((commandOptions: { region?: MavisRegion; profile?: string }) =>
+      options.runLogout(commandOptions.region, commandOptions.profile),
+    );
 
   program
     .command('update')
@@ -366,6 +422,81 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       }),
     );
 
+  const profile = program.command('profile').description('Inspect and remove named auth profiles');
+
+  profile
+    .command('list')
+    .description('List profiles and their sign-in state')
+    .option('--json', 'print a JSON document')
+    .allowExcessArguments(false)
+    .action((commandOptions: { json?: boolean }) =>
+      runProfile({ action: 'list', json: commandOptions.json }),
+    );
+
+  profile
+    .command('current')
+    .description('Show the profile this invocation resolved to')
+    .allowExcessArguments(false)
+    .action(() => runProfile({ action: 'current' }));
+
+  profile
+    .command('remove')
+    .description('Delete a profile data directory')
+    .argument('<name>', 'profile name')
+    .option('--yes', 'confirm removal')
+    .allowExcessArguments(false)
+    .action((name: string, commandOptions: { yes?: boolean }) =>
+      runProfile({ action: 'remove', name, confirmed: Boolean(commandOptions.yes) }),
+    );
+
+  const daemon = program
+    .command('daemon')
+    .description('Run and manage the shared mcoded daemon (MCODE_SERVER_MODE)');
+
+  daemon
+    .command('run')
+    .description('Run the mcoded daemon in the foreground; refused while MCODE_SERVER_MODE=off')
+    .option('--data-dir <dir>', 'serve this data directory instead of the profile default')
+    .allowExcessArguments(false)
+    .action((commandOptions: { dataDir?: string }) =>
+      runDaemon({ action: 'run', dataDir: commandOptions.dataDir, profile: profileOf(daemon) }),
+    );
+
+  daemon
+    .command('status')
+    .description('Show the daemon state for this profile/data directory')
+    .option('--json', 'print a JSON document')
+    .allowExcessArguments(false)
+    .action((commandOptions: { json?: boolean }) =>
+      runDaemon({ action: 'status', json: commandOptions.json, profile: profileOf(daemon) }),
+    );
+
+  daemon
+    .command('stop')
+    .description('Gracefully stop the daemon for this profile/data directory')
+    .option('--force', 'stop even with active runs (they are killed)')
+    .allowExcessArguments(false)
+    .action((commandOptions: { force?: boolean }) =>
+      runDaemon({ action: 'stop', force: commandOptions.force, profile: profileOf(daemon) }),
+    );
+
+  daemon
+    .command('restart')
+    .description('Restart the daemon for this profile/data directory')
+    .option('--force', 'restart even with active runs (they are killed)')
+    .allowExcessArguments(false)
+    .action((commandOptions: { force?: boolean }) =>
+      runDaemon({ action: 'restart', force: commandOptions.force, profile: profileOf(daemon) }),
+    );
+
+  daemon
+    .command('recover')
+    .description(
+      'Remove the stale mcoded.lock / socket debris of a crashed daemon (a live holder is never touched)',
+    )
+    .allowExcessArguments(false)
+    .action(() => runDaemon({ action: 'recover', profile: profileOf(daemon) }));
+
   const contributionRegistry = new TuiContributionRegistry<TuiCliCommandContribution>();
   contributionRegistry.registerAll(options.commandContributions ?? []);
   for (const contribution of contributionRegistry.freeze()) {
@@ -375,7 +506,31 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     contribution.register(program, options);
   }
 
+  applyProfileOptionToEveryCommand(program);
+
   return program;
+}
+
+/**
+ * Give every command its own `--profile` option.
+ *
+ * Commander does not inherit parent options, and the root program runs with
+ * `enablePositionalOptions()`, so `mcode exec --profile work` fails with an
+ * unknown-option error unless `exec` declares the flag itself. Walking the
+ * finished tree keeps that from being a per-command chore and covers contributed
+ * commands too. The root already carries the option from
+ * `applyInteractiveCliContract`, hence the guard.
+ */
+function profileOf(command: Command): string | undefined {
+  return command.opts<{ profile?: string }>().profile;
+}
+
+function applyProfileOptionToEveryCommand(command: Command): void {
+  const declared = command.options.some((option) => option.attributeName() === 'profile');
+  if (!declared) applyProfileCliOption(command);
+  for (const child of command.commands) {
+    applyProfileOptionToEveryCommand(child);
+  }
 }
 
 function resolveExecReviewOptions(exec: Command, review: Command): RawTuiExecOptions {
@@ -450,6 +605,21 @@ function requireAcpRunner(options: CreateTuiProgramOptions) {
 function requireTelemetryRunner(options: CreateTuiProgramOptions) {
   if (!options.runTelemetry) throw new Error('Telemetry inspection is unavailable.');
   return options.runTelemetry;
+}
+
+/**
+ * Used until the composition root in `main.ts` injects `runProfile`, which also
+ * routes the output through its own process stream.
+ */
+async function defaultRunProfile(request: McodeProfileCliRequest): Promise<void> {
+  const { runMcodeProfileCommand } = await import('./profile-command.js');
+  process.stdout.write(`${await runMcodeProfileCommand({ request })}\n`);
+}
+
+/** Lazy on purpose: `run-daemon-command.ts` pulls in the runtime host stack. */
+async function defaultRunDaemon(request: McodeDaemonCliRequest): Promise<void> {
+  const { runMcodeDaemonCommand } = await import('./run-daemon-command.js');
+  process.stdout.write(`${await runMcodeDaemonCommand({ request })}\n`);
 }
 
 function parsePositiveSafeInteger(value: string): number {

@@ -51,7 +51,6 @@ import {
   createApplicationFactPorts,
   createCommittedModelProviderSessionPort,
 } from './fact-ports.js';
-import { createSessionToolCallModePolicy } from './session-tool-call-mode-policy.js';
 import { ModelProviderApplication } from './model-provider-application.js';
 import { createRuntimeCompactionFactSink } from './runtime-compaction-facts.js';
 import { describeError } from './turn-message-delivery.js';
@@ -99,6 +98,8 @@ export interface RuntimeSessionCompositionInput {
   readonly globalInstructions: GlobalInstructions;
   readonly publishGlobalEvent: (event: GlobalEventInput) => void;
   readonly nowMs: () => number;
+  /** Ш1: the runtime's single durable-history storage; present only in durable mode. */
+  readonly durableHistory?: Parameters<typeof initializeSessionSystem>[0]['durableHistory'];
 }
 
 export function createProductionSessionComposition(
@@ -139,7 +140,11 @@ export function createProductionSessionComposition(
     ...(tuiProductPolicy ? { implicitCustomProviderThinking: true } : {}),
   });
   input.agentService.bindBuiltinModelGroupResolver(async ({ previous, bundled }) =>
-    resolveBuiltinAgentModelGroup({ config: input.modelConfig.read(), previous, bundled }),
+    resolveBuiltinAgentModelGroup({
+      config: input.modelConfig.read(),
+      previous,
+      bundled,
+    }),
   );
   bindAgentConfigModelPorts({
     agentService: input.agentService,
@@ -170,7 +175,6 @@ export function createProductionSessionComposition(
         sessionSystem.repositories.sessions.getSessionAgentDefinition(sessionId),
     }),
     resolveRequestedModel: (model) => resolveRequestedSessionModel(input.modelConfig.read(), model),
-    toolCallMode: createSessionToolCallModePolicy(input.modelConfig.read, input.logger),
     backfillDiagnostics: createSessionBackfillDiagnostics({
       logger: input.logger,
       reportFailure: product.executor.reportFailure,
@@ -231,6 +235,15 @@ export function createProductionSessionComposition(
     },
     nowMs: input.nowMs,
     runtimeOwnerIdentity: input.runtimeOwnerIdentity,
+    // W1 §3.4 (review round 1): a publisher foreign-rewrite conflict must not
+    // stay silent at the log level — project it onto the product event stream
+    // as a `session.publish_conflict` banner-class warning.
+    onSessionPublishConflict: (conflict) =>
+      input.publishGlobalEvent({
+        type: 'session.publish_conflict',
+        payload: { schemaVersion: 1, ...conflict },
+      }),
+    ...(input.durableHistory ? { durableHistory: input.durableHistory } : {}),
   });
   executionSessionSystem = sessionSystem;
   const pinService = createRuntimePinService(input, sessionSystem);

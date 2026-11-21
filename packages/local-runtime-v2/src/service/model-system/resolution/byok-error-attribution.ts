@@ -1,10 +1,11 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry.
 import {
   streamSimple,
   type AssistantMessage,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import { classifyLLMErrorToCode, LLM_ERROR_CODES } from '@mavis/shared/llm-error-classifier';
 
 const BYOK_ERROR_PREFIX = 'BYOK upstream error';
@@ -31,7 +32,7 @@ function formatByokErrorMessage(raw: unknown, providerId: string): string {
   if (rawMessage.startsWith(BYOK_ERROR_PREFIX)) return rawMessage;
   const classified = classifyLLMErrorToCode(raw);
   const detail = redactByokErrorMessage(
-    withHttpStatus(classified?.message ?? rawMessage, rawMessage) || 'LLM provider request failed',
+    (classified?.message ?? rawMessage) || 'LLM provider request failed',
   );
   return `${BYOK_ERROR_PREFIX}: ${JSON.stringify({
     errorCode: classified?.status_code ?? LLM_ERROR_CODES.LLM_UPSTREAM_ERROR,
@@ -40,16 +41,6 @@ function formatByokErrorMessage(raw: unknown, providerId: string): string {
     errorDetail: detail,
     errorProviderId: providerId,
   })}`;
-}
-
-/**
- * A JSON error body reduces to its inner `message`, which drops the HTTP status
- * (`413 {"type":"error",…}` becomes the bare sentence). Request-size recovery and
- * retry classification read this text and recognize the status, so keep it.
- */
-function withHttpStatus(detail: string, rawMessage: string): string {
-  const status = /^([1-5]\d\d) /u.exec(rawMessage)?.[1];
-  return status && detail && !detail.startsWith(`${status} `) ? `${status} ${detail}` : detail;
 }
 
 function redactByokErrorMessage(message: string): string {

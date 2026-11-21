@@ -1,4 +1,6 @@
-# Publication scope
+# Upstream publication scope
+
+This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
 
 This repository publishes the reviewed MiniMax Code TUI, headless CLI, and ACP source listed in `release/public-source.json`. First-party code defaults to MIT. Third-party and file-level declarations continue to apply to their own material, including Apache-2.0 for `third_party/sandbox-runtime` and the retained notices for Pi and bundled skills.
 

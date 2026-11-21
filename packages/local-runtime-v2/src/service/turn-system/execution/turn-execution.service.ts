@@ -12,7 +12,6 @@ import type {
   AbortTurnResult,
   InitializeTurnSystemOptions,
   UserStopAcceptance,
-  UserStopBoundarySource,
   UserStopCascadePort,
   UserStopCascadeRun,
   ActivateTurnResult,
@@ -56,6 +55,11 @@ export interface TurnExecutionServiceOptions {
    * embeddings and tests stay silent; only the user-stop skip path uses it.
    */
   readonly logger?: Pick<NonNullable<InitializeTurnSystemOptions['logger']>, 'info'>;
+  /**
+   * §2.3: locks the Session's permission mode at the first accepted Turn.
+   * Optional so embeddings and tests stay on today's behavior.
+   */
+  readonly sessionPermissionModes?: { lock(sessionId: string): void };
 }
 
 /** Durable admission, in-process ownership, and AgentHost execution only. */
@@ -66,6 +70,55 @@ export function createTurnExecutionService(
   const makeTurnId = options.makeTurnId ?? (() => `turn_${randomUUID()}`);
   const pending = new PendingSubmissions();
   const context = { options, nowMs, makeTurnId, pending };
+  // Wave-0 item 0.6 (owner decision: /compact при непустой очереди — FIFO):
+  // a manual compaction that the queue fence blocks stands at the BACK of the
+  // queue instead of 409ing — one pending compaction per session, re-run on
+  // every session release until the fence lets it through.
+  const deferredCompactions = new Map<string, Parameters<TurnExecutionService['requestCompaction']>[0]>();
+
+  async function runDeferredCompactions(sessionId: string): Promise<void> {
+    const input = deferredCompactions.get(sessionId);
+    if (input === undefined) return;
+    const result = await options.operations.tryRun(sessionId, () =>
+      beginCompaction(options, input, nowMs, makeTurnId),
+    );
+    if (!result.entered) return; // session deleting: drop the pending compaction
+    const handoff = result.value;
+    if (!handoff.accepted) {
+      if (
+        handoff.reason === 'priority-blocked' ||
+        handoff.reason === 'compaction-active' ||
+        handoff.reason === 'active-turn'
+      ) {
+        return; // Still behind the queue (or a newer turn/compaction): stay pending.
+      }
+      deferredCompactions.delete(sessionId);
+      return;
+    }
+    deferredCompactions.delete(sessionId);
+    try {
+      const outcome = await handoff.run();
+      options.logger?.info(
+        {
+          event: 'context_compaction_deferred_completed',
+          session_id: sessionId,
+          turn_id: handoff.turnId,
+          status: outcome.status,
+        },
+        'A queue-deferred manual compaction completed.',
+      );
+    } catch (error) {
+      options.logger?.info(
+        {
+          event: 'context_compaction_deferred_failed',
+          session_id: sessionId,
+          turn_id: handoff.turnId,
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'A queue-deferred manual compaction failed.',
+      );
+    }
+  }
 
   return {
     submit: async (input) => {
@@ -87,13 +140,40 @@ export function createTurnExecutionService(
       );
       if (!result.entered) return { accepted: false, reason: 'session-deleting' };
       const handoff = result.value;
-      if (!handoff.accepted) return handoff;
+      if (!handoff.accepted) {
+        // Wave-0 item 0.6 + wave-3 item 3.4 (canon 05 §2.3: «Ручной /compact
+        // — контрольный элемент inbox»): the queue fence (an older queued
+        // item, a queue pause), a live compaction lease, or a LIVE TURN no
+        // longer rejects the owner's /compact with a hard 409 — it stands at
+        // the BACK of the inbox FIFO and runs when the session releases,
+        // after every queued message has been delivered (each release
+        // re-runs it; the fence keeps it pending until the queue drains).
+        if (
+          handoff.reason === 'priority-blocked' ||
+          handoff.reason === 'compaction-active' ||
+          handoff.reason === 'active-turn'
+        ) {
+          deferredCompactions.set(input.sessionId, input);
+          options.logger?.info(
+            {
+              event: 'context_compaction_deferred',
+              session_id: input.sessionId,
+              reason: handoff.reason,
+            },
+            'A manual compaction was deferred behind the queue (FIFO).',
+          );
+          return { accepted: false, reason: 'queue-deferred' };
+        }
+        return handoff;
+      }
+      deferredCompactions.delete(input.sessionId);
       return {
         accepted: true,
         turnId: handoff.turnId,
         outcome: await handoff.run(),
       };
     },
+    runDeferredCompactions,
     steerActiveTurn: async (input) => {
       const result = await options.operations.tryRun(input.sessionId, () =>
         options.controller.steerActiveTurn(input),
@@ -110,17 +190,15 @@ export function createTurnExecutionService(
       // background work of the newer Turn the user is actually looking at.
       const targetsCurrentTurn = !input.turnId || !activeTurnId || input.turnId === activeTurnId;
       if (targetsCurrentTurn) pending.stop(input);
-      // From the identity read through controller.abort there must be no await: a
-      // user stop acts on the Turn running when it arrives. The cascade opens its
-      // delivery window synchronously; Session scope resolution stays in its handle.
-      // The Goal is NOT paused here: only an accepted stop may do that (controller
-      // `onAccepted`, or `not-running`).
+      // Open the suppression window BEFORE aborting, so a task driven terminal by
+      // the abort cannot slip a delivery through. The Goal is NOT paused here: only
+      // an accepted stop may do that (controller `onAccepted`, or `not-running`).
       const cascade = targetsCurrentTurn
-        ? beginUserStopCascade(options, input)
+        ? await beginUserStopCascade(options, input)
         : skipStaleUserStopCascade(options, input, activeTurnId);
       let result: AbortTurnResult;
       try {
-        result = await options.controller.abort(withUserStopAcceptance(options, input, cascade));
+        result = await options.controller.abort(withUserStopAcceptance(input, cascade));
       } catch (error) {
         // `begin` already opened the Session's delivery window. Without a result
         // there is no cascade to run, but the window must still be released —
@@ -140,19 +218,9 @@ export function createTurnExecutionService(
       }
       if (result.status === 'not-running') {
         // Nothing was running, so the controller had no identity to check and
-        // never ran `onAccepted` — the stop is accepted as is. The boundary is
-        // fixed first: pausing the Goal awaits storage, and this path holds no
-        // Session lock, so a new Turn can start and spawn work meanwhile. The
-        // Goal must still be paused BEFORE the cascade stops tasks: a terminal
-        // task wakes the queue, and a live Goal would otherwise start a new Turn.
-        markUserStopBoundary(options, input, cascade, 'not_running');
-        if (cascade && (await isOwnedByOtherRuntime(options, input.sessionId))) {
-          // Not running here because another live Runtime runs it, and only that
-          // Runtime can stop it. Pausing its Goal or sweeping its work from here
-          // would act on a Turn this stop never reached (IM `/stop` lands here).
-          releaseUserStopCascade(cascade, 'owned_by_other_runtime');
-          return result;
-        }
+        // never ran `onAccepted` — the stop is accepted as is. The Goal must be
+        // paused here, BEFORE the cascade stops tasks: a terminal task wakes the
+        // queue, and a live Goal would otherwise start a new Turn on its own.
         await acceptUserStopCascade(cascade, 'not_running');
       }
       // Detached on purpose: the cascade is a follow-up action and the stop
@@ -180,14 +248,14 @@ interface TurnExecutionContext {
  * cascade: it pauses the old Session's Goal and Queue exactly like today, but
  * leaving a conversation must not kill the background build still running in it.
  */
-function beginUserStopCascade(
+async function beginUserStopCascade(
   options: TurnExecutionServiceOptions,
   input: AbortTurnInput,
-): UserStopCascadeRun | undefined {
+): Promise<UserStopCascadeRun | undefined> {
   if (!options.userStop) return undefined;
   if (normalizeAbortSource(input.reason) !== 'user_stop') return undefined;
   try {
-    return options.userStop.begin(input.sessionId);
+    return await options.userStop.begin(input.sessionId);
   } catch {
     // The stop itself is authoritative and must succeed even if the cascade
     // cannot start; this degrades to today's behaviour (no cascade).
@@ -230,15 +298,8 @@ function skipStaleUserStopCascade(
  * `onAccepted` (ConversationApplication's Goal pause) runs first and unchanged;
  * the cascade's pause is idempotent, so the overlap is harmless, and paths that
  * pass no `onAccepted` at all (IM `/stop`) now pause the Goal too.
- *
- * The cascade's target boundary is fixed from `onReleased`, at the stopped
- * Turn's release. The abort itself returns only after `onAccepted` (a Goal
- * pause that writes to storage), and the Turn may release — letting the next
- * Turn in — long before that; a boundary taken when the abort returns would
- * sweep that next Turn's background work into this stop.
  */
 function withUserStopAcceptance(
-  options: TurnExecutionServiceOptions,
   input: AbortTurnInput,
   cascade: UserStopCascadeRun | undefined,
 ): AbortTurnInput {
@@ -248,10 +309,6 @@ function withUserStopAcceptance(
     onAccepted: async () => {
       await input.onAccepted?.();
       await acceptUserStopCascade(cascade, 'controller_accepted');
-    },
-    onReleased: () => {
-      markUserStopBoundary(options, input, cascade, 'released');
-      input.onReleased?.();
     },
   };
 }
@@ -269,36 +326,6 @@ async function acceptUserStopCascade(
 }
 
 /**
- * The port contract says `markBoundary` never throws; guard anyway, because it
- * also runs inside the controller's release of the stopped Turn. Without a mark
- * the cascade takes its boundary at `complete`, i.e. the behaviour before marks.
- */
-function markUserStopBoundary(
-  options: TurnExecutionServiceOptions,
-  input: AbortTurnInput,
-  cascade: UserStopCascadeRun | undefined,
-  source: UserStopBoundarySource,
-): void {
-  try {
-    cascade?.markBoundary(source);
-  } catch (error) {
-    try {
-      options.logger?.info(
-        {
-          event: 'user_stop_cascade_mark_boundary_failed',
-          session_id: input.sessionId,
-          boundary_source: source,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'User stop could not fix its cascade boundary; the cascade takes it at completion',
-      );
-    } catch {
-      // Diagnostics must never change the outcome of a stop.
-    }
-  }
-}
-
-/**
  * Releases a cascade whose abort failed. The port contract says `cancel` never
  * throws; guarding anyway keeps a contract violation from replacing the abort's
  * own error, which the caller rethrows unchanged. The implementation logs.
@@ -308,18 +335,6 @@ function releaseUserStopCascade(cascade: UserStopCascadeRun | undefined, reason:
     cascade?.cancel(reason);
   } catch {
     // Swallowed on purpose: the original abort failure is what must surface.
-  }
-}
-
-/** A read failure keeps today's behaviour: the stop is treated as local. */
-async function isOwnedByOtherRuntime(
-  options: TurnExecutionServiceOptions,
-  sessionId: string,
-): Promise<boolean> {
-  try {
-    return (await options.repository.findActiveTurn(sessionId))?.ownedByOtherRuntime === true;
-  } catch {
-    return false;
   }
 }
 
@@ -372,12 +387,6 @@ class StoppedBeforeRegistrationError extends DOMException {
   constructor() {
     super('Turn stopped before execution', 'AbortError');
   }
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
-  );
 }
 
 /** Only submissions enrolled before the abort observe it, so the next request still starts. */
@@ -697,10 +706,6 @@ async function rollbackAcceptedSubmission(
 ): Promise<ActivateTurnResult> {
   const { input, turnId, admitted, preparation } = accepted;
   const failure = await compensateStartedPreparation(preparation, error);
-  // A pre-delivery hook throws AbortError to withdraw a delivery that a user stop
-  // caught in flight. That is cancellation, not a failed Turn: project it as
-  // aborted just like a stop before registration, never as a Session error.
-  const status = isAbortError(failure) ? 'aborted' : undefined;
   let revoked = false;
   try {
     revoked = await options.repository.revokeAdmission({
@@ -745,11 +750,9 @@ async function startAcceptedTurn(
   };
   try {
     if (submission.stopped) throw new StoppedBeforeRegistrationError();
-    // A synchronous hook is not awaited, so its decision, the stopped check below
-    // and controller.register run in one synchronous step. A stop cannot land
-    // between final admission and this Turn becoming visible to activeTurnId.
-    const accepting = acceptActivatedDelivery(input, turnId);
-    if (accepting) await accepting;
+    if (!isQueueSubmission(input)) {
+      await input.preDelivery?.accept({ mode: 'activated', turnId });
+    }
     if (submission.stopped) throw new StoppedBeforeRegistrationError();
   } catch (error) {
     return rollbackAcceptedSubmission(options, accepted, error);
@@ -768,6 +771,10 @@ async function startAcceptedTurn(
     };
   }
   try {
+    // §2.3: the first accepted Turn fixes the Session's permission mode —
+    // BEFORE the Turn starts, and only on this accepted path (an admission
+    // rejection must not lock anything).
+    options.sessionPermissionModes?.lock(input.sessionId);
     const started = await options.coordinator.startTurn({
       turn,
       request: hostRequest(input),
@@ -789,15 +796,6 @@ async function startAcceptedTurn(
       completion: failed.completion,
     };
   }
-}
-
-function acceptActivatedDelivery(
-  input: TurnExecutionSubmission,
-  turnId: string,
-): Promise<void> | undefined {
-  if (isQueueSubmission(input)) return undefined;
-  const accepting = input.preDelivery?.accept({ mode: 'activated', turnId });
-  return accepting === undefined ? undefined : accepting;
 }
 
 async function compensateStartedPreparation(
@@ -916,9 +914,6 @@ function admissionInput(
     priority: directAdmissionPriority(input, values.candidateCreatedAtMs),
     ...(input.resume ? { userInputResume: input.resume } : {}),
     ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
-    ...(input.clientRequestId && input.receiptAliases?.length
-      ? { receiptAliases: input.receiptAliases }
-      : {}),
   };
 }
 
@@ -1125,7 +1120,11 @@ function rejection(input: Exclude<AdmitTurnResult, { readonly status: 'accepted'
   if (input.status === 'duplicate') {
     return { accepted: false as const, reason: 'duplicate' as const, turnId: input.turnId };
   }
-  return { accepted: false as const, reason: input.reason };
+  return {
+    accepted: false as const,
+    reason: input.reason,
+    ...(input.activeTurnId !== undefined ? { activeTurnId: input.activeTurnId } : {}),
+  };
 }
 
 function metadata(input: AgentHostUserInput) {

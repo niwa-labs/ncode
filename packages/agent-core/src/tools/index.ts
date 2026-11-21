@@ -18,8 +18,6 @@
  */
 
 export type {
-  ProgrammaticToolCompleteness,
-  ProgrammaticToolResult,
   ToolDefinition,
   ToolImpl,
   ToolResult,
@@ -42,44 +40,10 @@ export {
   recordImageEncodedContent,
   withProgrammaticResult,
 } from './programmatic.js';
-export {
-  createPtcToolFactCollector,
-  PTC_DEFAULT_WALL_CLOCK_MS,
-  PTC_MAX_WALL_CLOCK_MS,
-  readPtcChildExecutionDetails,
-  readPtcExecutionDetails,
-  readPtcToolCallRecords,
-  resolvePtcWallClock,
-  type PtcChildCallStatus,
-  type PtcChildDeadline,
-  type PtcChildTimeoutDecision,
-  type PtcChildExecutionDetails,
-  type PtcExecutionDetails,
-  type PtcRetainedFact,
-  type PtcToolCallRecord,
-  type PtcToolExecutionBatch,
-  type PtcToolExecutionError,
-  type PtcToolExecutionOutcome,
-  type PtcToolExecutionRequest,
-  type PtcToolExecutor,
-  type PtcToolFactCollector,
-  type PtcToolResultProjection,
-  type PtcToolResultProjectionInput,
-  type PtcToolSource,
-  type PtcWallClock,
-  type PtcWallClockSource,
-} from './ptc.js';
-export {
-  TURN_TERMINATING_TOOL_RESULT_DETAIL,
-  isTurnTerminatingToolResultDetails,
-} from './turn-termination.js';
 export { defineRuntimeTool, type RuntimeToolDeclaration } from './define.js';
 export { bindTool, toRuntimeTool } from './bind.js';
 export { prepareEditArguments, type PreparedEditArguments } from './edit-prepare-arguments.js';
-export {
-  coerceRuntimeToolInput,
-  isRuntimeToolInputValid,
-} from './input-validation.js';
+export { coerceRuntimeToolInput, isRuntimeToolInputValid } from './input-validation.js';
 export {
   ReadToolDef,
   WriteToolDef,

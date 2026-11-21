@@ -51,9 +51,15 @@ export function resolveMcodeAuthEnvironment(
   const buildIdentity = resolveMcodeBuildIdentity(options);
 
   return {
-    region: options.runtimeRegion ?? 'cn',
+    // Single region resolution point: explicit option, then the MAVIS_REGION
+    // the startup resolver computed, then the managed-account default `cn`.
+    region: options.runtimeRegion ?? readRuntimeRegion(process.env.MAVIS_REGION) ?? 'cn',
     buildEnv: startupBuildEnvironment ?? buildIdentity.buildEnv ?? 'test',
   };
+}
+
+export function readRuntimeRegion(value: string | undefined): MavisRegion | undefined {
+  return value === 'cn' || value === 'en' ? value : undefined;
 }
 
 export function resolveMcodeDataEnvironment(

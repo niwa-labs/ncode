@@ -69,7 +69,7 @@ interface V1GeneratedAssetRegistration {
   readonly bytes: number;
 }
 
-/** Temporary neutral local asset bridge; it contains no product policy. */
+/** Temporary neutral local asset/codec bridge; it contains no product policy. */
 export interface V1GeneratedAssetInfrastructure {
   readonly registerGeneratedAsset: (
     input: V1GeneratedAssetRegistrationInput,
@@ -193,7 +193,6 @@ export function createV1AgentHostProductCapabilities(
       },
     },
     permission: hosted.permissions,
-    sessionAssets: { listSessionReadablePaths: hosted.attachments.listSessionReadablePaths },
     terminalMemory: hosted.terminalMemory,
     runner: {
       contextUsage: hosted.contextUsage,

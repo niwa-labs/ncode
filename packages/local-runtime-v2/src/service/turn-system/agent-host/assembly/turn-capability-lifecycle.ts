@@ -42,6 +42,9 @@ export interface AgentHostTurnHostBinding {
  */
 export interface AgentHostTurnPluginAgent {
   /** Task target `<plugin>:<agent>`. */
+  readonly name: string;
+  readonly sourceKind: 'official' | 'local';
+  /** Task target `<plugin>:<agent>`. */
   readonly scopedName: string;
   readonly pluginName: string;
   readonly agentName: string;

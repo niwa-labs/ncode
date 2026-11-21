@@ -15,16 +15,13 @@ export interface LocalPermissionRequestInput {
    * so the Global Event / GET /permission/requests payload keeps v1 wire shape.
    */
   toolDescription?: string;
-  /** PTC parent metadata for modern Desktop permission presentation. */
-  parentToolCallId?: string;
-  parentToolDescription?: string;
-  /** A user denial stops this PTC program only. */
-  stopPtcOnDeny?: boolean;
   ruleContents: string[];
   /** Structured matchers aligned 1:1 with ruleContents for v2 persistence. */
   ruleMatchers?: readonly PermissionRuleMatcher[];
   persistWholeToolRuleOnReply?: boolean;
   reason: string;
+  /** Bypass-immune ask: one-time allow/deny only, no persisted rule offer. */
+  bypassImmune?: boolean;
   /** Exact IM conversation that initiated the hosted Turn, when applicable. */
   origin?: ChannelPermissionOrigin;
 }
@@ -42,7 +39,6 @@ export function findPendingLocalPermissionRequest(
       item.sessionId === input.sessionId &&
       item.toolName === input.toolName &&
       item.agentName === input.agentName &&
-      item.parentToolCallId === input.parentToolCallId &&
       localPermissionRuleContentsFingerprint(item.ruleContents, item.ruleMatchers) === fingerprint
     ) {
       return item;

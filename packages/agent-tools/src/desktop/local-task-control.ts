@@ -15,7 +15,6 @@ import type {
   LocalTaskOutputReadResult,
 } from './types.js';
 import { formatBashExecutionOutcome, readBashExecutionOutcome } from './local-bash-result.js';
-import { withDesktopCompletenessReport } from './ptc-result-projection.js';
 
 const MAX_TASK_OUTPUT_WAIT_MS = 30_000;
 
@@ -102,11 +101,15 @@ export class LocalTaskOutputTool implements ToolImpl<
       signal?.aborted || !waitMsClamped || read.timedOut !== true
         ? ''
         : '<task_output_hint>Your requested wait_ms exceeded 30000 ms and was capped at 30000 ms (30 seconds). This output read reached its wait limit; the background task was not stopped. Use wait_ms=30000 or less for future reads.</task_output_hint>\n';
+    const releasedHint =
+      read.releasedFromOwnerInput !== true
+        ? ''
+        : '<task_output_hint>The user sent a new message while this read was waiting, so the wait returned early with the output so far. The task keeps running in the background; do not re-issue a waiting read — its completion notice will arrive automatically with the full output. Respond to the user\'s latest message now.</task_output_hint>\n';
     const hint = signal?.aborted ? '' : this.pollingHint(ctx, input.task_id, { ...read, status });
     const outcome = execution
       ? `<bash_status>${formatBashExecutionOutcome(execution)}</bash_status>\n`
       : '';
-    const text = `<task_output status="${status}">\n${receipt}${waitLimitHint}${persistenceHint}${hint}${outcome}${body}\n</task_output>`;
+    const text = `<task_output status="${status}">\n${receipt}${waitLimitHint}${releasedHint}${persistenceHint}${hint}${outcome}${body}\n</task_output>`;
     const result = ok(LocalTaskOutputToolDef.name, text, {
       task_id: input.task_id,
       status,
@@ -117,6 +120,7 @@ export class LocalTaskOutputTool implements ToolImpl<
         snapshot.metadata?.timing,
       effective_wait_ms: effectiveWaitMs,
       wait_ms_clamped: waitMsClamped,
+      ...(read.releasedFromOwnerInput === true ? { released: 'owner_input' } : {}),
       ...(read.timedOut === undefined ? {} : { timed_out: read.timedOut }),
       ...(read.nextOffset === undefined ? {} : { next_offset: read.nextOffset }),
       ...(read.truncated === undefined ? {} : { truncated: read.truncated }),
@@ -243,14 +247,8 @@ function executionMode(task: BackgroundTask): string | undefined {
   return typeof mode === 'string' && mode ? mode : undefined;
 }
 
-/** Successful task-control results also state their completeness for PTC (side channel only). */
 function ok(toolName: string, text: string, details: Record<string, unknown>): ToolResult {
-  return withDesktopCompletenessReport(toolName, {
-    tool_name: toolName,
-    text,
-    content: [{ type: 'text', text }],
-    details,
-  });
+  return { tool_name: toolName, text, content: [{ type: 'text', text }], details };
 }
 
 function notFound(

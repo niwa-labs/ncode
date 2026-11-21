@@ -1,7 +1,6 @@
 import type { LocalSandboxBashExecutionPort } from '@mavis/agent-tools/desktop';
 import type { RuntimeConversation } from '@mavis/conversation-contract';
 import type { PromptSnapshotSource } from '@mavis/agent-core';
-import type { PromptSuggestionRemotePolicy } from '@mavis/config';
 
 import type { AgentReferenceResolver } from '../agent/port.js';
 import type { LocalAgentRuntimePort } from '../agent/runtime-port.js';
@@ -31,6 +30,13 @@ export interface LocalRuntimeProductHostOptions {
   readonly reviewPromptDir?: string;
   dataDir: string;
   runtimeOwnerKind: 'electron' | 'cli' | 'tui' | string;
+  /**
+   * Owner decision 2026-11-18 (per-session durable history): this host owns
+   * the shared SYSTEM log (scheduling, delegation steering, orchestration
+   * bridges) — the mcoded daemon sets it. Embedded hosts (off-mode
+   * TUI/exec/ACP) omit it: their durable writes land in per-session files.
+   */
+  readonly ownsSystemLog?: boolean;
   /** Client capability ceiling. Omitted hosts retain the shared Desktop/legacy surface. */
   capabilityProfile?: 'cli';
   /**
@@ -78,14 +84,20 @@ export interface LocalRuntimeProductHostOptions {
     rejectedAccessToken?: string,
     loginEpoch?: string,
   ) => void | Promise<void>;
+  /**
+   * Profile label the owning daemon pinned for this host's data plane
+   * (`null` = the default profile; opus 2026-11-01, правка 5). Reported
+   * verbatim in `getProcessLocalAccountStatus` so the thin client can show
+   * which profile/store the daemon serves. Absent = the embedder did not
+   * pin one and the field stays out of the status response.
+   */
+  daemonProfile?: string | null;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   isContextWindowUsageEnabled?: () => boolean;
   fetchImpl?: typeof fetch;
   /** Optional fail-open eval capture transport supplied by packaged Electron builds. */
   evalCapture?: LocalEvalReporterFactoryOptions;
   configUpdater?: (body: Record<string, unknown>) => Promise<LocalConfigUpdateResult>;
-  /** Live remote policy whose default fills `promptSuggestion.enabled` when the user has not chosen. */
-  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
   hostDiagnosticsProvider?: LocalHostDiagnosticsProvider;
   skillRegistryDiagnostics?: LocalRuntimeApiHostOptions['skillRegistryDiagnostics'];
   skillEnabledState?: LocalRuntimeApiHostOptions['skillEnabledState'];

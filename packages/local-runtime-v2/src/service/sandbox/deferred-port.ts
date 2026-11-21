@@ -1,11 +1,12 @@
-import {
-  createLocalBashOperations,
-  type BashOperations,
-} from '@earendil-works/pi-coding-agent/tools';
-import type {
-  LocalBashEnvPolicySource,
-  LocalSandboxBashOperationsFactory,
-} from '@mavis/agent-tools/desktop';
+// Port-mode (W01): the pin's coding-agent export map exposes only `.` and
+// `./rpc-entry`; createLocalBashOperations/BashOperations moved to the package
+// root. The `parentDeathGuard` option came from our vendored 0.79 patch
+// (ledger §5.1 family `parent-death-guard`); the pin removed it, and W01-C
+// reapply restores the guard. Until then native operations run unguarded,
+// as upstream does.
+import { createLocalBashOperations, type BashOperations } from '@earendil-works/pi-coding-agent';
+import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
+import type { LocalSandboxBashOperationsFactory } from '@mavis/agent-tools/desktop';
 
 import { initializeLocalBackgroundBashExecutor } from '../background-bash/index.js';
 import type { DeferredLocalSandboxBashOperationsFactory } from './contracts.js';
@@ -25,7 +26,7 @@ import type { SandboxInvocationOutcome } from './observability/contracts.js';
 export function createDeferredLocalSandboxBashOperationsFactory(
   desiredEnabled: () => boolean,
   /** Carries the runtime's PATH shims into background bash; see ensureRmShim. */
-  envPolicy: LocalBashEnvPolicySource,
+  envPolicy: BashEnvPolicy,
 ): DeferredLocalSandboxBashOperationsFactory {
   let current: LocalSandboxBashOperationsFactory | undefined;
   const fallback = createUnavailableSandboxBashOperationsFactory(desiredEnabled);
@@ -54,9 +55,7 @@ function createUnavailableSandboxBashOperationsFactory(
           'Sandbox Bash operations are unavailable',
         );
       }
-      const nativeOperations = createLocalBashOperations({
-        parentDeathGuard: input.identity.operationClass !== 'direct_foreground',
-      });
+      const nativeOperations = createLocalBashOperations();
       // Unbound and disabled still has to report admission, or a background
       // task started through this fallback would stay `queued` forever.
       return {
@@ -76,9 +75,7 @@ export function createSandboxBashOperationsFactory(
 ): LocalSandboxBashOperationsFactory {
   return {
     create: (input) => {
-      const nativeOperations = createLocalBashOperations({
-        parentDeathGuard: input.identity.operationClass !== 'direct_foreground',
-      });
+      const nativeOperations = createLocalBashOperations();
       return {
         separatesOutputStreams: nativeOperations.separatesOutputStreams,
         exec: async (command, cwd, options) => {

@@ -1270,7 +1270,6 @@ function fakeManager(): SrtMacosManagerPort {
 interface ProbeFixture {
   readonly root: string;
   readonly workspace: string;
-  readonly home: string;
   readonly gitDir: string;
   readonly outside: string;
   readonly dataDir: string;
@@ -1299,8 +1298,7 @@ function createProbeFixture(): ProbeFixture {
   const dataDir = join(root, "runtime-data");
   const sandboxTempRoot = join(root, "sandbox-temp");
   const sessionTemp = join(sandboxTempRoot, "session-current");
-  const home = join(root, "home");
-  const trash = join(home, ".Trash");
+  const trash = join(root, "trash");
   const unrelatedCwd = join(root, "unrelated-cwd");
   for (const directory of [
     join(gitDir, "hooks"),
@@ -1315,7 +1313,6 @@ function createProbeFixture(): ProbeFixture {
   return {
     root,
     workspace,
-    home,
     gitDir,
     outside,
     dataDir,
@@ -1533,8 +1530,7 @@ async function runProbe(
       command,
       cwd: fixture.workspace,
       baseEnv: {
-        HOME: fixture.home,
-        // Probe the native sandbox policy without inheriting an Agent's rm shim.
+        HOME: process.env.HOME ?? "/var/empty",
         PATH: PROBE_PATH,
       },
       sandboxTempDir: fixture.sessionTemp,

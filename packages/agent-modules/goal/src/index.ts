@@ -97,11 +97,7 @@ export {
   renderObjectiveUpdatedPrompt,
 } from './objective-updated.js';
 export { DEFAULT_BUDGET_LIMIT_TEMPLATE, renderBudgetLimitPrompt } from './budget-limit.js';
-export {
-  compareThreadGoalReplyFingerprints,
-  fingerprintThreadGoalReply,
-  fingerprintThreadGoalToolCall,
-} from './reply-fingerprint.js';
+export { fingerprintThreadGoalReply } from './reply-fingerprint.js';
 export { digestThreadGoalObjective } from './objective-digest.js';
 export {
   boundVerificationTranscript,

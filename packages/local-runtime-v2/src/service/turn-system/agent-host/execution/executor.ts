@@ -6,6 +6,7 @@ import {
 } from './user-input-control.js';
 import {
   type LLMModelConfig,
+  type ContextWireProjection,
   type PiBeforeLlmCallHook,
   type PiBeforeLlmCallHookInput,
   type PiEventWriter,
@@ -18,23 +19,18 @@ import {
 import { type RuntimeTool, type ToolExecutionContext } from '@mavis/agent-core/tools';
 import { prepareBashTurnTools } from '../assembly/local-turn-tool-catalog.js';
 import { createPluginAgentRoster } from '../assembly/turn-capability-lifecycle.js';
-import {
-  buildCompletedTerminalStatusEvent,
-  buildRuntimeWarningEvent,
-} from '@mavis/agent-core/event-bridge';
-import { withPtcCompactionReminder } from './ptc/compaction-reminder.js';
-import {
-  createPtcTurnCompactionReminder,
-  observePtcTurnAdmission,
-  preparePtcExecution,
-} from './ptc/turn-preparation.js';
+import { buildCompletedTerminalStatusEvent } from '@mavis/agent-core/event-bridge';
 import {
   beginLocalPluginHookTurn,
   createLocalPluginHookEventReporter,
   emitLocalPluginHookWarnings,
   localPluginHookCoordinator as pluginHookCoordinator,
 } from '../assembly/local-turn-plugin-hooks.js';
-import { copyCanonicalHistoryForPiCompatibility } from '../history/canonical-history-validation.js';
+import type { HistoryReconcileIntent } from '../history/contracts.js';
+import { piCompatibleTurnHistory } from '../history/canonical-history-validation.js';
+import type { CanonicalHistoryMessage } from '../history/contracts.js';
+import type { TurnWireModelContext } from '../../compaction/context-wire.js';
+import { createLogger } from '@mavis/logging';
 import type { AgentExecutionSnapshot, TurnOutputContract } from '../preparation/contracts.js';
 import type {
   AgentHostSteeringMessage,
@@ -55,8 +51,20 @@ import {
   type LocalTurnEventWriter,
 } from '../events/runtime-event-writer.js';
 import { AgentEventAssociationError } from '../local-agent-host.js';
+import {
+  createTurnPromptSuggestionCapture,
+  PromptSuggestionCommitRelay,
+  readPromptSuggestionScope,
+  withPromptSuggestionHooks,
+  type PromptSuggestionScope,
+} from '../runner/prompt-suggestion/capture.js';
 import { inputReviewRunnerOptions } from '../runner/policy/input-review-runner-options.js';
+import { createLocalCuScreenshotPruner } from '../runner/local-cu-screenshot-pruner.js';
 import { applyProcessLocalToolResultPolicy } from '../runner/policy/process-local-tool-result-policy.js';
+import {
+  checkpointBeforeLlmCallHook,
+  withCheckpointPolicy,
+} from './turn-checkpoint-policy.js';
 import type {
   LocalContextUsagePromptRange,
   LocalRuntimeTurnExecutorOptions,
@@ -72,6 +80,7 @@ import {
   LIGHTWEIGHT_TOOL_CALL_FALLBACK,
   readPreparedContextUsagePromptRanges,
   readPreparedSystemPrompt,
+  readPreparedSystemPromptSections,
   renderAgentRuntimeReminders,
   resolveProviderContextMode,
 } from './prompt.js';
@@ -82,15 +91,11 @@ import {
 import { withPluginAutomaticCompactionLifecycle } from './plugin-hook-compaction-lifecycle.js';
 import { createControlledToolHooks } from './plugin-hook-tool-lifecycle.js';
 import { createExecutionBudgetReminder } from '../runner/execution-budget-reminder.js';
-import {
-  createTurnPromptSuggestionCapture,
-  PromptSuggestionCommitRelay,
-  readPromptSuggestionScope,
-  withPromptSuggestionHooks,
-  type PromptSuggestionScope,
-} from '../runner/prompt-suggestion/capture.js';
 import { withExecutionObservability } from './execution-observability.js';
-import type { HistoryReconcileIntent } from '../history/contracts.js';
+import {
+  createTurnLlmCallObservation,
+  type TurnLlmCallObservation,
+} from './llm-logging.js';
 import {
   ackCommittedToolResultTailClaims,
   attachCommittedFacts,
@@ -126,6 +131,18 @@ type PiAgentMessage = NonNullable<RunTurnInput['history']>[number];
 type LocalPluginHookAdmissionTransaction = Awaited<
   ReturnType<typeof beginLocalPluginHookTurn>
 >['transaction'];
+
+/** mcode:turn phase timings (spec §4): debug logs around each turn phase. */
+const turnPhaseLog = createLogger('mcode:turn');
+
+function logTurnPhase(sessionId: string, turnId: string, phase: string, startedAtMs: number): void {
+  turnPhaseLog.debug('turn phase', {
+    sessionId,
+    turnId,
+    phase,
+    durationMs: Math.max(0, performance.now() - startedAtMs),
+  });
+}
 interface LocalPluginSubagentInput {
   readonly childSessionId: string;
   readonly childTurnId: string;
@@ -276,7 +293,10 @@ export class LocalRuntimeTurnExecutor<
       const writer = await createAgentHostPluginHookTranscript({
         cwd: input.session.workspaceDir,
         sessionId: input.lease.sessionId,
-        messages: copyCanonicalHistoryForPiCompatibility(input.history.messages),
+        messages: piCompatibleTurnHistory(
+          input.history.messages,
+          this.options.piCompatibleHistorySnapshots === true,
+        ),
       });
       return {
         writer,
@@ -297,11 +317,37 @@ export class LocalRuntimeTurnExecutor<
     }
   }
 
+  /**
+   * The llm-retry seam resolution (В1, opus-decisions-20261101): the base
+   * `resolveLlmRetry` options (observer/policy — the composition's choice)
+   * plus, when the composition wired the overflow-recovery factory and the
+   * turn runs in wire mode, the В1 `contextOverflowRecovery` — compact →
+   * replaceMessages → ONE retried request → omission on the second failure
+   * (see `createLlmContextOverflowRecovery`). The retry itself is the pi
+   * loop's (`agent.continue()`): only there re-runs `convertToLlm`, so the
+   * retried request compiles the CUT window; a transport-level retry inside
+   * `withLLMRetry` would re-send the same oversized payload.
+   */
+  private async resolveLlmRetry(
+    input: LocalTurnExecutionInput<TAgent>,
+  ): Promise<RunTurnInput['llmRetry']> {
+    const base = await resolveLlmRetryOptions(input, this.options);
+    const factory = this.options.contextOverflowRecoveryFor;
+    const contextOverflowRecovery = factory?.({
+      sessionId: input.lease.sessionId,
+      ...(input.lease.signal ? { signal: input.lease.signal } : {}),
+    });
+    if (contextOverflowRecovery === undefined) return base;
+    return { ...base, contextOverflowRecovery };
+  }
+
   private async executeTurn(
     input: LocalTurnExecutionInput<TAgent>,
     eventWriter: LocalTurnEventWriter,
   ): Promise<AgentHostTurnOutcome> {
+    const prepareStartedAtMs = performance.now();
     const prepared = await this.prepareRunnerInput(input, eventWriter);
+    logTurnPhase(input.lease.sessionId, input.lease.turnId, 'prepare', prepareStartedAtMs);
     const outputContract = input.request.outputContract;
     assertLocalOutputFormatCapability(
       input.preparation.llm.model,
@@ -324,9 +370,14 @@ export class LocalRuntimeTurnExecutor<
     eventWriter: LocalTurnEventWriter,
     outputContract: TurnOutputContract | undefined,
   ): Promise<SettledRuntimeTurn<TContext>> {
+    const runtimeStartedAtMs = performance.now();
+    const llmObservation = createTurnLlmCallObservation({
+      sessionId: input.lease.sessionId,
+      turnId: input.lease.turnId,
+    });
     const pendingToolResultTailClaims = new Set<string>();
     const readTaskOutputTaskIds = prepared.readTaskOutputTaskIds;
-    const terminalTaskOutputReadIds = new Set<string>();
+    const terminalTaskOutputReadIds = prepared.terminalTaskOutputReadIds;
     const continuation = createContinuationControl(
       input,
       prepared.prepareSteering,
@@ -349,6 +400,9 @@ export class LocalRuntimeTurnExecutor<
         turnId: input.lease.turnId,
         workspaceDir: input.session.workspaceDir,
         systemPrompt: prepared.systemPrompt,
+        systemPromptSections: readPreparedSystemPromptSections(
+          input.preparation.agentConfig, input.assembly.systemPromptPrefix, prepared.systemPrompt,
+        ),
         promptMetadata: (
           input.preparation.agentConfig as { prompt_metadata?: Readonly<Record<string, unknown>> }
         ).prompt_metadata,
@@ -366,15 +420,22 @@ export class LocalRuntimeTurnExecutor<
           ...hostOutputTokenCap(this.options.outputTokenCap, input),
           ...payloadTransforms,
         },
-        eventWriter,
+        eventWriter: llmObservation.wrapEventWriter(eventWriter),
         eventIdGenerator: input.pluginHookEventReporter?.nextEventId,
         runtimeSeqGenerator: input.pluginHookEventReporter?.nextRuntimeSeq,
         history: prepared.history,
+        // Ш4: the composition-owned payload projection; absent (default) the
+        // runner keeps the legacy conversion untouched.
+        ...(prepared.contextWire ? { contextWire: prepared.contextWire } : {}),
         signal: input.lease.signal,
         tools: prepared.tools,
-        ...(prepared.ptcTools ? { ptcTools: prepared.ptcTools } : {}),
         disableBuiltinToolFallback: prepared.toolResolution.disableBuiltinToolFallback,
         toolContext: prepared.toolContext,
+        // §4: per-turn permission-mark sink → pi turn → event bridge, so
+        // tool-call statuses carry who decided them.
+        ...(prepared.toolResolution.permissionMarks
+          ? { permissionMarks: prepared.toolResolution.permissionMarks }
+          : {}),
         hooks: withExecutionObservability(
           withPromptSuggestionHooks(
             mergeHooks({
@@ -382,13 +443,18 @@ export class LocalRuntimeTurnExecutor<
               toolResolution: prepared.toolResolution,
               pendingToolResultTailClaims,
               hostBeforeLlmCallHooks: prepared.beforeLlmCallHooks,
+              ...(this.options.checkpointBarrier
+                ? { checkpointBarrier: this.options.checkpointBarrier }
+                : {}),
+              // Ш4: canonical commits of this turn feed the context-wire window.
+              ...(this.options.contextWire ? { contextWire: this.options.contextWire } : {}),
               readTaskOutputTaskIds,
               terminalTaskOutputReadIds,
               toolsDisabled: this.options.disableTools === true,
               toolSafetyGuard,
               toolPolicyGuard: this.options.toolPolicyGuard,
               finalizeToolResultForHistory: this.options.finalizeToolResultForHistory,
-              ptcFactCollector: prepared.ptcFactCollector,
+              llmObservation,
             }),
             promptSuggestion?.capture,
           ),
@@ -418,7 +484,18 @@ export class LocalRuntimeTurnExecutor<
         },
         shouldStopAfterSteering: continuation.shouldStopAfterSteering,
         tryBeginClose: continuation.tryBeginClose,
-        llmRetry: await resolveLlmRetryOptions(input, this.options),
+        // Reactive subagents §1.7 (wave 3): the accepted-owner-input
+        // generation probe of the steering composition's native wait binding;
+        // absent (jsonl, embeddings) the sequential batch behaves as before.
+        ...(this.options.resolveOwnerInputGeneration
+          ? {
+              ownerInputGeneration: this.options.resolveOwnerInputGeneration({
+                sessionId: input.lease.sessionId,
+                turnId: input.lease.turnId,
+              }),
+            }
+          : {}),
+        llmRetry: await this.resolveLlmRetry(input),
         // Desktop and TUI both consume provider-measured output throughput.
         ...(this.options.cliProductPolicy !== true || this.options.tuiProductPolicy === true
           ? { includeDetailedUsage: true }
@@ -434,19 +511,26 @@ export class LocalRuntimeTurnExecutor<
             throw new AgentHostDependencyUnavailableError('history-retract-turn');
           }
           await input.recallOutputAttemptHistory(attempt);
+          // Ш4: the recall rewound canonical history outside the wire
+          // window's view — degrade this turn to the legacy conversion until
+          // the next seed rebuilds the pipeline.
+          this.options.contextWire?.markStale(input.lease.sessionId);
           input.rearmPrimaryUserMessageIdAfterOutputRecall();
         },
-        onOutputRecall: (recall) =>
+        onOutputRecall: (recall) => {
+          this.options.contextWire?.markStale(input.lease.sessionId);
           this.options.attemptRecall.recallAssistantAttempt({
             sessionId: input.lease.sessionId,
             turnId: input.lease.turnId,
             attempt: recall.attempt,
             messageIds: recall.messageIds,
-          }),
+          });
+        },
         ...(this.options.captureToolTiming?.(input) ? { captureToolTiming: true } : {}),
       });
     } finally {
       await childBash?.close();
+      logTurnPhase(input.lease.sessionId, input.lease.turnId, 'runtime', runtimeStartedAtMs);
     }
     return {
       outcome: attachWaitingForUser(
@@ -460,20 +544,16 @@ export class LocalRuntimeTurnExecutor<
         input,
         prepared,
         promptSuggestion?.capture,
-        runnerResult?.outcome?.replyMessageId,
+        runnerResult?.outcome?.messageId,
       ),
     };
-  }
-
-  /** Fires the optional next-message suggestion once the Host durably committed the Turn. */
-  afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
-    this.promptSuggestions.committed(outcome);
   }
 
   private async settleTurn(
     input: LocalTurnExecutionInput<TAgent>,
     settled: SettledRuntimeTurn<TContext>,
   ): Promise<AgentHostTurnOutcome> {
+    const finalizeStartedAtMs = performance.now();
     try {
       const observation = await this.options.fileChanges.finalize({
         sessionId: input.lease.sessionId,
@@ -491,7 +571,14 @@ export class LocalRuntimeTurnExecutor<
       return committed;
     } catch (error) {
       return this.throwWithFileFailure(input, error);
+    } finally {
+      logTurnPhase(input.lease.sessionId, input.lease.turnId, 'finalize', finalizeStartedAtMs);
     }
+  }
+
+  /** Fires the optional next-message suggestion once the Host durably committed the Turn. */
+  afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
+    this.promptSuggestions.committed(outcome);
   }
 
   private async throwWithFileFailure(
@@ -526,27 +613,39 @@ export class LocalRuntimeTurnExecutor<
       eventWriter,
     });
     const readTaskOutputTaskIds = new Set<string>();
+    const terminalTaskOutputReadIds = new Set<string>();
     const toolResolution = preparedExecution.toolResolution;
     const admittedTools = applyProcessLocalToolResultPolicy(
       validateRoutedTurnTools(input.assembly.tools),
       this.options.cliProductPolicy === true,
     );
-    const ptc = preparePtcExecution(input.assembly.tools, admittedTools, this.options, input);
-    const canConsumeBackgroundBashOutput = ptc.canConsumeNativeTaskOutput;
-    const standardTools = prepareBashTurnTools(
-      admittedTools,
-      canConsumeBackgroundBashOutput,
-      this.options.nativeDelete?.() === true,
+    // SE-SW-002: every tool effect of the turn runs under the checkpoint
+    // barrier when one is composed — flush before the effect, one execution,
+    // interrupted calls recorded as unknown and never re-run implicitly.
+    const policyTools = withCheckpointPolicy(admittedTools, {
+      ...(this.options.checkpointBarrier ? { barrier: this.options.checkpointBarrier } : {}),
+      signal: input.lease.signal,
+      ...(this.options.checkpointAllowAfterUnknownOutcome
+        ? { allowAfterUnknownOutcome: true }
+        : {}),
+    });
+    const canConsumeBackgroundBashOutput = admittedTools.some(
+      (tool) =>
+        tool.def.name === 'task_output' && (tool.source === undefined || tool.source === 'builtin'),
     );
+    const standardTools = prepareBashTurnTools(policyTools, canConsumeBackgroundBashOutput);
     const toolContext = {
       ...toolResolution.context,
-      ...pluginToolContext(input),
+      ...(input.pluginHooks?.length
+        ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
+        : {}),
+      ...(input.desktopCapabilities?.agents?.length
+        ? { pluginAgents: createPluginAgentRoster(input.desktopCapabilities.agents) }
+        : {}),
       // Use admitted tools, including frozen selectors and final routing. A
       // configured/MCP namesake cannot read the native background task store.
       allowBashAutoPromotion: canConsumeBackgroundBashOutput,
       canConsumeBackgroundBashOutput,
-      canConsumeBackgroundTaskOutput: canConsumeBackgroundBashOutput,
-      ...ptc.context,
     } as TContext;
     const caller = preparedExecution.caller;
     const standardSystemPrompt = joinPrompt(input.assembly.systemPromptPrefix, baseSystemPrompt);
@@ -567,7 +666,6 @@ export class LocalRuntimeTurnExecutor<
       tools,
       contextUsagePromptRanges,
     } = providerContext;
-    observePtcTurnAdmission(input, ptc, this.options, { systemPrompt, tools });
     input.onContextUsagePromptRangesResolved?.(contextUsagePromptRanges);
     const userPromptPrefix = joinUserPrompt(
       input.assembly.userPromptPrefix,
@@ -592,7 +690,25 @@ export class LocalRuntimeTurnExecutor<
       },
       preparedExecution.genuineUserQueryText ?? input.request.genuineUserQueryText,
     );
-    const history = copyCanonicalHistoryForPiCompatibility(providerHistory(input));
+    const history = piCompatibleTurnHistory(
+      providerHistory(input),
+      this.options.piCompatibleHistorySnapshots === true,
+    );
+    // Ш4 context-wire: seed the session's memoized payload-assembly pipeline
+    // from the pre-turn canonical runner history (a previous state — stale or
+    // not — is replaced, so a mid-turn rewind of the previous turn cannot
+    // leak). Every canonical commit of THIS turn then feeds the pipeline from
+    // the history hook in `mergeHooks`, and the runner request reads the
+    // payload through the projection passed on the runner input below. The
+    // projection is resolved AFTER the seed so it closes over the fresh state.
+    // W10: the turn's resolved model rides the seed for the unified
+    // compaction seam (per-session budgets from the REAL session model).
+    this.options.contextWire?.seed({
+      sessionId: input.lease.sessionId,
+      messages: providerHistory(input) as readonly CanonicalHistoryMessage[],
+      ...turnWireModelContext(input.preparation.llm.model, input.preparation.llm.thinkingLevel),
+    });
+    const contextWireProjection = this.options.contextWire?.projection(input.lease.sessionId);
     const batchMessages = prepareInitialImmediateSendBatch(
       input,
       {
@@ -619,20 +735,18 @@ export class LocalRuntimeTurnExecutor<
       hookInput: initialHookInput,
       loadFacts: preparedExecution.loadBackgroundReminder,
       hasSuccessfulTaskOutputRead: () => readTaskOutputTaskIds.size > 0,
+      readTaskIds: () => terminalTaskOutputReadIds,
     });
     const beforeLlmCallHooks = await this.resolveBeforeLlmCallHooks(
       input,
-      withPtcCompactionReminder(
-        createPtcTurnCompactionReminder(input, this.options),
-        afterCompactionReminderHooks(
-          createExecutionBudgetReminder(
-            input.request.executionDeadlineAtMs,
-            this.options.nowMs,
-            this.options.canAppendExecutionBudgetReminder,
-            this.options.logger,
-          ),
-          backgroundReminder?.hook,
+      afterCompactionReminderHooks(
+        createExecutionBudgetReminder(
+          input.request.executionDeadlineAtMs,
+          this.options.nowMs,
+          this.options.canAppendExecutionBudgetReminder,
+          this.options.logger,
         ),
+        backgroundReminder?.hook,
       ),
     );
     validateResolvedInput({
@@ -649,12 +763,13 @@ export class LocalRuntimeTurnExecutor<
       systemPrompt,
       userMessage,
       history,
+      // Ш4: the per-turn payload projection (undefined without the wire path).
+      ...(contextWireProjection ? { contextWire: contextWireProjection } : {}),
       beforeUserMessages: [
         ...(backgroundReminder?.beforeUserMessages ?? []),
         ...beforeBatchMessages,
       ],
       tools,
-      ...(ptc.ptcTools ? { ptcTools: ptc.ptcTools } : {}),
       toolResolution,
       toolContext,
       beforeLlmCallHooks,
@@ -671,7 +786,7 @@ export class LocalRuntimeTurnExecutor<
           }
         : {}),
       readTaskOutputTaskIds,
-      ptcFactCollector: ptc.ptcFactCollector,
+      terminalTaskOutputReadIds,
       prepareSteering: preparedExecution.prepareSteering ?? preparePlainSteering,
     };
   }
@@ -682,6 +797,7 @@ export class LocalRuntimeTurnExecutor<
   ): Promise<readonly PiBeforeLlmCallHook[]> {
     return [
       ...((await this.options.resolveBeforeLlmCallHooks?.(input)) ?? []),
+      createLocalCuScreenshotPruner(2),
       ...(input.contextCompactionHook
         ? [withPluginAutomaticCompactionLifecycle(input.contextCompactionHook, input)]
         : []),
@@ -731,19 +847,6 @@ export class LocalRuntimeTurnExecutor<
       // Diagnostic reporting cannot replace the owning Turn failure.
     }
   }
-}
-
-function pluginToolContext<TAgent extends AgentExecutionSnapshot>(
-  input: LocalTurnExecutionInput<TAgent>,
-) {
-  return {
-    ...(input.pluginHooks?.length
-      ? { pluginSubagentLifecycle: createPluginSubagentLifecycle(input) }
-      : {}),
-    ...(input.desktopCapabilities?.agents?.length
-      ? { pluginAgents: createPluginAgentRoster(input.desktopCapabilities.agents) }
-      : {}),
-  };
 }
 
 function createPluginSubagentLifecycle<TAgent extends AgentExecutionSnapshot>(
@@ -841,10 +944,11 @@ function pluginHookTranscriptCleanup(
 }
 
 /**
- * `runBeforeLLM` accumulates `appendMessage` decisions, so later hooks still
- * run. The budget reminder stays before the background cadence reminder so
- * its request-only marker precedes the durable background marker and the
- * reminder admission sees the request before that marker is registered.
+ * Order is load-bearing: `runBeforeLLM` ends the before-LLM decision pipeline
+ * as soon as a hook returns `appendMessage`, so a request-only reminder placed
+ * after an appending hook is silently skipped for that request. The budget
+ * reminder is request-only and therefore always precedes the background
+ * cadence reminder, which appends.
  */
 function afterCompactionReminderHooks(
   budgetReminder: PiBeforeLlmCallHook | undefined,
@@ -861,9 +965,10 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly systemPrompt: string;
   readonly userMessage: UserMessageInput;
   readonly history: PiAgentMessage[];
+  /** Ш4 context-wire projection of this turn; absent keeps the legacy conversion. */
+  readonly contextWire?: ContextWireProjection;
   readonly beforeUserMessages: NonNullable<RunTurnInput['beforeUserMessages']>;
   readonly tools: readonly RuntimeTool[];
-  readonly ptcTools?: readonly RuntimeTool[];
   readonly toolResolution: LocalTurnPermissionResolution<TContext>;
   readonly toolContext: TContext;
   readonly beforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
@@ -872,7 +977,7 @@ interface PreparedRunnerInput<TContext extends ToolExecutionContext> {
   readonly contextUsagePromptRanges?: readonly LocalContextUsagePromptRange[];
   readonly contextUsageRequiresProviderAnchor?: boolean;
   readonly readTaskOutputTaskIds: Set<string>;
-  readonly ptcFactCollector: import('@mavis/agent-core/tools').PtcToolFactCollector;
+  readonly terminalTaskOutputReadIds: Set<string>;
   readonly prepareSteering: (
     input: AgentHostSteeringMessage,
   ) => Promise<PreparedSteeringUserMessage>;
@@ -916,13 +1021,15 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolResolution,
     pendingToolResultTailClaims,
     hostBeforeLlmCallHooks,
+    checkpointBarrier,
+    contextWire,
     readTaskOutputTaskIds,
     terminalTaskOutputReadIds,
     toolsDisabled,
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
-    ptcFactCollector,
+    llmObservation,
   } = options;
   const toolHooks = createControlledToolHooks({
     input,
@@ -934,17 +1041,55 @@ function mergeHooks<TAgent extends AgentExecutionSnapshot, TContext extends Tool
     toolSafetyGuard,
     toolPolicyGuard,
     finalizeToolResultForHistory,
-    ...(ptcFactCollector ? { ptcFactCollector } : {}),
   });
   return {
     ...input.assembly.hooks,
     ...toolHooks,
+    // mcode:llm observers: first position on both LLM hook lists so the call
+    // view/outcome is recorded before any assembly hook can retry or fail it,
+    // and the assembly's own prepared observers (the session-report evidence
+    // capture) stay last — they record at the FINAL prepared boundary. Both
+    // hooks return `undefined` and cannot change a decision.
+    ...(llmObservation
+      ? {
+          onLlmCallPreparedHook: [
+            llmObservation.onLlmCallPrepared,
+            ...(input.assembly.hooks.onLlmCallPreparedHook ?? []),
+          ],
+          afterLlmCallHook: [
+            llmObservation.afterLlmCall,
+            ...(input.assembly.hooks.afterLlmCallHook ?? []),
+          ],
+        }
+      : {}),
+    // SE-SW-002: first position, so durability is confirmed before any other
+    // before-LLM decision and the provider request is never issued on a
+    // barrier failure.
     beforeLlmCallHook: [
+      ...(checkpointBarrier ? [checkpointBeforeLlmCallHook(checkpointBarrier)] : []),
       ...(input.assembly.hooks.beforeLlmCallHook ?? []),
       ...hostBeforeLlmCallHooks,
     ],
     onHistoryChangedHook: [
       async (change) => {
+        // Ш4: the wire window folds the same canonical commit the session
+        // history store is about to receive — synchronously, before the
+        // runner's next provider request can project it. A wire fault is
+        // absorbed by the handle (fail-safe: the projection degrades to the
+        // legacy conversion) and must never fail history delivery, so the
+        // feed runs first and never throws.
+        if (contextWire) {
+          try {
+            contextWire.observeCommit({
+              sessionId: input.lease.sessionId,
+              reason: change.reason,
+              messages: change.messages as readonly CanonicalHistoryMessage[],
+            });
+          } catch {
+            // Unreachable (observeCommit is fail-safe); kept so a future
+            // refactor cannot make wire faults fail history delivery.
+          }
+        }
         await input.onHistoryChanged(change);
         await input.pluginHookTranscriptWriter?.apply(change);
         ackCommittedToolResultTailClaims(change.messages, pendingToolResultTailClaims, input);
@@ -1119,4 +1264,37 @@ function describeUnknownError(error: unknown): string {
   } catch {
     return 'unknown error';
   }
+}
+
+/**
+ * W10: the resolved model facts a turn's context-wire seed carries for the
+ * unified compaction seam. A model without a context window yields no model
+ * context — that session's pipeline keeps the wire guard alone (never a
+ * silently wrong budget).
+ */
+function turnWireModelContext(
+  model: LLMModelConfig['model'],
+  thinkingLevel: string | undefined,
+): { readonly model?: TurnWireModelContext } {
+  const contextWindowTokens = model.contextWindow;
+  if (
+    typeof contextWindowTokens !== 'number' ||
+    !Number.isFinite(contextWindowTokens) ||
+    contextWindowTokens <= 0
+  ) {
+    return {};
+  }
+  return {
+    model: {
+      provider: model.provider,
+      modelId: model.id,
+      contextWindowTokens,
+      ...(typeof model.maxTokens === 'number' && model.maxTokens > 0
+        ? { maxOutputTokens: model.maxTokens }
+        : {}),
+      ...(thinkingLevel !== undefined && thinkingLevel !== 'off'
+        ? { thinkingLevel }
+        : {}),
+    },
+  };
 }

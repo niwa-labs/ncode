@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { Type, validateToolArguments, type Tool, type ToolCall } from '@earendil-works/pi-ai';
+import { Type } from 'typebox';
+import { validateToolArguments, type Tool, type ToolCall } from '@earendil-works/pi-ai';
 
 import {
   completeTitleModelResponse,

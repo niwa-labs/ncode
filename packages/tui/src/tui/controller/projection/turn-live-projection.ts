@@ -46,6 +46,11 @@ export class TuiLiveTurnProjection {
 
   applyDelta(turnId: string, event: DeltaStreamEvent): void {
     const timestamp = event.timestamp ?? this.now();
+    if (event.messageId && this.getTurn(turnId).discardedMessageIds.has(event.messageId)) {
+      // A late frame for an attempt that was already explicitly discarded:
+      // residue of the rejected response, never a fresh cell.
+      return;
+    }
     if (event.started) this.associateMessageStart(turnId, event.messageId, timestamp);
     if (event.thinking) this.appendThinking(turnId, event.thinking, timestamp, event.messageId);
     if (event.content) {
@@ -55,6 +60,13 @@ export class TuiLiveTurnProjection {
   }
 
   applyMessage(turnId: string, message: TuiMessage): void {
+    if (
+      message.role === 'assistant' &&
+      message.id &&
+      this.getTurn(turnId).discardedMessageIds.has(message.id)
+    ) {
+      return;
+    }
     const timestamp = message.timestamp ?? this.now();
     if (message.role === 'user') {
       const beginsUserWave = this.userProjection.applyLive(turnId, message, timestamp);
@@ -172,6 +184,43 @@ export class TuiLiveTurnProjection {
 
   clearTurn(turnId: string): void {
     this.turns.delete(turnId);
+  }
+
+  /**
+   * Retracts ONE rejected assistant attempt by its host-allocated message id:
+   * removes only the transient cells that identity maps (its streaming
+   * assistant cell and its thinking segment) plus any pending text deltas.
+   * Cells of every other attempt — including a legitimately finished
+   * preamble or an identical-text answer with a different id — are never
+   * touched, and no later frame carrying this id can resurrect them.
+   */
+  discardAssistantMessage(turnId: string, messageId: string): void {
+    if (!messageId) return;
+    const projection = this.getTurn(turnId);
+    projection.discardedMessageIds.add(messageId);
+    const assistantId = projection.assistantByMessageId.get(messageId);
+    if (assistantId !== undefined) {
+      projection.assistantByMessageId.delete(messageId);
+      projection.streamStartedAtMs.delete(messageId);
+      if (projection.activeAssistantId === assistantId) {
+        projection.activeAssistantId = undefined;
+        projection.activeAssistantMessageId = undefined;
+        projection.activeAssistantFinalized = false;
+        if (projection.activeKind === 'assistant') projection.activeKind = undefined;
+      }
+      this.transcript.remove(assistantId);
+    }
+    const thinkingId = projection.thinkingByMessageId.get(messageId);
+    if (thinkingId !== undefined) {
+      projection.thinkingByMessageId.delete(messageId);
+      projection.streamStartedAtMs.delete(thinkingId);
+      if (projection.activeThinkingId === thinkingId) {
+        projection.activeThinkingId = undefined;
+        projection.pendingThinkingStartedAtMs = undefined;
+        if (projection.activeKind === 'thinking') projection.activeKind = undefined;
+      }
+      this.transcript.remove(thinkingId);
+    }
   }
 
   beginUserWave(turnId: string, timestamp: number): void {
@@ -382,10 +431,15 @@ export class TuiLiveTurnProjection {
     messageId?: string,
   ): string {
     projection.assistantCount += 1;
-    const id =
-      projection.assistantCount === 1
-        ? `assistant:${turnId}`
-        : `assistant:${turnId}:${projection.assistantCount}`;
+    // The turn's first LIVE assistant cell owns the canonical `assistant:<turn>`
+    // id — the same id `markTurn`/`failTurn` synthesise when no assistant cell
+    // rendered. A discarded attempt frees its slot (the cell was removed by
+    // identity), so the replacement attempt re-owns the canonical id instead
+    // of leaving a numbering gap behind the rejection.
+    const canonicalId = `assistant:${turnId}`;
+    const id = this.transcript.get(canonicalId)
+      ? `assistant:${turnId}:${projection.assistantCount}`
+      : canonicalId;
     projection.activeKind = 'assistant';
     projection.activeAssistantId = id;
     projection.activeAssistantMessageId = messageId;

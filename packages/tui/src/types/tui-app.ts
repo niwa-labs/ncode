@@ -1,3 +1,4 @@
+import type { TuiDaemonConnectionSurface } from '../tui/daemon-connection-surface.js';
 import type { TuiIncidentSink, TuiObservability } from '../observability/index.js';
 import type { McodeAuthPort } from '../auth/application.js';
 import type { TuiRuntime, TuiWorkspaceRoot } from '../runtime/port.js';
@@ -30,6 +31,12 @@ import type { FindRecentCodexSession } from '../host/recent-codex-session.js';
 
 export interface CreateTuiAppOptions extends TuiUpdateOptions {
   runtime: TuiRuntime;
+  /**
+   * W4 (§4.6): the daemon connection surface in server mode (`auto`/
+   * `required`) — its state lands in the shell status line (honest text,
+   * never a spinner). Absent on the default in-process path.
+   */
+  daemonConnection?: TuiDaemonConnectionSurface;
   dataDir?: string;
   workspaceDir: string;
   workspaceRoots?: readonly TuiWorkspaceRoot[];

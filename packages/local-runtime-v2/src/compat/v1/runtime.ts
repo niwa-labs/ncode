@@ -3,13 +3,12 @@ import type {
   PromptSnapshotSource,
 } from "@mavis/agent-runtime";
 import {
-  backgroundTaskNotificationReceiptId,
+  buildCompressedModelImageFromBuffer,
   closeAgentDb,
   createUserStopCascade,
   type UserStopCascade,
   createLocalWorkspaceGitFacade,
   emitSubagentTelemetry,
-  isTaskDeliverySuppressed,
   listFileTree,
   LocalQuestionnaireService,
   ManagedWorktreeService,
@@ -22,7 +21,8 @@ import {
   SUBAGENT_TELEMETRY_EVENT,
   ThreadGoalContractError,
   updateLocalConfigFile,
-  withAgentNameConflictMigrationScope,
+  withAgentNameConflictMigrationLock,
+  type AgentNameConflictMigrationScope,
   type CreateConversationCompatibilityHostOptions,
   type CreatedLocalRuntimeHost,
   type ManagedWorktreeServicePort,
@@ -49,7 +49,6 @@ import type {
   AgentStorageLockScope,
   AgentSystemFactCallbacks,
 } from "../../service/agent/index.js";
-import type { TurnSystemOwner } from "../../service/turn-system/index.js";
 import type { ContentSafetyReviewPort } from "../../service/content-safety/index.js";
 import type { CronService } from "../../service/cron/index.js";
 import type { PluginServiceCompatibility } from "../../service/plugin-system/index.js";
@@ -125,15 +124,12 @@ async function resolveDelegatableAgentReference(
   }
 }
 
-/**
- * Legacy Agent storage scope for the V2 cutover. Takes no lock: the caller
- * must hold the dataDir startup migration lock for the whole operation.
- */
-export function withAgentStorageScope<T>(
+/** Cross-process cutover lock shared with the legacy conflict migration. */
+export function withAgentStorageLock<T>(
   dataDir: string,
   operation: (scope: AgentStorageLockScope) => T | PromiseLike<T>,
 ): Promise<T> {
-  return withAgentNameConflictMigrationScope(dataDir, async (legacyScope) => {
+  return withAgentNameConflictMigrationLock(dataDir, async (legacyScope: AgentNameConflictMigrationScope) => {
     let active = true;
     const applyCollision = (nowMs?: () => number) => {
       if (!active)
@@ -297,141 +293,6 @@ export interface DeferredV1ConversationBridge extends RuntimeConversation {
   shutdown(error?: unknown): void;
 }
 
-type LocalRuntimeBackgroundTaskView = Awaited<
-  ReturnType<NonNullable<LocalRuntimeApplication["backgroundTasks"]>["list"]>
->[number];
-type NotificationReceipts = Pick<
-  TurnSystemOwner["receipts"],
-  "findClientRequestBindings"
->;
-type BackgroundTaskNotificationProjection = ReturnType<
-  typeof createBackgroundTaskNotificationProjection
->;
-
-const TERMINAL_BACKGROUND_TASK_STATUSES = new Set([
-  "succeeded",
-  "failed",
-  "canceled",
-  "lost",
-]);
-
-/**
- * Derives each terminal Task's notification state from durable facts only: the Task row and
- * the Turn ingress receipt its delivery bound to the admitting Turn. User-stop suppression is
- * the one process-local input, and it can only end a notification, never start one.
- */
-function createBackgroundTaskNotificationProjection(
-  api: CreatedLocalRuntimeHost["apiHost"],
-) {
-  let receipts: NotificationReceipts | undefined;
-  return {
-    bind: (next: NotificationReceipts): void => {
-      receipts = next;
-    },
-    annotate: async (
-      ownerSessionId: string,
-      tasks: readonly LocalRuntimeBackgroundTaskView[],
-    ): Promise<readonly LocalRuntimeBackgroundTaskView[]> => {
-      const terminal = tasks.filter((task) =>
-        TERMINAL_BACKGROUND_TASK_STATUSES.has(task.status),
-      );
-      if (!receipts || terminal.length === 0) return tasks;
-      const receiptIds = terminal.map(({ taskId }) =>
-        backgroundTaskNotificationReceiptId(taskId),
-      );
-      let bindings: Awaited<
-        ReturnType<NotificationReceipts["findClientRequestBindings"]>
-      >;
-      try {
-        bindings = await receipts.findClientRequestBindings({
-          sessionId: ownerSessionId,
-          clientRequestIds: receiptIds,
-        });
-      } catch (error) {
-        try {
-          api.matrixLogger?.warn(
-            {
-              sessionId: ownerSessionId,
-              turnId: "background-task-notification",
-            },
-            `Background Task notification receipts could not be read: ${String(error)}`,
-          );
-        } catch {
-          // Diagnostics are best-effort.
-        }
-        return tasks; // Unreadable ledger: state stays unknown (absent), read as settled.
-      }
-      const byReceiptId = new Map(
-        bindings.map((binding: { clientRequestId: string; turnId: string }) => [
-          binding.clientRequestId,
-          binding,
-        ]),
-      );
-      return tasks.map((task) => {
-        if (!TERMINAL_BACKGROUND_TASK_STATUSES.has(task.status)) return task;
-        const binding = byReceiptId.get(
-          backgroundTaskNotificationReceiptId(task.taskId),
-        );
-        return {
-          ...task,
-          notification: backgroundTaskNotificationState(api, task, binding),
-        };
-      });
-    },
-  };
-}
-
-function backgroundTaskNotificationState(
-  api: CreatedLocalRuntimeHost["apiHost"],
-  task: LocalRuntimeBackgroundTaskView,
-  binding:
-    | Awaited<
-        ReturnType<NotificationReceipts["findClientRequestBindings"]>
-      >[number]
-    | undefined,
-): NonNullable<LocalRuntimeBackgroundTaskView["notification"]> {
-  // Steered into a running Turn or admitted as a new one: the owner has it, however long it runs.
-  if (binding) return { state: "settled", turnId: binding.turnId };
-  // A result already read by a completed Turn, or a stop the user asked for, never wakes it.
-  if (
-    task.deliveredAt !== undefined ||
-    isTaskDeliverySuppressed(api, task.taskId)
-  ) {
-    return { state: "settled" };
-  }
-  return { state: "pending" };
-}
-
-/**
- * V1-owned background task seam. Extracted from the composition function purely
- * to keep it readable; the user-stop cascade lives here because V1 holds the
- * task runners and their per-process admissions.
- */
-function buildBackgroundTaskCompatibility(
-  api: CreatedLocalRuntimeHost["apiHost"],
-  notifications: BackgroundTaskNotificationProjection,
-): V1ServiceCompatibility["backgroundTasks"] {
-  return {
-    bindRuntimeOwner: (owner) =>
-      api.backgroundTaskService.bindRuntimeOwner(owner),
-    bindNotificationReceipts: (receipts) => notifications.bind(receipts),
-    recover: async (recoveredTurnIds) => {
-      await api.backgroundTaskService.reconcileStartupLostTasks({
-        recoveredTurnIds,
-      });
-      return api.backgroundTaskService.hasPendingStartupRecovery();
-    },
-    pollRecovery: () => api.backgroundTaskService.pollStartupLostTasks(),
-    userStop: createUserStopCascade({
-      host: api,
-      // Pause before any task is stopped: a terminal task wakes the Session queue,
-      // and a live Goal would otherwise sail through its gate and start a Turn.
-      pauseActiveGoal: (sessionId) =>
-        api.threadGoal.pauseActiveGoalForAbort(sessionId),
-    }),
-  };
-}
-
 interface V1GlobalEventPublisherBinding {
   bindPublisher(publisher: GlobalEventPublisher): () => void;
 }
@@ -477,10 +338,6 @@ export interface V1ServiceCompatibility extends V1ProcessLocalSupport {
       readonly ownerId: string;
       isOwnerAlive(ownerId: string): boolean | undefined;
     }): void;
-    /** Turn ingress receipts that settle each terminal Task's root notification. */
-    bindNotificationReceipts(
-      receipts: Parameters<BackgroundTaskNotificationProjection["bind"]>[0],
-    ): void;
     recover(recoveredTurnIds: readonly string[]): Promise<boolean | void>;
     pollRecovery(): Promise<boolean>;
     readonly userStop: UserStopCascade;
@@ -597,8 +454,7 @@ export function createV1RuntimeCompatibility(
     }),
     createServiceCompatibility: (host, options) => {
       const api = host.apiHost;
-      const notifications = createBackgroundTaskNotificationProjection(api);
-      const processLocal = createV1ProcessLocalSupport(host, notifications);
+      const processLocal = createV1ProcessLocalSupport(host);
       return {
         ...processLocal,
         sandbox: {
@@ -657,7 +513,21 @@ export function createV1RuntimeCompatibility(
         },
         attachmentRegistration: createV1AttachmentRegistration(host.apiHost),
         channel: createV1ChannelProductCapabilities(host.apiHost),
-        backgroundTasks: buildBackgroundTaskCompatibility(api, notifications),
+        backgroundTasks: {
+          bindRuntimeOwner: (owner) =>
+            api.backgroundTaskService.bindRuntimeOwner(owner),
+          recover: async (recoveredTurnIds) => {
+            await api.backgroundTaskService.reconcileStartupLostTasks({
+              recoveredTurnIds,
+            });
+            return api.backgroundTaskService.hasPendingStartupRecovery();
+          },
+          pollRecovery: () => api.backgroundTaskService.pollStartupLostTasks(),
+          userStop: createUserStopCascade({
+            host: api,
+            pauseActiveGoal: (sessionId) => api.threadGoal.pauseActiveGoalForAbort(sessionId),
+          }),
+        },
         conversation: {
           bind: async (service) => {
             await api.recoverThreadGoalKickoffs(service);
@@ -777,17 +647,15 @@ interface V1ProcessLocalSupport {
 
 function createV1ProcessLocalSupport(
   host: CreatedLocalRuntimeHost,
-  notifications: BackgroundTaskNotificationProjection,
 ): V1ProcessLocalSupport {
   return {
-    peripherals: createPeripheralApplication(host, notifications),
+    peripherals: createPeripheralApplication(host),
     skills: host.apiHost.skillService,
   };
 }
 
 function createPeripheralApplication(
   host: CreatedLocalRuntimeHost,
-  notifications: BackgroundTaskNotificationProjection,
 ): V1ProcessLocalPeripheralApplication {
   const questionnaires = new LocalQuestionnaireService(
     host.apiHost.questionnaireServiceDeps(),
@@ -856,17 +724,18 @@ function createPeripheralApplication(
         readLocalPermissionMode(host.apiHost.configGetter().permissionMode),
       setPermissionMode: ({ mode }) =>
         host.apiHost.setProcessLocalPermissionMode(mode),
-      getPromptSuggestionEnabled: async () =>
-        host.apiHost.configGetter().promptSuggestion?.enabled === true,
-      setPromptSuggestionEnabled: async ({ enabled }) => {
-        // The same validated, lock-protected writer as the Desktop setting; an
-        // explicit value then wins over every surface's default.
-        await host.apiHost.updateConfig({
-          field: "promptSuggestion.enabled",
-          set: enabled,
-        });
-        return host.apiHost.configGetter().promptSuggestion?.enabled === true;
-      },
+      getDangerousCommandGateEnabled: async () =>
+        host.apiHost.configGetter().permission?.dangerousCommandGateEnabled !==
+        false,
+      setDangerousCommandGateEnabled: ({ enabled }) =>
+        host.apiHost.setProcessLocalDangerousCommandGateEnabled(enabled),
+      // `undefined` means this host runs no sandbox service, so the caller has
+      // to say so rather than fall back to the config value: a host without a
+      // sandbox does not enforce any level, and reporting one would be a lie.
+      getSandboxFilesystemMode: async () =>
+        host.apiHost.getProcessLocalSandboxFilesystemMode(),
+      setSandboxFilesystemMode: ({ mode }) =>
+        host.apiHost.setProcessLocalSandboxFilesystemMode(mode),
     },
     backgroundTasks: {
       list: async ({
@@ -875,21 +744,18 @@ function createPeripheralApplication(
         kinds,
         undeliveredOnly,
         limit,
-        includeNotification,
-      }) => {
-        const { items } = await host.apiHost.backgroundTaskService.list({
-          ownerSessionId,
-          ...(statuses ? { statuses: [...statuses] } : {}),
-          ...(kinds ? { kinds: [...kinds] } : {}),
-          ...(undeliveredOnly !== undefined ? { undeliveredOnly } : {}),
-          limit: Math.min(Math.max(1, limit ?? 50), 100),
-          orderBy: "updated_at",
-          order: "desc",
-        });
-        return includeNotification
-          ? notifications.annotate(ownerSessionId, items)
-          : items;
-      },
+      }) =>
+        (
+          await host.apiHost.backgroundTaskService.list({
+            ownerSessionId,
+            ...(statuses ? { statuses: [...statuses] } : {}),
+            ...(kinds ? { kinds: [...kinds] } : {}),
+            ...(undeliveredOnly !== undefined ? { undeliveredOnly } : {}),
+            limit: Math.min(Math.max(1, limit ?? 50), 100),
+            orderBy: "updated_at",
+            order: "desc",
+          })
+        ).items,
     },
   };
 }

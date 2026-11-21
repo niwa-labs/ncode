@@ -772,3 +772,12 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     ? (value as Record<string, unknown>)
     : undefined;
 }
+
+/** Wait for every exhausted subscription window, never for a window with quota left. */
+export function subscriptionQuotaResetAtMs(quota: TuiTokenPlanQuota | undefined, nowMs = Date.now()): number | undefined {
+  const resets = [quota?.fiveHour, quota?.weekly]
+    .filter((window) => window && !window.unlimited && window.remainingPercent !== undefined && window.remainingPercent <= 0)
+    .map((window) => window!.resetAtMs)
+    .filter((time): time is number => typeof time === 'number' && Number.isFinite(time) && time > nowMs);
+  return resets.length ? Math.max(...resets) : undefined;
+}

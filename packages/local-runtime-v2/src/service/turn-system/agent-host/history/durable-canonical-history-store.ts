@@ -33,6 +33,20 @@ export interface DurableCanonicalHistoryProvider {
   compact?(change: CanonicalHistoryCompactionChange): Promise<CanonicalHistorySnapshot | void>;
   settleTurnTail?(mutation: SettleTurnTailMutation): Promise<TurnHistoryMutationCommit>;
   retractTurn?(mutation: RetractTurnMutation): Promise<TurnHistoryMutationCommit>;
+  /**
+   * Wave 2 (canon 05 §2.2, item 2.4): the durable TEXT offload seam — one
+   * `history.v2.offload` event per item (artifact with the full text, stub
+   * receipt in the active history). Present only on the durable provider;
+   * the JSONL compatibility provider keeps the frozen legacy semantics.
+   */
+  offloadToolText?(
+    sessionId: string,
+    items: readonly {
+      readonly envelopeIndex: number;
+      readonly replacement: string;
+      readonly reference: string;
+    }[],
+  ): Promise<void>;
 }
 
 /**
@@ -173,7 +187,7 @@ function validateTurnMutation(mutation: SettleTurnTailMutation | RetractTurnMuta
 }
 
 function validateSettlementMutation(mutation: SettleTurnTailMutation): void {
-  const expected = `${mutation.mode}-reconcile`;
+  const expected = mutation.mode === 'abort' ? 'abort-reconcile' : 'network-reconcile';
   const expectedVariant = mutation.mode === 'network' ? 'network' : undefined;
   if (mutation.operation.kind !== expected || mutation.operation.variant !== expectedVariant) {
     throw new TypeError('Turn history settlement operation is invalid.');

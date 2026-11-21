@@ -13,17 +13,17 @@ import {
 import { BrowserSnapshotSupport } from './browser-snapshot.js';
 import { exposeElement } from './browser-snapshot-helpers.js';
 import {
-  diagnoseSelectorMiss,
-  selectorMissRecovery,
-  type SelectorMissDiagnostics,
-} from './browser-selector-diagnostics.js';
-import {
   sanitizeConsoleDiagnosticUrl,
   type CDPConsoleDiagnosticLevelFilter,
   type CDPNetworkDiagnosticResourceType,
   type CDPNetworkDiagnosticStatusFilter,
 } from './cdp-helper.js';
 import { isBrowserOperationInterruption } from './operation-timeout.js';
+import {
+  diagnoseSelectorMiss,
+  selectorMissRecovery,
+  type SelectorMissDiagnostics,
+} from './browser-selector-diagnostics.js';
 
 const NON_EDITABLE_INPUT_TYPES = new Set([
   'button',
@@ -37,19 +37,6 @@ const NON_EDITABLE_INPUT_TYPES = new Set([
 ]);
 
 export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
-  /** Count consecutive misses per page so repeated blind guesses get a firmer redirect. */
-  private async selectorMiss(
-    session: SessionState,
-    selector: string,
-  ): Promise<Record<string, unknown>> {
-    const diagnostics = await diagnoseSelectorMiss(session, selector);
-    const url = diagnostics.url ?? '';
-    const previous = session.selectorMissStreak;
-    const count = previous && previous.url === url ? previous.count + 1 : 1;
-    session.selectorMissStreak = { url, count };
-    return selectorNotFound(selector, { ...diagnostics, consecutiveMisses: count });
-  }
-
   protected async query(session: SessionState, input: Record<string, unknown>): Promise<unknown> {
     const kind = asString(input.kind);
     if (kind === 'snapshot') return this.inspect(session, input);
@@ -63,7 +50,7 @@ export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
         }
         if ((snapshot.continuationKind ?? 'inspect') !== 'query-editable') {
           throw new Error(
-            'SNAPSHOT_KIND_MISMATCH: this snapshotId was not produced by query kind "editable"; continue it with the action named in its own continuation (an inspect snapshot continues with action "inspect" and the same snapshotId/offset)',
+            'SNAPSHOT_KIND_MISMATCH: continue the snapshot with the action returned by its continuation',
           );
         }
         const current = snapshot.editableQuery;
@@ -110,8 +97,7 @@ export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
           return { found: true, text: text.slice(0, ${maxChars}), totalLength: text.length, url: location.href, title: document.title };
         })()`,
         );
-        if (!result.found) return this.selectorMiss(session, selector);
-        session.selectorMissStreak = undefined;
+        if (!result.found) return selectorMiss(session, selector);
         const { found: _found, ...content } = result;
         return {
           success: true,
@@ -120,7 +106,7 @@ export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
         };
       } catch (error) {
         if (isBrowserOperationInterruption(error)) throw error;
-        return browserQueryFailure(error, selector);
+        return browserQueryFailure(error);
       }
     }
     if (kind === 'dom') {
@@ -131,8 +117,7 @@ export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
           session,
           sanitizedDomQueryExpression(selector),
         );
-        if (!result.found) return this.selectorMiss(session, selector);
-        session.selectorMissStreak = undefined;
+        if (!result.found) return selectorMiss(session, selector);
         return {
           success: true,
           html: result.html.slice(0, maxChars),
@@ -143,7 +128,7 @@ export abstract class BrowserQuerySupport extends BrowserSnapshotSupport {
         };
       } catch (error) {
         if (isBrowserOperationInterruption(error)) throw error;
-        return browserQueryFailure(error, selector);
+        return browserQueryFailure(error);
       }
     }
     if (kind === 'console') {
@@ -265,102 +250,55 @@ function sanitizedDomQueryExpression(selector: string): string {
 
 function selectorNotFound(
   selector: string,
-  diagnostics: SelectorMissDiagnostics,
+  diagnostics?: SelectorMissDiagnostics & { consecutiveMisses?: number },
 ): Record<string, unknown> {
-  const hint = nonCssTextSelectorHint(selector);
-  const recovery = selectorMissRecovery(diagnostics);
+  const recovery = selectorMissRecovery(diagnostics ?? {});
   return {
     success: false,
     code: 'QUERY_FAILED',
     error: `Element not found: ${selector}`,
-    ...(diagnostics.url ? { url: diagnostics.url } : {}),
-    ...(diagnostics.selectorTail ? { selectorTail: diagnostics.selectorTail } : {}),
-    ...(diagnostics.pageControls ? { pageControls: diagnostics.pageControls } : {}),
-    ...(diagnostics.missingLandmark
-      ? { missingLandmark: diagnostics.missingLandmark.selector }
-      : {}),
-    ...(diagnostics.consecutiveMisses && diagnostics.consecutiveMisses > 1
-      ? { consecutiveMisses: diagnostics.consecutiveMisses }
-      : {}),
-    recovery: hint ? `${hint} ${recovery}` : recovery,
+    ...diagnostics,
+    ...(recovery ? { recovery } : {}),
+    ...(recovery ? {} : { recovery: 'Inspect the current page and retry with a selector that matches the current DOM.' }),
   };
 }
 
 /**
- * Playwright/jQuery text engines that look like pseudo-classes but are not CSS,
- * so `querySelector` rejects them outright. The selector itself is the useful
- * diagnosis here: the model wanted a text match, which is `kind: "semantic"`.
+ * Selector miss with live page facts (counts only, never page content) so the
+ * model can tell a wrong ancestor chain from a missing target. Best-effort:
+ * diagnostics failures degrade to the plain miss.
  */
-function nonCssTextSelectorHint(selector: string): string | undefined {
-  // `text=` only counts as a selector engine prefix at a compound boundary, so
-  // attribute selectors such as `[data-text=foo]` are never misdiagnosed.
-  // An escaped colon or a longer identifier (`hover\\:text-red-600`, eval
-  // 777827) is a utility class name, not the `:text` engine.
-  const fragment = selector
-    .match(/(?<!\\):(?:has-)?text(?![\w-])|(?<!\\):contains(?![\w-])|(?:^|[\s>+~,(])text\s*=/iu)?.[0]
-    ?.trim()
-    .replace(/^[>+~,(]\s*/u, '');
-  if (!fragment) return undefined;
-  return `The selector uses ${JSON.stringify(fragment)}, which is not valid CSS. For text matching use query with kind: "semantic" and input.text ("contains" matching), or query kind: "text" with a real CSS selector.`;
-}
-
-/**
- * Eval 774252: utility class names such as `hover:bg-gray-50` or `bg-black/50`
- * were sent as `.hover\\:bg-gray-50` (two backslashes after JSON decoding). CSS
- * reads `\\` as an escaped backslash, leaving the `:` or `/` unescaped, so the
- * selector is invalid; the model repeated this four times because the generic
- * recovery did not name the cause.
- */
-function doubledBackslashSelectorHint(selector: string): string | undefined {
-  const fragment = /\\\\[^\\\s]/u.exec(selector)?.[0];
-  if (!fragment) return undefined;
-  return `The selector contains a doubled backslash (${JSON.stringify(fragment)}); CSS reads "\\\\" as a literal backslash, so the next character stays unescaped. Escape special characters in class names with a single backslash (for example .hover\\:bg-gray-50), or act through an inspect ref instead.`;
-}
-
-const INVALID_SELECTOR_PHRASE = /failed to execute ['"]?queryselector|not a valid selector|invalid selector/iu;
-
-function isSelectorSyntaxErrorLine(line: string): boolean {
-  const lower = line.toLowerCase();
-  return lower.includes('selector') && lower.includes('syntaxerror');
-}
-
-/** True when a page-side error message is the browser rejecting selector syntax. */
-export function isInvalidSelectorMessage(message: string): boolean {
-  return INVALID_SELECTOR_PHRASE.test(message) || message.split('\n').some(isSelectorSyntaxErrorLine);
-}
-
-/**
- * Cause-specific advice for a selector the browser rejected, shared by query
- * and by actions that target `input.selector`. Eval 777827: a click with
- * `button.hover\\:text-red-600` surfaced only the raw SyntaxError because the
- * doubled-backslash hint lived on the query path alone.
- */
-export function invalidSelectorHint(selector: string): string | undefined {
-  return nonCssTextSelectorHint(selector) ?? doubledBackslashSelectorHint(selector);
-}
-
-function browserQueryFailure(error: unknown, selector?: string): Record<string, unknown> {
-  const message = error instanceof Error ? error.message : String(error);
-  const invalidSelector = isInvalidSelectorMessage(message);
-  const hint = selector === undefined ? undefined : nonCssTextSelectorHint(selector);
-  if (!invalidSelector) {
-    const recovery =
-      'Inspect the current page state and retry the query once; if navigation occurred, continue from the new snapshot.';
-    return {
-      success: false,
-      code: 'QUERY_FAILED',
-      error: message,
-      recovery: hint ? `${hint} ${recovery}` : recovery,
-    };
+async function selectorMiss(
+  session: SessionState,
+  selector: string,
+): Promise<Record<string, unknown>> {
+  let diagnostics: SelectorMissDiagnostics;
+  try {
+    diagnostics = await diagnoseSelectorMiss(session, selector);
+  } catch (error) {
+    if (isBrowserOperationInterruption(error)) throw error;
+    return selectorNotFound(selector);
   }
+  const url = diagnostics.url ?? '';
+  const previous = session.selectorMissStreak;
+  const count = previous && previous.url === url ? previous.count + 1 : 1;
+  session.selectorMissStreak = { url, count };
+  return selectorNotFound(selector, { ...diagnostics, consecutiveMisses: count });
+}
+
+function browserQueryFailure(error: unknown): Record<string, unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  const invalidSelector =
+    /(?:failed to execute ['"]?queryselector|not a valid selector|invalid selector|selector[^\n]*syntaxerror|syntaxerror[^\n]*selector)/iu.test(
+      message,
+    );
   return {
     success: false,
-    code: 'INVALID_SELECTOR',
+    code: invalidSelector ? 'INVALID_SELECTOR' : 'QUERY_FAILED',
     error: message,
-    recovery:
-      hint ??
-      (selector === undefined ? undefined : doubledBackslashSelectorHint(selector)) ??
-      'Use query with kind: "text" for text matching, or continue inspect and act through a returned opaque ref. CSS selectors must use standard CSS syntax.',
+    recovery: invalidSelector
+      ? 'Use query with kind: "text" for text matching, or continue inspect and act through a returned opaque ref. CSS selectors must use standard CSS syntax.'
+      : 'Inspect the current page state and retry the query once; if navigation occurred, continue from the new snapshot.',
   };
 }
 

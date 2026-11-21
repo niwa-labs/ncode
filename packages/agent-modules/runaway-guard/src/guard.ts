@@ -14,7 +14,7 @@ import {
   verifiedProgressMapBestEffort,
 } from './step-view.js';
 import { observeStep } from './signals.js';
-import { takePreferredReminder } from './reminder.js';
+import { REMINDER_REARM_OCCURRENCES, takePreferredReminder } from './reminder.js';
 
 /**
  * Turn-local detector and reminder policy. No Agent, lifecycle registration,
@@ -47,7 +47,15 @@ export function createRunawayGuard(options: RunawayGuardOptions = {}): RunawayGu
         trustedToolProvenanceMapBestEffort(step.trustedToolProvenance ?? [], toolCallIds),
         step.blockedToolCalls,
       );
-      const threshold = shouldRemind ? afterOccurrences : undefined;
+      // The reminder threshold is dynamic: the plain configured level until
+      // the first reminder fires, then the next re-arm level (+REMINDER_REARM_OCCURRENCES
+      // beyond the last fired one) so the crossing detector re-fires exactly
+      // when an escalated reminder is due.
+      const threshold = shouldRemind
+        ? state.reminderFiredAtOccurrences === undefined
+          ? afterOccurrences
+          : state.reminderFiredAtOccurrences + REMINDER_REARM_OCCURRENCES
+        : undefined;
       const candidates = observeStep(view, { ctx, state, observer: options.onSignal }, threshold);
       return threshold === undefined
         ? undefined

@@ -167,6 +167,7 @@ describe('resolveAgentModelSelection', () => {
   registerMiniMaxM3SelectionTests();
   registerBuiltinAgentGroupTests();
   registerResolverBoundaryCoverageTest();
+  registerTaskVariantSelectionTests();
 });
 
 function registerContextTierSelectionTests(): void {
@@ -614,37 +615,6 @@ function registerCustomProviderPrefixFallbackTests(): void {
       }),
     ).toMatchObject({ providerId: 'mafia', modelId: 'model' });
   });
-
-  it('resolves an Agent save whose catalog model id contains a slash', () => {
-    const slashConfig: LocalConversationRuntimeConfig = {
-      ...config,
-      custom_provider: {
-        loomy: { models: { 'acc-loomy/qwen-3.8-max': { limit: { context: 64_000 } } } },
-      },
-    };
-    const save = (model: string) =>
-      resolveEffectiveAgentModelSelection({
-        config: slashConfig,
-        sources: [
-          {
-            source: 'agent-config-save',
-            selection: { model },
-            requireCatalog: true,
-            allowCustomProviderPrefixFallback: true,
-            defaultMissingEffortOff: true,
-          },
-        ],
-      });
-
-    expect(save('custom_provider:loomy/acc-loomy/qwen-3.8-max')).toMatchObject({
-      providerId: 'custom_provider:loomy',
-      modelId: 'acc-loomy/qwen-3.8-max',
-      contextWindow: 64_000,
-    });
-    expect(() => save('custom_provider:loomy/acc-loomy/missing')).toThrow(
-      'Model custom_provider:loomy/acc-loomy/missing',
-    );
-  });
 }
 
 function registerAgentModelInputValidationTests(): void {
@@ -884,4 +854,100 @@ function m3Config(
       runtime: { models: { 'MiniMax-M3': m3 } },
     },
   };
+}
+
+function registerTaskVariantSelectionTests(): void {
+  const variantConfig: LocalConversationRuntimeConfig = {
+    ...config,
+    defaultModel: 'minimax/MiniMax-M3.1-Flash',
+    provider: {
+      minimax: {
+        models: {
+          'MiniMax-M3.1-Flash': {
+            limit: { context: 512_000, output: 128_000 },
+            contextWindowOptions: [512_000, 1_000_000],
+            thinking_config: { mode: 'forced_on' },
+            thinking: {
+              effortOptions: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+              defaultEffort: 'default',
+            },
+            variants: {
+              thinking: { thinking: { type: 'adaptive' } },
+              'none-thinking': { thinking: { type: 'disabled' } },
+            },
+          },
+          'MiniMax-M3': {
+            limit: { context: 512_000, output: 128_000 },
+            thinking_config: { mode: 'switchable', default_value: 'true' },
+            thinking: { effortOptions: ['on', 'off'], defaultEffort: 'on' },
+            variants: {
+              thinking: { thinking: { type: 'adaptive' } },
+              'none-thinking': { thinking: { type: 'disabled' } },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  it('fails closed for an unknown variant with the available variant list', () => {
+    expect(() =>
+      resolveAgentModelSelection({
+        config: variantConfig,
+        sources: [
+          {
+            source: 'task-model-override',
+            selection: { model: 'minimax/MiniMax-M3.1-Flash', variant: 'turbo' },
+            requireCatalog: true,
+          },
+        ],
+      }),
+    ).toThrow(
+      'Variant "turbo" from task-model-override is not available for minimax/MiniMax-M3.1-Flash (available: thinking).',
+    );
+  });
+
+  it('resolves task override variants through the managed path', () => {
+    expect(
+      resolveAgentModelSelection({
+        config: variantConfig,
+        sources: [
+          {
+            source: 'task-model-override',
+            selection: { model: 'minimax/MiniMax-M3.1-Flash', variant: 'thinking' },
+            requireCatalog: true,
+          },
+        ],
+      }),
+    ).toMatchObject({ reasoning: true, effort: 'default' });
+    expect(
+      resolveAgentModelSelection({
+        config: variantConfig,
+        sources: [
+          {
+            source: 'task-model-override',
+            selection: { model: 'minimax/MiniMax-M3', variant: 'none-thinking' },
+            requireCatalog: true,
+          },
+        ],
+      }),
+    ).toMatchObject({ reasoning: false, effort: 'off' });
+  });
+
+  it('hints at the split syntax when a raw # suffix reaches the catalog miss', () => {
+    expect(() =>
+      resolveAgentModelSelection({
+        config: variantConfig,
+        sources: [
+          {
+            source: 'task-model-override',
+            selection: { model: 'minimax/MiniMax-M3.1-Flash#thinking' },
+            requireCatalog: true,
+          },
+        ],
+      }),
+    ).toThrow(
+      'Model minimax/MiniMax-M3.1-Flash#thinking from task-model-override is unavailable in the current catalog. Use provider/model#variant so the variant is selected separately.',
+    );
+  });
 }

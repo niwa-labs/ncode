@@ -114,7 +114,7 @@ jobs:
           retention-days: 14
   publish:
     needs: [build, install]
-    if: github.event_name == 'push'
+    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -149,7 +149,7 @@ jobs:
   # Opt-in: set repo variable MCODE_ACP_PUBLISH=true and secret NPM_TOKEN.
   publish-acp:
     needs: [build, publish]
-    if: github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'
+    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'
     permissions:
       contents: read
       id-token: write

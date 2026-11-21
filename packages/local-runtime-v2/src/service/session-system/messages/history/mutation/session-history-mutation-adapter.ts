@@ -8,6 +8,10 @@ import {
   type CanonicalHistoryEnvelope,
 } from '../../../sessions/representation/canonical-history-contract.js';
 import { createCanonicalHistoryFileAdapter } from '../../../sessions/representation/canonical-history.js';
+import {
+  CanonicalHistoryIndexWriteError,
+  createCanonicalHistoryIndexAdapter,
+} from './canonical-history-index.js';
 import { scanCanonicalHistoryArtifacts } from './canonical-history-scanner.js';
 import type { SessionRepository } from '../../../sessions/repo/contract.js';
 import {
@@ -26,10 +30,12 @@ import {
   type SessionHistoryIoLane,
 } from './session-history-coordination.js';
 import {
+  planCloseReleasedToolRound,
   planRetractTurn,
   planSettleTurnTail,
   toTurnHistoryMutationCommit,
   validateRetractTurnInput,
+  type CloseReleasedToolRoundInput,
   type RetractTurnInput,
   type SessionHistorySnapshot,
   type SessionTurnHistoryMutationCommit,
@@ -37,6 +43,7 @@ import {
 } from './session-turn-history-mutation.js';
 
 export type {
+  CloseReleasedToolRoundInput,
   RetractTurnInput,
   RetractTurnReason,
   SessionHistorySnapshot,
@@ -68,6 +75,9 @@ export interface SessionHistoryMutationRead {
 export interface SessionHistoryMutationCapability {
   read(sessionId: string): Promise<SessionHistoryMutationRead>;
   settleTurnTail?(input: SettleTurnTailInput): Promise<SessionTurnHistoryMutationCommit>;
+  closeReleasedToolRound?(
+    input: CloseReleasedToolRoundInput,
+  ): Promise<SessionTurnHistoryMutationCommit & { readonly closed: readonly string[] }>;
   retractTurn?(input: RetractTurnInput): Promise<SessionTurnHistoryMutationCommit>;
   readForUserMessage?(input: {
     readonly sessionId: string;
@@ -132,6 +142,7 @@ export function createSessionHistoryMutationAdapter(
   return {
     read: (sessionId) => ioLane.run(sessionId, () => read(sessionId)),
     settleTurnTail: (input) => ioLane.run(input.sessionId, () => settleTurnTail(input)),
+    closeReleasedToolRound: (input) => ioLane.run(input.sessionId, () => closeReleasedToolRound(input)),
     retractTurn: (input) => ioLane.run(input.sessionId, () => retractTurn(input)),
     readForUserMessage: (input) => readForUserMessageBoundary(context, read, input),
     stageFork: (input) =>
@@ -199,7 +210,13 @@ export function createSessionHistoryMutationAdapter(
     input: SettleTurnTailInput,
   ): Promise<SessionTurnHistoryMutationCommit> {
     const history = await read(input.sessionId);
-    const plan = planSettleTurnTail(history.active, input);
+    const plan = planSettleTurnTail(history.active, {
+      ...input,
+      // The commit timestamp of synthesized abort records (incident 03):
+      // unknown-outcome results of an unclosed round are honest abort-time
+      // records, stamped when the reconcile publishes them.
+      timestampMs: input.timestampMs ?? Date.now(),
+    });
     if (plan.status === 'unchanged') {
       return toTurnHistoryMutationCommit({
         status: plan.status,
@@ -220,6 +237,48 @@ export function createSessionHistoryMutationAdapter(
       active: committed,
       deletedMessageIds: plan.deletedMessageIds,
     });
+  }
+
+  /**
+   * Recovery join of a released native task wait (§1.8, wave 3): closes the
+   * trailing open tool round with the KNOWN seam release results (the §2.2
+   * note) and honest unknown outcomes for the rest — exactly once (after the
+   * commit the round is closed, so a retried join reports `unchanged`).
+   */
+  async function closeReleasedToolRound(
+    input: CloseReleasedToolRoundInput,
+  ): Promise<SessionTurnHistoryMutationCommit & { readonly closed: readonly string[] }> {
+    const history = await read(input.sessionId);
+    const plan = planCloseReleasedToolRound(history.active, {
+      ...input,
+      timestampMs: input.timestampMs ?? Date.now(),
+    });
+    if (plan.status === 'unchanged') {
+      return {
+        ...toTurnHistoryMutationCommit({
+          status: plan.status,
+          generation: history.activeGeneration,
+          active: plan.active,
+          deletedMessageIds: [],
+        }),
+        closed: plan.closed,
+      };
+    }
+    const session = await requireSession(options, input.sessionId);
+    const paths = await locations.ensure(session);
+    await files.replaceActive(paths.messages, plan.active);
+    await validatePublished(paths, input.sessionId, history.activeGeneration, false);
+    const committed = await files.readStrict(paths.messages);
+    options.activity?.notify(input.sessionId);
+    return {
+      ...toTurnHistoryMutationCommit({
+        status: 'committed',
+        generation: history.activeGeneration,
+        active: committed,
+        deletedMessageIds: [],
+      }),
+      closed: plan.closed,
+    };
   }
 
   async function retractTurn(input: RetractTurnInput): Promise<SessionTurnHistoryMutationCommit> {
@@ -560,6 +619,11 @@ async function validatePublished(
   }
   if (published.catalog.activeGeneration !== generation || published.orphans.length > 0) {
     throw new Error('Published canonical history generation is not reachable');
+  }
+  try {
+    await createCanonicalHistoryIndexAdapter(paths.sessionDir).rebuild(published);
+  } catch (error) {
+    if (!(error instanceof CanonicalHistoryIndexWriteError)) throw error;
   }
 }
 

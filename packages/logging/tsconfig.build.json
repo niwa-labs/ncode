@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    // Build of the shipped `dist/` (spec §1.1): exports["."].import points at
+    // ./dist/index.js, and raw-Node contexts (storage-worker worker threads,
+    // kill-9/crash-test children) resolve @mavis/logging through it. The dist
+    // is self-contained: only node:* builtins, no runtime dependencies.
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"]
+}

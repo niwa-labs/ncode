@@ -1,3 +1,1 @@
-# Release coordinator; assign an independent collaborator to review author changes.
-# This file routes reviews; repository settings control whether approval is required.
-* @hetaoBackend
+# Configure reviewers when the Niwa Labs fork has an assigned maintenance team.

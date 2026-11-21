@@ -1,14 +1,15 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
-import {
-  isContextOverflow,
-  type AssistantMessage,
-  type AssistantMessageEvent,
-  type AssistantMessageEventStream,
-  type ProviderResponse,
-  type SimpleStreamOptions,
+import type {
+  AssistantMessage,
+  AssistantMessageEvent,
+  AssistantMessageEventStream,
+  ProviderResponse,
+  SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import {
   isLLMDeterministicRequestRejection,
+  isLLMProviderRefusalStopReason,
+  isLLMProviderSafetyStopReason,
   normalizeLLMError,
   toLLMMetricErrorKind,
   toLLMProtocolClassification,
@@ -43,10 +44,13 @@ export interface LLMRetryPolicy {
 }
 
 export const DEFAULT_LLM_RETRY_POLICY: Readonly<LLMRetryPolicy> = {
-  maxRetries: 5,
+  maxRetries: 100,
   baseDelayMs: 1_000,
   maxDelayMs: 30_000,
-  maxRetryElapsedMs: 120_000,
+  // 100 retries at the 30s backoff cap sum to ~48 min, so the elapsed
+  // deadline must exceed that or the loop stops retrying long before
+  // maxRetries is reached.
+  maxRetryElapsedMs: 3_600_000,
 };
 
 export interface LLMRetryError {
@@ -134,6 +138,54 @@ export interface LLMRetryOptions {
   nowMs?: () => number;
   random?: () => number;
   sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+  /** Product-owned subscription quota probe. Undefined means this provider is not managed. */
+  subscriptionQuota?: (input: { provider: string; modelId: string; signal?: AbortSignal }) => Promise<{ resetAtMs?: number } | undefined>;
+  /**
+   * В1 (opus-decisions-20261101) context-overflow recovery. A transport
+   * retry inside {@link withLLMRetry} re-sends the SAME provider context —
+   * an overflowed request would fail identically — so the ONE compact-and-
+   * retry lives ABOVE the request: after the agent run settles with an
+   * overflow-failed response, the runner rejects the failed response out of
+   * the transcript and hands `recover` the SINGLE continuation whose request
+   * recompiles the context (`convertToLlm` → the cut window). The host
+   * implementation composes `runWithOverflowRecovery` (`@mavis/context-
+   * compaction`): compact → replaceMessages → one retry → the omission of
+   * the failed attempt recorded on the second failure. Absent → the failure
+   * stands (the pre-В1 behavior, never regressed).
+   */
+  contextOverflowRecovery?: LLMContextOverflowRecovery;
+}
+
+/**
+ * Host-provided recovery of ONE context-overflow request failure. `agent-
+ * core` owns only the retry re-entry (the continuation) and the failed
+ * response's transcript rejection; the compaction and the omission are the
+ * host's (it owns the canonical history, the unified compaction seam and
+ * the wire pipeline reseed).
+ */
+export interface LLMContextOverflowRecovery {
+  /**
+   * Classifies a failed run (the assistant `errorMessage` text) as a context
+   * overflow. Required — agent-core deliberately imports no provider-error
+   * heuristics; the host pins `isContextOverflowError`.
+   */
+  isOverflowError: (error: unknown) => boolean;
+  /**
+   * Runs the recovery around the ONE continuation `retry` (the runner's
+   * `agent.continue()`): at most one compaction, exactly one retry, and the
+   * failed attempt's omission recorded when the retry fails terminally.
+   * `failed.error` is the ALREADY-OBSERVED failure of the original request —
+   * the recovery's attempt sequence starts from that verdict (the original
+   * request must not be re-sent), so the compaction precedes the single
+   * continuation. Resolves on success; rethrows the terminal failure (the
+   * run outcome is then computed from the post-recovery agent state).
+   */
+  recover: (retry: () => Promise<void>, failed: LLMFailedOverflowAttempt) => Promise<void>;
+}
+
+/** The observed failure of the request the recovery starts from. */
+export interface LLMFailedOverflowAttempt {
+  readonly error: unknown;
 }
 
 interface RetryFailure {
@@ -201,9 +253,10 @@ export function withLLMRetry(inner: StreamFn, input: LLMRetryOptions): StreamFn 
     const callState: RetryCallState = { retryTriggered: false, requestAttempts: 0 };
     let retryStartedAtMs: number | undefined;
     let requestAttempt = 1;
+    let transientRetries = 0;
     let lastFailure: RetryableFailure | undefined;
 
-    while (requestAttempt <= policy.maxRetries + 1) {
+    while (true) {
       if (options?.signal?.aborted) {
         const error = abortError(options.signal);
         notifyCallSettled(
@@ -245,8 +298,49 @@ export function withLLMRetry(inner: StreamFn, input: LLMRetryOptions): StreamFn 
           signal: options?.signal,
         });
       }
+      // A subscription reset is not a network retry: preserve the exact
+      // uncommitted request and do not consume the short transport retry budget.
+      if (preflight.failure.error.reason === 'usage_limit' && input.scope !== 'title' && input.subscriptionQuota) {
+        let quota: { resetAtMs?: number } | undefined;
+        try { quota = await input.subscriptionQuota({ provider: model.provider, modelId: model.id, signal: options?.signal }); }
+        catch (error) {
+          if (options?.signal?.aborted) {
+            discardAttempt(preflight.failure);
+            await notify(input.observer, { sessionId: input.sessionId, turnId: input.turnId, callId,
+              scope: input.scope, status: 'cancelled', retryAttempt: requestAttempt - 1,
+              maxRetries: policy.maxRetries, requestAttempt, error: preflight.failure.error });
+            notifyCallSettled({ input, model, callId, state: callState, signal: options.signal }, error);
+            throw error;
+          }
+          // A temporary probe outage must not lose an already waiting turn.
+          quota = {};
+        }
+        if (quota) {
+          const failure = preflight.failure;
+          discardAttempt(failure);
+          const waitStarted = nowMs();
+          const reset = quota.resetAtMs;
+          const delayMs = typeof reset === 'number' && Number.isFinite(reset) && reset > waitStarted
+            ? Math.min(8 * 24 * 60 * 60_000, reset - waitStarted + 2_000) : 5 * 60_000;
+          callState.retryTriggered = true;
+          const waiting: LLMRetryEvent = { sessionId: input.sessionId, turnId: input.turnId, callId,
+            scope: input.scope, status: 'waiting', retryAttempt: requestAttempt,
+            maxRetries: policy.maxRetries, requestAttempt: requestAttempt + 1,
+            delayMs, nextRetryAtMs: waitStarted + delayMs, error: failure.error };
+          await notify(input.observer, waiting);
+          try { await sleep(delayMs, options?.signal); }
+          catch (error) {
+            await notify(input.observer, { ...waiting, status: 'cancelled' });
+            notifyCallSettled({ input, model, callId, state: callState, signal: options?.signal }, error);
+            throw error;
+          }
+          retryStartedAtMs = undefined;
+          requestAttempt += 1;
+          continue;
+        }
+      }
       if (preflight.kind === 'terminal') {
-        if (requestAttempt > 1 && lastFailure) {
+        if (requestAttempt > 1) {
           const cancelled = options?.signal?.aborted || isAbortFailure(preflight.failure);
           await notify(input.observer, {
             sessionId: input.sessionId,
@@ -274,13 +368,13 @@ export function withLLMRetry(inner: StreamFn, input: LLMRetryOptions): StreamFn 
       }
 
       lastFailure = preflight.failure;
-      const retryAttempt = requestAttempt;
+      const retryAttempt = ++transientRetries;
       const delayMs = retryDelayMs(lastFailure.retryAfterMs, retryAttempt, policy, random);
       const failureAtMs = nowMs();
       retryStartedAtMs ??= failureAtMs;
       const retryDeadlineExceeded =
         failureAtMs + delayMs - retryStartedAtMs > policy.maxRetryElapsedMs;
-      if (requestAttempt > policy.maxRetries || retryDeadlineExceeded) {
+      if (transientRetries > policy.maxRetries || retryDeadlineExceeded) {
         await notify(input.observer, {
           sessionId: input.sessionId,
           turnId: input.turnId,
@@ -339,19 +433,6 @@ export function withLLMRetry(inner: StreamFn, input: LLMRetryOptions): StreamFn 
       }
       requestAttempt += 1;
     }
-
-    if (lastFailure) {
-      return observeTerminalFailure(lastFailure, {
-        input,
-        model,
-        callId,
-        state: callState,
-        signal: options?.signal,
-      });
-    }
-    const error = new Error('LLM retry loop ended without a provider result');
-    notifyCallSettled({ input, model, callId, state: callState, signal: options?.signal }, error);
-    throw error;
   }) as StreamFn;
 }
 
@@ -573,36 +654,32 @@ function failureResult(input: {
   nowMs: () => number;
   retryAllErrors?: boolean;
 }): PreflightResult {
-  // A 2xx response status only says the stream opened; a gateway that reports
-  // the rejection inside the stream (an SSE `error` event after HTTP 200) has
-  // no HTTP status for it. Classify such a failure by its own payload, so a
-  // wrapped size rejection is not vetoed as "status 200" and resent.
-  const responseStatus = input.response?.status;
-  const failureStatus =
-    responseStatus !== undefined && (responseStatus < 200 || responseStatus >= 300)
-      ? responseStatus
-      : undefined;
   const normalized = normalizeLLMError({
     ...(input.thrown !== undefined ? { raw: input.thrown } : {}),
     ...(input.final?.stopReason ? { finishReason: input.final.stopReason } : {}),
     ...(input.final?.errorMessage ? { errorMessage: input.final.errorMessage } : {}),
-    ...(failureStatus !== undefined ? { statusCode: failureStatus } : {}),
+    ...(input.final?.rawStopReason ? { rawStopReason: input.final.rawStopReason } : {}),
+    ...(input.response ? { statusCode: input.response.status } : {}),
     explicitAbort: input.final?.stopReason === 'aborted',
   });
   // BYOK retries every pre-output failure because custom gateways report errors
-  // inconsistently, but some failures are deterministic: a model safety refusal,
-  // or a request the provider rejects as invalid (too many images, or an HTTP
-  // 400 `invalid_request_error`). Retrying those only re-sends the same request,
+  // inconsistently, but some failures are deterministic: a model safety refusal
+  // or safety stop (`rawStopReason` "refusal"/"sensitive" — the structural pin
+  // signal, whose `errorMessage` is arbitrary provider text), or a request the
+  // provider rejects as invalid (too many images, or an HTTP 400
+  // `invalid_request_error`). Retrying those only re-sends the same request,
   // repeats (and may re-bill) the rejection and delays the actionable error by
   // the whole backoff window. The deterministic check excludes anything that
-  // also looks transient (timeout, network, 408/429/5xx). A context overflow,
-  // by tokens or by request bytes, is left to context management as in Pi.
+  // also looks transient (timeout, network, 408/429/5xx).
+  const structuralProviderStop =
+    normalized.facts.signals.has('refusal') ||
+    isLLMProviderRefusalStopReason(normalized.facts.rawStopReason) ||
+    isLLMProviderSafetyStopReason(normalized.facts.rawStopReason);
   const decision =
     input.retryAllErrors &&
     !normalized.facts.explicitAbort &&
-    !normalized.facts.signals.has('refusal') &&
-    !isLLMDeterministicRequestRejection(normalized) &&
-    !(input.final && isContextOverflow(input.final))
+    !structuralProviderStop &&
+    !isLLMDeterministicRequestRejection(normalized)
       ? { retryable: true, reason: 'network' as const }
       : toLLMRetryDecision(normalized);
   if (!decision.retryable) {
@@ -770,6 +847,7 @@ function classifyCallOutcome(
     ...(thrown !== undefined ? { raw: thrown } : {}),
     ...(final?.stopReason ? { finishReason: final.stopReason } : {}),
     ...(final?.errorMessage ? { errorMessage: final.errorMessage } : {}),
+    ...(final?.rawStopReason ? { rawStopReason: final.rawStopReason } : {}),
     explicitAbort: explicitAbort || final?.stopReason === 'aborted',
   });
   const errorKind = toLLMMetricErrorKind(normalized.facts);

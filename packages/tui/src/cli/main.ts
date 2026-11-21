@@ -13,6 +13,8 @@ import { configureTuiNetworkProxy } from './network-proxy.js';
 import { consumeLoginRestartHandoff } from '../tui/login-restart-handoff.js';
 import type { SystemPromptOverrides } from './system-prompt-options.js';
 import type { McodeTelemetryCliAction } from './telemetry-command.js';
+import type { McodeProfileCliRequest } from './profile-command.js';
+import type { McodeDaemonCliRequest } from './run-daemon-command.js';
 
 const OUTPUT_DRAIN_TIMEOUT_MS = 250;
 const MINIMAX_CODE_PROCESS_TITLE = 'minimax-code';
@@ -55,13 +57,16 @@ export interface RunTuiCliDependencies {
     version: string,
     lane?: string,
     systemPromptOverrides?: SystemPromptOverrides,
+    profile?: string,
+    noDaemon?: boolean,
   ) => Promise<void>;
   readonly runLogin?: (
     region?: MavisRegion,
     openBrowser?: boolean,
     lane?: string,
+    profile?: string,
   ) => Promise<string>;
-  readonly runLogout?: (region?: MavisRegion) => Promise<string>;
+  readonly runLogout?: (region?: MavisRegion, profile?: string) => Promise<string>;
   readonly runUpdate?: (version: string) => Promise<void>;
   readonly runProvider?: (
     request: McodeProviderCliRequest,
@@ -76,6 +81,14 @@ export interface RunTuiCliDependencies {
   readonly runTelemetry?: (
     action: McodeTelemetryCliAction,
     version: string,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string> | string;
+  readonly runProfile?: (
+    request: McodeProfileCliRequest,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string> | string;
+  readonly runDaemon?: (
+    request: McodeDaemonCliRequest,
     environment: NodeJS.ProcessEnv,
   ) => Promise<string> | string;
   readonly configureNetworkProxy?: typeof configureTuiNetworkProxy;
@@ -116,8 +129,9 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         workspaceDir,
         tuiMode,
         contextMode,
-        ptc,
         lane,
+        profile,
+        noDaemon,
         systemPromptOverrides,
       }) => {
         const launchTui = dependencies.launchTui ?? defaultLaunchTui;
@@ -131,8 +145,9 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
           ...(workspaceDir ? { workspaceDir } : {}),
           ...(tuiMode ? { tuiMode } : {}),
           ...(contextMode ? { contextMode } : {}),
-          ...(ptc ? { ptc: true } : {}),
           ...(lane ? { lane } : {}),
+          ...(profile ? { profile } : {}),
+          ...(noDaemon ? { noDaemon: true } : {}),
           ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
           ...(resumeDraftAfterLogin ? { resumeDraftAfterLogin: true } : {}),
         });
@@ -147,21 +162,19 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         );
         completedCommandExitMode = 'natural';
       },
-      runAcp: async (lane, systemPromptOverrides) => {
+      runAcp: async (lane, systemPromptOverrides, profile, noDaemon) => {
         const runAcp = dependencies.runAcp ?? defaultRunAcp;
-        await (systemPromptOverrides
-          ? runAcp(MINIMAX_CODE_VERSION, lane, systemPromptOverrides)
-          : runAcp(MINIMAX_CODE_VERSION, lane));
+        await runAcp(MINIMAX_CODE_VERSION, lane, systemPromptOverrides, profile, noDaemon);
         completedCommandExitMode = 'natural';
       },
-      runLogin: async (region, openBrowser, lane) => {
+      runLogin: async (region, openBrowser, lane, profile) => {
         const runLogin = dependencies.runLogin ?? defaultRunLogin;
-        processRef.stdout.write(`${await runLogin(region, openBrowser, lane)}\n`);
+        processRef.stdout.write(`${await runLogin(region, openBrowser, lane, profile)}\n`);
         completedCommandExitMode = 'natural';
       },
-      runLogout: async (region) => {
+      runLogout: async (region, profile) => {
         const runLogout = dependencies.runLogout ?? defaultRunLogout;
-        processRef.stdout.write(`${await runLogout(region)}\n`);
+        processRef.stdout.write(`${await runLogout(region, profile)}\n`);
         completedCommandExitMode = 'natural';
       },
       runUpdate: async () => {
@@ -182,6 +195,16 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
       runTelemetry: async (action) => {
         const runTelemetry = dependencies.runTelemetry ?? defaultRunTelemetry;
         processRef.stdout.write(await runTelemetry(action, MINIMAX_CODE_VERSION, processRef.env));
+        completedCommandExitMode = 'natural';
+      },
+      runProfile: async (request) => {
+        const runProfile = dependencies.runProfile ?? defaultRunProfile;
+        processRef.stdout.write(`${await runProfile(request, processRef.env)}\n`);
+        completedCommandExitMode = 'natural';
+      },
+      runDaemon: async (request) => {
+        const runDaemon = dependencies.runDaemon ?? defaultRunDaemon;
+        processRef.stdout.write(`${await runDaemon(request, processRef.env)}\n`);
         completedCommandExitMode = 'natural';
       },
     }).parseAsync(processRef.argv, { from: 'node' });
@@ -288,25 +311,26 @@ async function defaultRunAcp(
   version: string,
   lane?: string,
   systemPromptOverrides?: SystemPromptOverrides,
+  profile?: string,
+  noDaemon?: boolean,
 ): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
-  await (systemPromptOverrides
-    ? runTuiAcpCommand(version, {}, lane, systemPromptOverrides)
-    : runTuiAcpCommand(version, {}, lane));
+  await runTuiAcpCommand(version, {}, lane, systemPromptOverrides, profile, noDaemon);
 }
 
 async function defaultRunLogin(
   region?: MavisRegion,
   openBrowser = true,
   lane?: string,
+  profile?: string,
 ): Promise<string> {
   const { runTuiLogin } = await import('./auth-command.js');
-  return runTuiLogin({ region, openBrowser, lane });
+  return runTuiLogin({ region, openBrowser, lane, profile });
 }
 
-async function defaultRunLogout(region?: MavisRegion): Promise<string> {
+async function defaultRunLogout(region?: MavisRegion, profile?: string): Promise<string> {
   const { runTuiLogout } = await import('./auth-command.js');
-  return runTuiLogout({ region });
+  return runTuiLogout({ region, profile });
 }
 
 async function defaultRunUpdate(version: string): Promise<void> {
@@ -339,4 +363,21 @@ async function defaultRunTelemetry(
 ): Promise<string> {
   const { runMcodeTelemetryCommand } = await import('./telemetry-command.js');
   return runMcodeTelemetryCommand(action, version, { environment });
+}
+
+async function defaultRunProfile(
+  request: McodeProfileCliRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const { runMcodeProfileCommand } = await import('./profile-command.js');
+  return runMcodeProfileCommand({ request, environment });
+}
+
+/** Lazy on purpose: the daemon command pulls in the runtime host stack. */
+async function defaultRunDaemon(
+  request: McodeDaemonCliRequest,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const { runMcodeDaemonCommand } = await import('./run-daemon-command.js');
+  return runMcodeDaemonCommand({ request, environment });
 }

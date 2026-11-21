@@ -1,10 +1,9 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
 import * as acp from '@agentclientprotocol/sdk';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 
+import { createSessionPermissionModeRegistry } from '@mavis/local-runtime-v2';
+
+import { TuiFailure } from '../../src/failure.js';
 import { TUI_ACP_AVAILABLE_COMMANDS } from '../../src/acp/commands.js';
 import { createTuiAcpAgent } from '../../src/acp/agent.js';
 import { TuiAcpPromptContinuation } from '../../src/acp/prompt-continuation.js';
@@ -18,9 +17,6 @@ import type {
   TuiSkillList,
 } from '../../src/types/runtime-models.js';
 import type { TuiRuntimeEvent } from '../../src/types/runtime-events.js';
-
-const ONE_PIXEL_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 function createRuntime(
   events: readonly TuiStreamEvent[] = [],
@@ -65,11 +61,14 @@ function createRuntime(
     sessionId: 'session-1',
     workspaceDir,
   }));
+  // §2: the runtime contract carries the per-session permission-mode port;
+  // the mock backs it with the REAL registry and mirrors §2.3 (a turn locks).
+  const sessionPermissionModeRegistry = createSessionPermissionModeRegistry();
   const clearSessionMcpServers = vi.fn(async () => undefined);
   const configureSessionMcpServers = vi.fn(async () => undefined);
   const deleteSession = vi.fn(async () => undefined);
   const listSessionPage = vi.fn(async () => ({ sessions: [], hasMore: false }));
-  const getSession = vi.fn(async (sessionId: string) => ({
+  const getSession = vi.fn<TuiAcpRuntime['getSession']>(async (sessionId) => ({
     sessionId,
     workspaceDir: '/workspace',
   }));
@@ -95,11 +94,10 @@ function createRuntime(
   const setPermissionMode = vi.fn(
     async (mode: 'default' | 'auto' | 'bypassPermissions' | 'off') => mode,
   );
-  const steer = vi.fn(async (input: Parameters<TuiAcpRuntime['steer']>[0]) => {
-    const result = { turnId: 'turn-active', mode: 'steered' as const };
-    await input.preDelivery?.accept(result);
-    return result;
-  });
+  const steer = vi.fn(async (_input: Parameters<TuiAcpRuntime['steer']>[0]) => ({
+    turnId: 'turn-active',
+    mode: 'steered' as const,
+  }));
   const listQueuedMessages = vi.fn(async () => []);
   const enqueueMessage = vi.fn(async () => ({ itemId: 'queue-1', position: 1 }));
   const updateQueuedMessageContent = vi.fn(async () => undefined);
@@ -189,6 +187,7 @@ function createRuntime(
     forkSession,
     sendMessage: vi.fn(async function* sendMessage(req, signal) {
       await sendMessageCall(req, signal);
+      sessionPermissionModeRegistry.lock(req.id);
       if (!options.holdRunAfterEvents) {
         await runGate;
         if (aborted) {
@@ -201,8 +200,12 @@ function createRuntime(
         await runGate;
         if (aborted) {
           yield { type: 'session-status', status: 'aborted', turnId: req.turnId } as const;
+          return;
         }
       }
+      // A naturally finished turn ends with the terminal marker (the [DONE]
+      // inventory, verdict §2.3) — the sawTerminal net keys on it.
+      yield { type: 'done' } as const;
     }),
     abortSession,
     listModels,
@@ -211,6 +214,20 @@ function createRuntime(
     replyPermission: vi.fn(async () => true),
     replyQuestionnaire: vi.fn(async () => true),
     dismissQuestionnaire: vi.fn(async () => true),
+    bindSessionPermissionMode: vi.fn(
+      async (
+        sessionId: string,
+        mode: 'default' | 'auto' | 'bypassPermissions',
+        origin: 'new-explicit' | 'new-default' | 'load-explicit' | 'load-default' | 'set-config' | 'inherited',
+      ) => sessionPermissionModeRegistry.bind(sessionId, mode, origin),
+    ),
+    setSessionPermissionMode: vi.fn(
+      async (sessionId: string, mode: 'default' | 'auto' | 'bypassPermissions') =>
+        sessionPermissionModeRegistry.set(sessionId, mode),
+    ),
+    getSessionPermissionMode: vi.fn(
+      async (sessionId: string) => sessionPermissionModeRegistry.get(sessionId)?.mode,
+    ),
     watchEvents: vi.fn((signal: AbortSignal) =>
       (async function* runtimeEvents() {
         while (!signal.aborted) {
@@ -248,6 +265,7 @@ function createRuntime(
     getPlanModeCapabilities,
     getPermissionMode,
     setPermissionMode,
+    setSessionPermissionMode: runtime.setSessionPermissionMode as Mock,
     steer,
     listQueuedMessages,
     enqueueMessage,
@@ -1168,7 +1186,7 @@ describe('MiniMax Code ACP agent', () => {
             sse: true,
           },
           promptCapabilities: {
-            image: true,
+            image: false,
             audio: false,
             embeddedContext: false,
           },
@@ -1251,119 +1269,6 @@ describe('MiniMax Code ACP agent', () => {
         },
       },
     ]);
-  });
-
-  it('forwards prompt images to the Runtime as attachments and removes the temporary copies', async () => {
-    const { runtime, sendMessage } = createRuntime([
-      { type: 'session-status', status: 'finished' },
-    ]);
-    const png = Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64');
-    let deliveredBytes: Buffer | undefined;
-    sendMessage.mockImplementationOnce(async () => {
-      const [request] = sendMessage.mock.lastCall as unknown as [
-        { attachments: [{ local: { filePath: string } }] },
-      ];
-      deliveredBytes = await readFile(request.attachments[0].local.filePath);
-    });
-    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
-
-    await acp.client({ name: 'test-client' }).connectWith(agent, async (connection) => {
-      await connection.request(acp.methods.agent.initialize, {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {},
-      });
-      const session = await connection.request(acp.methods.agent.session.new, {
-        cwd: '/workspace',
-        mcpServers: [],
-      });
-      await expect(
-        connection.request(acp.methods.agent.session.prompt, {
-          sessionId: session.sessionId,
-          prompt: [
-            { type: 'text', text: 'Describe this.' },
-            { type: 'image', mimeType: 'image/png', data: ONE_PIXEL_PNG_BASE64 },
-          ],
-        }),
-      ).resolves.toEqual({ stopReason: 'end_turn' });
-    });
-
-    expect(sendMessage).toHaveBeenCalledWith(
-      {
-        id: 'session-1',
-        turnId: 'turn-1',
-        content: 'Describe this.',
-        attachments: [
-          {
-            meta: {
-              attachmentType: 'image',
-              fileName: 'image-1.png',
-              mimeType: 'image/png',
-              sizeBytes: png.byteLength,
-            },
-            local: { filePath: expect.stringContaining('minimax-code-acp-prompt-') },
-          },
-        ],
-      },
-      expect.any(AbortSignal),
-    );
-    expect(deliveredBytes).toEqual(png);
-    const [request] = sendMessage.mock.lastCall as unknown as [
-      { attachments: [{ local: { filePath: string } }] },
-    ];
-    await expect(stat(request.attachments[0].local.filePath)).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
-  });
-
-  it.each([
-    {
-      name: 'an unsupported image MIME type',
-      block: { type: 'image' as const, mimeType: 'image/svg+xml', data: ONE_PIXEL_PNG_BASE64 },
-      message: 'Prompt image MIME type image/svg+xml is not supported',
-    },
-    {
-      name: 'malformed image data',
-      block: { type: 'image' as const, mimeType: 'image/png', data: 'not base64!' },
-      message: 'Prompt image 1 is not valid base64 data.',
-    },
-    {
-      name: 'more images than the attachment limit',
-      blocks: Array.from({ length: 11 }, () => ({
-        type: 'image' as const,
-        mimeType: 'image/png',
-        data: ONE_PIXEL_PNG_BASE64,
-      })),
-      message: 'A prompt can include at most 10 images.',
-    },
-    {
-      name: 'an audio block',
-      block: { type: 'audio' as const, mimeType: 'audio/wav', data: 'AAAA' },
-      message: 'Prompt content type audio is not supported.',
-    },
-  ])('rejects $name without starting a Runtime turn', async (testCase) => {
-    const { message } = testCase;
-    const blocks: acp.ContentBlock[] = 'blocks' in testCase ? testCase.blocks : [testCase.block];
-    const { runtime, sendMessage } = createRuntime();
-    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
-
-    await acp.client({ name: 'test-client' }).connectWith(agent, async (connection) => {
-      await connection.request(acp.methods.agent.initialize, {
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {},
-      });
-      const session = await connection.request(acp.methods.agent.session.new, {
-        cwd: '/workspace',
-        mcpServers: [],
-      });
-      await expect(
-        connection.request(acp.methods.agent.session.prompt, {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'Look.' }, ...blocks],
-        }),
-      ).rejects.toMatchObject({ code: -32602, message: expect.stringContaining(message) });
-    });
-
-    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('cleans up cancelled new Sessions and bounds stalled creation generations', async () => {
@@ -1715,78 +1620,6 @@ describe('MiniMax Code ACP agent', () => {
     ]);
   });
 
-  it('replays image attachments of loaded user messages and keeps unavailable images visible', async () => {
-    const { runtime, getSession, listMessagePage } = createRuntime();
-    const assetDirectory = await mkdtemp(join(tmpdir(), 'acp-history-image-'));
-    const imagePath = join(assetDirectory, 'image-1.png');
-    await writeFile(imagePath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
-    const image = { type: 'image' as const, fileName: 'image-1.png', mimeType: 'image/png' };
-    getSession.mockResolvedValue({ sessionId: 'session-existing', workspaceDir: '/workspace' });
-    listMessagePage.mockResolvedValue({
-      messages: [
-        {
-          id: 'image-only',
-          role: 'user',
-          content: '',
-          attachments: [{ ...image, filePath: imagePath }],
-        },
-        {
-          id: 'image-caption',
-          role: 'user',
-          content: 'Describe this.',
-          attachments: [
-            { ...image, filePath: imagePath },
-            { ...image, fileName: 'gone.png', filePath: join(assetDirectory, 'gone.png') },
-          ],
-        },
-      ],
-      hasMore: false,
-    });
-    const updates: acp.SessionNotification[] = [];
-    const client = acp
-      .client({ name: 'test-client' })
-      .onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
-
-    try {
-      await client.connectWith(
-        createTuiAcpAgent({ runtime, version: '1.2.3' }),
-        async (connection) => {
-          await connection.request(acp.methods.agent.initialize, {
-            protocolVersion: acp.PROTOCOL_VERSION,
-            clientCapabilities: {},
-          });
-          await connection.request(acp.methods.agent.session.load, {
-            sessionId: 'session-existing',
-            cwd: '/workspace',
-            mcpServers: [],
-          });
-        },
-      );
-    } finally {
-      await rm(assetDirectory, { recursive: true, force: true });
-    }
-
-    const pngImage = { type: 'image', mimeType: 'image/png', data: ONE_PIXEL_PNG_BASE64 };
-    expect(
-      updates
-        .map(({ update }) => update)
-        .filter((update) => update.sessionUpdate === 'user_message_chunk'),
-    ).toEqual([
-      { sessionUpdate: 'user_message_chunk', messageId: 'image-only', content: pngImage },
-      {
-        sessionUpdate: 'user_message_chunk',
-        messageId: 'image-caption',
-        content: { type: 'text', text: 'Describe this.' },
-      },
-      { sessionUpdate: 'user_message_chunk', messageId: 'image-caption', content: pngImage },
-      {
-        sessionUpdate: 'user_message_chunk',
-        messageId: 'image-caption',
-        content: { type: 'text', text: '[Image: gone.png]' },
-      },
-    ]);
-  });
-
   it('stops old history work after close and reattachment', async () => {
     const { runtime, listMessagePage } = createRuntime();
     let releaseHistory!: () => void;
@@ -1845,6 +1678,40 @@ describe('MiniMax Code ACP agent', () => {
     });
 
     expect(replayed).toEqual([]);
+  });
+
+  it('does not report cancellation before the Runtime stop acknowledges settlement', async () => {
+    const { runtime, sendMessage, abortSession } = createRuntime([], { holdRunUntilAbort: true });
+    const originalAbort = abortSession.getMockImplementation()!;
+    let acknowledge!: () => void;
+    const acknowledged = new Promise<void>((resolve) => { acknowledge = resolve; });
+    abortSession.mockImplementation(async () => {
+      await originalAbort();
+      await acknowledged;
+      return true;
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'cancel-settlement-client' });
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace', mcpServers: [],
+      });
+      let settled = false;
+      const prompt = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId, prompt: [{ type: 'text', text: 'Run until stopped' }],
+      }).then((result) => { settled = true; return result; });
+      await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await vi.waitFor(() => expect(abortSession).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const settledBeforeAcknowledgement = settled;
+      acknowledge();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(settledBeforeAcknowledgement).toBe(false);
+    });
   });
 
   it('cancels active work and releases session-scoped resources on close', async () => {
@@ -2334,13 +2201,32 @@ describe('MiniMax Code ACP agent', () => {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {},
       });
+      for (const method of ['resume', 'load', 'fork'] as const) {
+        await expect(
+          connection.request(acp.methods.agent.session[method], {
+            sessionId: 'session-existing',
+            cwd: '/other',
+            mcpServers: [],
+          }),
+        ).rejects.toMatchObject({
+          code: -32602,
+          message:
+            'Requested cwd /other does not match the persisted session workspace /workspace. ' +
+            'Resume with cwd: "/workspace" or omit cwd.',
+          data: {
+            code: 'session_cwd_mismatch',
+            requestedCwd: '/other',
+            persistedCwd: '/workspace',
+          },
+        });
+      }
       await expect(
-        connection.request(acp.methods.agent.session.resume, {
+        connection.request(acp.methods.agent.session.load, {
           sessionId: 'session-existing',
-          cwd: '/other',
+          cwd: 'relative/workspace',
           mcpServers: [],
         }),
-      ).rejects.toThrow('does not match');
+      ).rejects.toThrow('Requested cwd must be an absolute path: relative/workspace.');
       await expect(
         connection.request(acp.methods.agent.session.load, {
           sessionId: 'session-existing',
@@ -2354,6 +2240,32 @@ describe('MiniMax Code ACP agent', () => {
           cwd: 'relative/workspace',
         }),
       ).rejects.toThrow('must be absolute');
+    });
+  });
+
+  it('rejects a cwd for a session without a persisted workspace with a dedicated message', async () => {
+    const { runtime, getSession } = createRuntime();
+    getSession.mockResolvedValue({
+      sessionId: 'session-existing',
+      workspaceDir: undefined,
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.load, {
+          sessionId: 'session-existing',
+          cwd: '/workspace',
+          mcpServers: [],
+        }),
+      ).rejects.toThrow(
+        'Session session-existing has no persisted workspace; cannot verify the requested cwd /workspace.',
+      );
     });
   });
 
@@ -2513,10 +2425,103 @@ describe('MiniMax Code ACP agent', () => {
           { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
           { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
           { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+          { optionId: 'deny-always', name: 'Always deny', kind: 'reject_always' },
         ],
       },
     ]);
     expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-1', 'allowOnce');
+  });
+
+  it('reject-always-option-shape', async () => {
+    const { runtime, emitRuntimeEvent, replyPermission } = createRuntime();
+    const permissionRequests: acp.RequestPermissionRequest[] = [];
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp
+      .client({ name: 'test-client' })
+      .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+        permissionRequests.push(params);
+        return { outcome: { outcome: 'selected', optionId: 'deny-always' } };
+      });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const supported = permissionEvent('permission-supported');
+      emitRuntimeEvent({
+        ...supported,
+        request: { ...supported.request, allowAlwaysSupported: true },
+      });
+      emitRuntimeEvent(permissionEvent('permission-unsupported'));
+
+      await vi.waitFor(() => expect(replyPermission).toHaveBeenCalledTimes(2));
+    });
+
+    expect(permissionRequests[0]?.options).toEqual([
+      { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      { optionId: 'deny-always', name: 'Always deny', kind: 'reject_always' },
+    ]);
+    // Without allowAlwaysSupported only the one-time options remain.
+    expect(permissionRequests[1]?.options).toEqual([
+      { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+    ]);
+    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-supported', 'denyAlways');
+    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-unsupported', 'deny');
+  });
+
+  it('unanswered-is-deny-no-rule', async () => {
+    const { runtime, emitRuntimeEvent, replyPermission, abortSession } = createRuntime();
+    const replies = new Map<string, () => acp.RequestPermissionResponse>([
+      [
+        'permission-rpc-error',
+        () => {
+          throw new Error('rpc failed');
+        },
+      ],
+      ['permission-cancelled', () => ({ outcome: { outcome: 'cancelled' } })],
+      [
+        'permission-unknown-option',
+        () => ({ outcome: { outcome: 'selected', optionId: 'nonexistent-option' } }),
+      ],
+    ]);
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp
+      .client({ name: 'test-client' })
+      .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+        const reply = replies.get(params.toolCall.toolCallId);
+        if (!reply) throw new Error(`No scripted reply for ${params.toolCall.toolCallId}`);
+        return reply();
+      });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      emitRuntimeEvent(permissionEvent('permission-rpc-error'));
+      emitRuntimeEvent(permissionEvent('permission-cancelled'));
+      emitRuntimeEvent(permissionEvent('permission-unknown-option'));
+
+      await vi.waitFor(() => expect(replyPermission).toHaveBeenCalledTimes(3));
+    });
+
+    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-rpc-error', 'deny');
+    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-cancelled', 'deny');
+    expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-unknown-option', 'deny');
+    // The Turn keeps running: an unanswered ask resolves it, never aborts the Session.
+    expect(abortSession).not.toHaveBeenCalled();
   });
 
   it('denies a forged allow-always decision when Runtime did not offer it', async () => {
@@ -2823,6 +2828,204 @@ describe('MiniMax Code ACP agent', () => {
     });
 
     expect(replyPermission).toHaveBeenLastCalledWith('mcode', 'permission-2', 'deny');
+  });
+
+  it('request-permission-unchanged: §4 marks never change the request shape', async () => {
+    const { runtime, emitRuntimeEvent, replyPermission } = createRuntime();
+    const permissionRequests: acp.RequestPermissionRequest[] = [];
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp
+      .client({ name: 'test-client' })
+      .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
+        permissionRequests.push(params);
+        return { outcome: { outcome: 'selected', optionId: 'allow-once' } };
+      });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      emitRuntimeEvent({
+        type: 'permission.ask',
+        timestampMs: 1,
+        source: 'runtime',
+        sessionId: 'session-1',
+        request: {
+          requestId: 'permission-shape',
+          sessionId: 'session-1',
+          agentName: 'mcode',
+          toolName: 'bash',
+          toolDescription: 'Run pnpm test',
+          toolInput: '{"command":"pnpm test"}',
+          allowAlwaysSupported: true,
+        },
+      });
+
+      await vi.waitFor(() => expect(replyPermission).toHaveBeenCalledOnce());
+    });
+
+    // Snapshot: the same toolCall {toolCallId=requestId, title, name, kind,
+    // rawInput, locations} + §1.2 options — and NO permission/mark fields.
+    expect(permissionRequests).toEqual([
+      {
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'permission-shape',
+          title: 'Run pnpm test',
+          name: 'bash',
+          kind: 'execute',
+          status: 'pending',
+          rawInput: { command: 'pnpm test' },
+        },
+        options: [
+          { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+          { optionId: 'deny-always', name: 'Always deny', kind: 'reject_always' },
+        ],
+      },
+    ]);
+  });
+
+  it('niwa-tolerates-meta: a client walks a turn carrying permission marks without errors', async () => {
+    const permissionMark = {
+      decision: 'allow' as const,
+      decidedBy: 'rule' as const,
+      ruleKind: 'builtin' as const,
+      mode: 'default' as const,
+      reason: 'Safe bash command',
+    };
+    const updates: acp.SessionUpdate[] = [];
+    const { runtime, sendMessage } = createRuntime([
+      {
+        type: 'delta',
+        messageId: 'msg-1',
+        toolCalls: [
+          {
+            id: 'call-mark',
+            name: 'bash',
+            status: 'started',
+            input: { command: 'pnpm test' },
+            permission: permissionMark,
+          },
+        ],
+      },
+      {
+        type: 'delta',
+        messageId: 'msg-1',
+        toolCalls: [
+          {
+            id: 'call-mark',
+            name: 'bash',
+            status: 'completed',
+            input: { command: 'pnpm test' },
+            output: 'ok',
+            permission: permissionMark,
+          },
+        ],
+      },
+      { type: 'session-status', status: 'finished' },
+    ]);
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp
+      .client({ name: 'niwa-fake' })
+      .onNotification(acp.methods.client.session.update, ({ params }) => {
+        updates.push(params.update);
+      });
+
+    // connectWith rejects on any protocol error — a clean completion is the
+    // tolerance proof.
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await connection.request(acp.methods.agent.session.prompt, {
+        sessionId: 'session-1',
+        prompt: [{ type: 'text', text: 'run the tests' }],
+      });
+      await vi.waitFor(() =>
+        expect(
+          updates.some(
+            (update) => update.sessionUpdate === 'tool_call_update' && update.status === 'completed',
+          ),
+        ).toBe(true),
+      );
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const markedToolCall = updates.find(
+      (update) => update.sessionUpdate === 'tool_call' && update.toolCallId === 'call-mark',
+    );
+    const markedUpdates = updates.filter(
+      (update) => update.sessionUpdate === 'tool_call_update' && update.toolCallId === 'call-mark',
+    );
+    expect(markedToolCall?._meta?.['minimax-code/permission']).toEqual(permissionMark);
+    expect(markedUpdates.length).toBeGreaterThan(0);
+    for (const update of markedUpdates) {
+      expect(update._meta?.['minimax-code/permission']).toEqual(permissionMark);
+    }
+  });
+
+  it('no-hidden-permission-deadline: a client may answer after 30s and the reply is applied', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime, emitRuntimeEvent, replyPermission } = createRuntime();
+      const answers: Array<(reply: acp.RequestPermissionResponse) => void> = [];
+      const seenToolCallIds: string[] = [];
+      const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+      const client = acp
+        .client({ name: 'test-client' })
+        .onRequest(
+          acp.methods.client.session.requestPermission,
+          ({ params }) =>
+            new Promise<acp.RequestPermissionResponse>((resolve) => {
+              seenToolCallIds.push(params.toolCall.toolCallId);
+              answers.push(resolve);
+            }),
+        );
+
+      await client.connectWith(agent, async (connection) => {
+        await connection.request(acp.methods.agent.initialize, {
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {},
+        });
+        await connection.request(acp.methods.agent.session.new, {
+          cwd: '/workspace',
+          mcpServers: [],
+        });
+        emitRuntimeEvent(permissionEvent('permission-slow'));
+
+        // 30 seconds pass with no client answer: no hidden deadline closes
+        // the interaction stream, no fail-closed deny is sent.
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(replyPermission).not.toHaveBeenCalled();
+
+        // The late answer (>30s after the ask) is applied verbatim.
+        answers[0]?.({ outcome: { outcome: 'selected', optionId: 'allow-once' } });
+        await vi.waitFor(() => expect(replyPermission).toHaveBeenCalledTimes(1));
+        expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-slow', 'allowOnce');
+
+        // The interaction pump survived the long wait: the next ask for the
+        // same session is bridged and answered normally.
+        emitRuntimeEvent(permissionEvent('permission-after'));
+        await vi.waitFor(() => expect(seenToolCallIds).toHaveLength(2));
+        answers[1]?.({ outcome: { outcome: 'selected', optionId: 'deny' } });
+        await vi.waitFor(() => expect(replyPermission).toHaveBeenCalledTimes(2));
+        expect(replyPermission).toHaveBeenCalledWith('mcode', 'permission-after', 'deny');
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('bridges Runtime questionnaires through ACP form elicitation when the client supports it', async () => {
@@ -3494,6 +3697,167 @@ describe('MiniMax Code ACP agent', () => {
     });
   });
 
+  // Incident 2026-11-05: an admission-class refusal (busy session) is NOT a
+  // runtime failure — the JSON-RPC error carries the structured code in
+  // `data`, and the text says "refused", not "Runtime failed".
+  it('reports a busy refusal with data.code and the "refused the prompt" text', async () => {
+    const { runtime } = createRuntime();
+    (runtime as unknown as {
+      sendMessage: {
+        mockImplementationOnce: (implementation: () => AsyncGenerator<TuiStreamEvent>) => void;
+      };
+    }).sendMessage.mockImplementationOnce(async function* busyRefusal() {
+      yield* [];
+      throw new TuiFailure('runtime', 'This session already has an active turn.', {
+        code: 'local_session_busy',
+        retryable: false,
+      });
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Interrupt a busy session' }],
+        }),
+      ).rejects.toMatchObject({
+        code: -32603,
+        message:
+          'Internal error: MiniMax Code refused the prompt (local_session_busy): ' +
+          'This session already has an active turn.',
+        data: { code: 'local_session_busy', retryable: false },
+      });
+    });
+  });
+
+  // Wave 2 (incident 2026-11-05, verdict §2.2в): a lost turn window is NEVER
+  // `end_turn` — a structured `turn_detached` JSON-RPC error, resumable.
+  it('reports a lost turn window as a turn_detached error, never end_turn', async () => {
+    const { TurnStreamDetached } = await import('../../src/runtime/remote-host.js');
+    const { runtime } = createRuntime();
+    (runtime as unknown as {
+      sendMessage: {
+        mockImplementationOnce: (implementation: () => AsyncGenerator<TuiStreamEvent>) => void;
+      };
+    }).sendMessage.mockImplementationOnce(async function* detachedWindow() {
+      yield { type: 'delta', role: 'assistant', content: 'Let me…' } as const;
+      throw new TurnStreamDetached({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        reason: 'detached',
+        attempts: 3,
+      });
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Lose the window' }],
+        }),
+      ).rejects.toMatchObject({
+        code: -32603,
+        message:
+          'Internal error: MiniMax Code lost the turn window (turn may still be running): ' +
+          'The turn window closed before the turn ended; the turn may still be running. ' +
+          '(reason: detached, attempts: 3)',
+        data: { code: 'turn_detached', sessionId: session.sessionId, resumable: true },
+      });
+    });
+  });
+
+  // The next-done shape of the same failure: the coordinator's sawTerminal net
+  // (verdict §2.2б) reports TURN_DETACHED for a source that ended without its
+  // terminal marker — the shim maps it identically.
+  it('reports the sawTerminal net outcome as turn_detached too', async () => {
+    const { runtime } = createRuntime();
+    (runtime as unknown as {
+      sendMessage: {
+        mockImplementationOnce: (implementation: () => AsyncGenerator<TuiStreamEvent>) => void;
+      };
+    }).sendMessage.mockImplementationOnce(async function* windowEndedEarly() {
+      yield { type: 'delta', role: 'assistant', content: 'Let me…' } as const;
+      // ends without `done` — the net fires.
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'End early' }],
+        }),
+      ).rejects.toMatchObject({
+        code: -32603,
+        data: { code: 'turn_detached', sessionId: session.sessionId, resumable: true },
+      });
+    });
+  });
+
+  it('keeps the "Runtime failed" prefix and no data for codeless runtime failures', async () => {
+    const { runtime } = createRuntime();
+    (runtime as unknown as {
+      sendMessage: {
+        mockImplementationOnce: (implementation: () => AsyncGenerator<TuiStreamEvent>) => void;
+      };
+    }).sendMessage.mockImplementationOnce(async function* codelessFailure() {
+      yield* [];
+      throw new Error('the provider exploded');
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => 'turn-1' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(
+        connection.request(acp.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'A genuine runtime failure' }],
+        }),
+      ).rejects.toMatchObject({
+        code: -32603,
+        message: 'Internal error: MiniMax Code Runtime failed: the provider exploded',
+        data: undefined,
+      });
+    });
+  });
+
   it('rejects managed login when the account is warning but the token is missing', async () => {
     const { runtime, createSession } = createRuntime([], {
       accountStatus: {
@@ -3711,7 +4075,7 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('applies mode intent to the next prompt and exposes Runtime-backed configuration', async () => {
-    const { runtime, getSession, sendMessage, setPermissionMode, selectSessionModel } =
+    const { runtime, getSession, sendMessage, setPermissionMode, setSessionPermissionMode, selectSessionModel } =
       createRuntime(
         [
           { type: 'delta', messageId: 'message-1', role: 'assistant', content: 'Planned.' },
@@ -3809,7 +4173,9 @@ describe('MiniMax Code ACP agent', () => {
       ).resolves.toEqual({ stopReason: 'end_turn' });
     });
 
-    expect(setPermissionMode).toHaveBeenCalledWith('auto');
+    // §2: the ACP option is session-scoped — the process mode stays untouched.
+    expect(setPermissionMode).not.toHaveBeenCalled();
+    expect(setSessionPermissionMode).toHaveBeenCalledWith('session-1', 'auto');
     expect(selectSessionModel).toHaveBeenCalledWith(
       { providerId: 'minimax', modelId: 'm3' },
       'session-1',
@@ -3833,7 +4199,7 @@ describe('MiniMax Code ACP agent', () => {
   });
 
   it('returns a successful permission-mode change when a background Session broadcast stalls', async () => {
-    const { runtime, getPermissionMode, setPermissionMode } = createRuntime();
+    const { runtime, getPermissionMode, setPermissionMode, setSessionPermissionMode } = createRuntime();
     const agent = createTuiAcpAgent({
       runtime,
       version: '1.2.3',
@@ -3868,31 +4234,32 @@ describe('MiniMax Code ACP agent', () => {
       })
       .catch(() => undefined);
 
-    expect(setPermissionMode).toHaveBeenCalledWith('auto');
+    expect(setPermissionMode).not.toHaveBeenCalled();
+    expect(setSessionPermissionMode).toHaveBeenCalledWith('session-1', 'auto');
   });
 
-  it('serializes process permission writes across close and another Session', async () => {
-    const { runtime, createSession, setPermissionMode } = createRuntime();
+  it('serializes session permission writes across close and another Session', async () => {
+    const { runtime, createSession, setSessionPermissionMode } = createRuntime();
     let nextSession = 1;
     createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
       sessionId: `session-${nextSession++}`,
       workspaceDir,
     }));
     let releaseOldWrite!: () => void;
-    const applied: string[] = [];
-    setPermissionMode
+    const applied: Array<[string, string]> = [];
+    setSessionPermissionMode
       .mockImplementationOnce(
-        (mode) =>
+        (sessionId: string, mode: string) =>
           new Promise((resolve) => {
             releaseOldWrite = () => {
-              applied.push(mode);
-              resolve(mode);
+              applied.push([sessionId, mode]);
+              resolve({ ok: true });
             };
           }),
       )
-      .mockImplementation(async (mode) => {
-        applied.push(mode);
-        return mode;
+      .mockImplementation(async (sessionId: string, mode: string) => {
+        applied.push([sessionId, mode]);
+        return { ok: true } as const;
       });
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp.client({ name: 'test-client' });
@@ -3916,7 +4283,7 @@ describe('MiniMax Code ACP agent', () => {
         value: 'bypassPermissions',
       });
       void oldWrite.catch(() => undefined);
-      await vi.waitFor(() => expect(setPermissionMode).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(setSessionPermissionMode).toHaveBeenCalledOnce());
       await connection.request(acp.methods.agent.session.close, { sessionId: first.sessionId });
       const newWrite = connection.request(acp.methods.agent.session.setConfigOption, {
         sessionId: second.sessionId,
@@ -3924,7 +4291,7 @@ describe('MiniMax Code ACP agent', () => {
         value: 'default',
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(setPermissionMode).toHaveBeenCalledOnce();
+      expect(setSessionPermissionMode).toHaveBeenCalledOnce();
 
       releaseOldWrite();
       await expect(oldWrite).rejects.toThrow('cancelled');
@@ -3933,28 +4300,26 @@ describe('MiniMax Code ACP agent', () => {
       );
     });
 
-    expect(applied).toEqual(['bypassPermissions', 'default']);
+    expect(applied).toEqual([
+      ['session-1', 'bypassPermissions'],
+      ['session-2', 'default'],
+    ]);
   });
 
   it('broadcasts a committed permission write even when its initiating Session closes', async () => {
-    const { runtime, createSession, getPermissionMode, setPermissionMode } = createRuntime();
+    const { runtime, createSession, setSessionPermissionMode } = createRuntime();
     let nextSession = 1;
     createSession.mockImplementation(async ({ workspaceDir }: { workspaceDir: string }) => ({
       sessionId: `session-${nextSession++}`,
       workspaceDir,
     }));
-    let currentMode: 'default' | 'auto' | 'bypassPermissions' = 'default';
     let releaseWrite!: () => void;
-    setPermissionMode.mockImplementation(
-      (mode) =>
+    setSessionPermissionMode.mockImplementation(
+      (_sessionId: string, _mode: string) =>
         new Promise((resolve) => {
-          releaseWrite = () => {
-            currentMode = mode === 'off' ? 'default' : mode;
-            resolve(mode);
-          };
+          releaseWrite = () => resolve({ ok: true } as const);
         }),
     );
-    getPermissionMode.mockImplementation(async () => currentMode);
     const updates: acp.SessionNotification[] = [];
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
     const client = acp
@@ -3980,10 +4345,14 @@ describe('MiniMax Code ACP agent', () => {
         value: 'bypassPermissions',
       });
       void write.catch(() => undefined);
-      await vi.waitFor(() => expect(setPermissionMode).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(setSessionPermissionMode).toHaveBeenCalledOnce());
       await connection.request(acp.methods.agent.session.close, { sessionId: first.sessionId });
       releaseWrite();
       await expect(write).rejects.toThrow('cancelled');
+      // §2: each Session broadcasts ITS OWN bound mode; the write on the
+      // closed first Session committed, so the second Session's update goes
+      // out with its own snapshot (default), proving delivery survived the
+      // initiator's close.
       await vi.waitFor(() =>
         expect(updates).toContainEqual({
           sessionId: second.sessionId,
@@ -3992,7 +4361,7 @@ describe('MiniMax Code ACP agent', () => {
             configOptions: expect.arrayContaining([
               expect.objectContaining({
                 id: 'permissionMode',
-                currentValue: 'bypassPermissions',
+                currentValue: 'default',
               }),
             ]),
           },
@@ -4030,8 +4399,12 @@ describe('MiniMax Code ACP agent', () => {
         cwd: '/workspace',
         mcpServers: [],
       });
-      expect(session.configOptions).not.toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: 'permissionMode' })]),
+      // §2: every ACP Session binds a mode; an unreadable process config
+      // degrades to the `default` snapshot instead of hiding the option.
+      expect(session.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'permissionMode', currentValue: 'default' }),
+        ]),
       );
 
       await expect(
@@ -4582,10 +4955,52 @@ describe('MiniMax Code ACP agent', () => {
         message: { content: '\n  Prioritize protocol tests  \n' },
         producerId: 'mcode-acp',
         idempotencyKey: 'client-steer-1',
-        preDelivery: { accept: expect.any(Function) },
+        expectActiveTurnId: 'turn-active',
       }),
     );
     expect(abortSession).toHaveBeenCalled();
+  });
+
+  it('resolves queue operations for a session the Runtime knows without an ACP attachment', async () => {
+    // Follow_up integrations enqueue into a session resumed elsewhere or
+    // created by another process: the queue family must resolve durably, not
+    // through THIS process's attachment map (mcode/session/steer semantics).
+    const { runtime, enqueueMessage } = createRuntime();
+    runtime.getSession = vi.fn<TuiAcpRuntime['getSession']>(async (sessionId) => ({
+      sessionId,
+      workspaceDir: '/workspace',
+    }));
+    enqueueMessage.mockResolvedValueOnce({ itemId: 'queue-9', sessionId: 'mvs_resumed' });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {
+          _meta: { 'minimax-code/extensions': { version: 1, notifications: true } },
+        },
+      });
+      // No session/new, no session/load: the attachment map is empty.
+      await expect(
+        connection.request<{ itemId: string }, { sessionId: string; text: string }>(
+          'mcode/session/queue/enqueue',
+          { sessionId: 'mvs_resumed', text: 'Follow up' },
+        ),
+      ).resolves.toMatchObject({ itemId: 'queue-9' });
+      expect(enqueueMessage).toHaveBeenCalledWith('mvs_resumed', 'Follow up');
+
+      // A session the Runtime itself does not know stays a Resource not found.
+      runtime.getSession = vi.fn(async () => {
+        throw new Error('session not found');
+      });
+      await expect(
+        connection.request<{ itemId: string }, { sessionId: string; text: string }>(
+          'mcode/session/queue/enqueue',
+          { sessionId: 'mvs_unknown', text: 'Follow up' },
+        ),
+      ).rejects.toMatchObject({ code: -32002 });
+    });
   });
 
   it('rejects ACP steering before the Runtime admits the prompt Turn', async () => {
@@ -4672,27 +5087,122 @@ describe('MiniMax Code ACP agent', () => {
         ),
       );
 
-      steer.mockImplementationOnce(async (input) => {
-        await input.preDelivery?.accept({ mode: 'activated', turnId: 'turn-new' });
-        return { turnId: 'turn-new', mode: 'steered' };
-      });
+      steer.mockImplementationOnce(async () => ({
+        turnId: 'turn-new',
+        mode: 'activated',
+        completion: new Promise(() => undefined),
+      }));
       await expect(
         connection.request('mcode/session/steer', {
           sessionId: session.sessionId,
           text: 'Do not activate',
         }),
-      ).rejects.toThrow('active ACP prompt Turn changed');
+      ).rejects.toThrow('Steering cannot activate a new Turn');
 
-      steer.mockImplementationOnce(async (input) => {
-        await input.preDelivery?.accept({ mode: 'steered', turnId: 'turn-other' });
-        return { turnId: 'turn-other', mode: 'steered' };
-      });
+      steer.mockImplementationOnce(async () => ({ turnId: 'turn-other', mode: 'steered' }));
       await expect(
         connection.request('mcode/session/steer', {
           sessionId: session.sessionId,
           text: 'Do not steer another Turn',
         }),
-      ).rejects.toThrow('active ACP prompt Turn changed');
+      ).rejects.toThrow('steer result did not match the active ACP prompt Turn');
+
+      await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    });
+  });
+
+  it('sends ACP steer inputs that survive the daemon JSON wire and reports refusals honestly', async () => {
+    const { runtime, sendMessage, steer } = createRuntime(
+      [
+        {
+          type: 'delta',
+          messageId: 'message-active',
+          role: 'assistant',
+          content: 'Working',
+          turnId: 'turn-active',
+        },
+      ],
+      { holdRunAfterEvents: true },
+    );
+    const agent = createTuiAcpAgent({
+      runtime,
+      version: '1.2.3',
+      createTurnId: () => 'turn-active',
+    });
+    const client = acp.client({ name: 'test-client' });
+    const activeUpdates: acp.SessionNotification[] = [];
+    client.onNotification(acp.methods.client.session.update, ({ params }) =>
+      activeUpdates.push(params),
+    );
+
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      const prompt = connection.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Start working' }],
+      });
+      await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+      // The prompt Turn is steerable once the Runtime accepted the run and a
+      // first chunk made it back (same admission signal the other tests use).
+      await vi.waitFor(() =>
+        expect(activeUpdates).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              update: expect.objectContaining({ sessionUpdate: 'agent_message_chunk' }),
+            }),
+          ]),
+        ),
+      );
+      await expect(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Change course now',
+        }),
+      ).resolves.toEqual({ turnId: 'turn-active', mode: 'steered' });
+
+      const wireInput = steer.mock.calls[0]?.[0];
+      expect(wireInput).toBeDefined();
+      // The exact regression: the steer input crosses the mcoded daemon wire
+      // as one JSON.stringify — a function field is silently dropped there
+      // and the daemon then throws "preDelivery.accept is not a function".
+      // Round-trip must be lossless: no function fields may exist.
+      expect(JSON.parse(JSON.stringify(wireInput))).toStrictEqual(wireInput);
+
+      // A runtime refusal surfaces as invalid params carrying the reason,
+      // never as the connection layer's bare "Internal error".
+      steer.mockImplementationOnce(async () => {
+        const error = new Error(
+          'Conversation Turn was rejected for session-1: active-turn',
+        ) as Error & { errorName?: string };
+        error.name = 'ConversationTurnRejectedError';
+        error.errorName = 'ConversationTurnRejectedError';
+        throw error;
+      });
+      await expect(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Refuse me',
+        }),
+      ).rejects.toThrow('Steering was not delivered to the active ACP prompt Turn');
+
+      // A transport failure stays an internal error, but with its cause.
+      steer.mockImplementationOnce(async () => {
+        throw new Error('daemon socket is not answering');
+      });
+      await expect(
+        connection.request('mcode/session/steer', {
+          sessionId: session.sessionId,
+          text: 'Fail me',
+        }),
+      ).rejects.toThrow('Internal error: daemon socket is not answering');
 
       await connection.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
       await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
@@ -6111,6 +6621,7 @@ describe('MiniMax Code ACP agent', () => {
         requests.push(request);
         if (requests.length === 1) await firstGate;
         yield { type: 'session-status', status: 'finished', turnId: request.turnId } as const;
+        yield { type: 'done' } as const;
       })(),
     );
     const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
@@ -6466,3 +6977,37 @@ function planReviewEvent(index: number): TuiRuntimeEvent {
     },
   };
 }
+
+it('delivers each compaction progress stage as informational ACP text in order', async () => {
+  const { runtime, emitRuntimeEvent } = createRuntime();
+  const updates: acp.SessionNotification[] = [];
+  const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+  const client = acp.client({ name: 'test-client' }).onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+  await client.connectWith(agent, async (connection) => {
+    await connection.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+    const session = await connection.request(acp.methods.agent.session.new, { cwd: '/workspace', mcpServers: [] });
+    const stages = ['preparing', 'installed', 'failed'] as const;
+    for (const [index, stage] of stages.entries()) emitRuntimeEvent({ type: 'session.compaction.progress', timestampMs: index + 1, source: 'runtime', sessionId: session.sessionId, progressId: `p-${index}`, stage });
+    await vi.waitFor(() => expect(updates.filter((u) => u.update._meta?.informational)).toHaveLength(3));
+    expect(updates.filter((u) => u.update._meta?.informational).map((u) => u.update._meta?.compactionStage)).toEqual(stages);
+    expect(updates.filter((u) => u.update._meta?.informational).every((u) => u.update.sessionUpdate === 'agent_message_chunk')).toBe(true);
+  });
+});
+
+it('shows subscription waiting as an ACP warning then reports automatic resumption', async () => {
+  const { runtime, emitRuntimeEvent } = createRuntime();
+  const updates: acp.SessionNotification[] = [];
+  const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+  const client = acp.client({ name: 'test-client' }).onNotification(acp.methods.client.session.update, ({ params }) => updates.push(params));
+  await client.connectWith(agent, async (connection) => {
+    await connection.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+    const session = await connection.request(acp.methods.agent.session.new, { cwd: '/workspace', mcpServers: [] });
+    const event = { type: 'session.llm_retry' as const, timestampMs: 1, source: 'runtime', sessionId: session.sessionId,
+      turnId: 'turn', callId: 'quota-call', scope: 'agent' as const, retryAttempt: 1, maxRetries: 100, requestAttempt: 2 };
+    emitRuntimeEvent({ ...event, status: 'waiting', nextRetryAtMs: 100_000, error: { reason: 'usage_limit', code: 42212 } });
+    await vi.waitFor(() => expect(updates.some((u) => u.update._meta?.subscriptionStatus === 'waiting')).toBe(true));
+    expect(updates.find((u) => u.update._meta?.subscriptionStatus === 'waiting')?.update._meta?.severity).toBe('warning');
+    emitRuntimeEvent({ ...event, status: 'recovered' });
+    await vi.waitFor(() => expect(updates.some((u) => u.update._meta?.subscriptionStatus === 'recovered')).toBe(true));
+  });
+});

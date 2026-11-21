@@ -14,8 +14,13 @@ export type ExecuteTuiBash = (input: {
 }) => Promise<TuiBashResult>;
 
 export const executeTuiBash: ExecuteTuiBash = async (input) => {
-  const { createLocalBashOperations } = await import('@earendil-works/pi-coding-agent/tools');
-  const operations = createLocalBashOperations({ parentDeathGuard: true });
+  // Port-mode (W01): the pin's coding-agent export map exposes only `.` and
+  // `./rpc-entry`, so the dynamic import targets the package root. The
+  // `parentDeathGuard` option came from our vendored 0.79 patch (ledger §5.1
+  // family `parent-death-guard`); the pin removed it and W01-C reapply
+  // restores the guard. Until then host bash runs unguarded, as upstream does.
+  const { createLocalBashOperations } = await import('@earendil-works/pi-coding-agent');
+  const operations = createLocalBashOperations();
   const env = { ...process.env };
   stripRuntimeBoundaryKeysFrom(env, 'agent-runtime');
   const decoders = {

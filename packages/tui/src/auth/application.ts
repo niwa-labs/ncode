@@ -1,10 +1,13 @@
 import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
-import type {
-  AuthStatusSnapshot,
-  DeviceAuthorizationPrompt,
-  LoginOptions,
-  LoginResult,
-  LogoutResult,
+import {
+  MCODE_OAUTH_SCOPES,
+  type AccessTokenLease,
+  type AccessTokenOptions,
+  type AuthStatusSnapshot,
+  type DeviceAuthorizationPrompt,
+  type LoginOptions,
+  type LoginResult,
+  type LogoutResult,
 } from '@mavis/oauth-core';
 
 import type {
@@ -14,6 +17,8 @@ import type {
   McodeLoginSource,
 } from '../analytics/business-telemetry.js';
 import { resolveMcodeAuthEnvironment } from './environment.js';
+import { clearCliAuthContext } from './storage.js';
+import { persistLoginIdentityCache } from './login-auth-context.js';
 import { buildMcodeLogoutUrl } from './logout-url.js';
 
 export type McodeAuthProgress = {
@@ -39,6 +44,8 @@ export interface McodeSharedAuthCore {
   getStatus(): Promise<AuthStatusSnapshot>;
   login(options?: LoginOptions): Promise<LoginResult>;
   logout(options: { revoke: boolean }): Promise<LogoutResult>;
+  /** Committed lease reader feeding the post-login identity projection. */
+  getAccessToken(options: AccessTokenOptions): Promise<AccessTokenLease>;
 }
 
 export interface McodeAuthApplicationOptions {
@@ -53,15 +60,15 @@ export interface McodeAuthApplicationOptions {
     dataDir: string,
     preference: { region: MavisRegion; buildEnv: MavisBuildEnv },
   ) => unknown;
+  /** Fetch implementation for the post-login identity projection; test seam. */
+  readonly fetchImpl?: typeof fetch;
 }
 
 export class McodeAuthApplication implements McodeAuthPort {
   private readonly scope: { region: MavisRegion; buildEnv: MavisBuildEnv };
 
   constructor(private readonly options: McodeAuthApplicationOptions) {
-    const environment = resolveMcodeAuthEnvironment({
-      runtimeRegion: process.env.MAVIS_REGION === 'en' ? 'en' : 'cn',
-    });
+    const environment = resolveMcodeAuthEnvironment();
     this.scope = {
       region: options.region ?? environment.region,
       buildEnv: options.buildEnv ?? environment.buildEnv,
@@ -93,6 +100,9 @@ export class McodeAuthApplication implements McodeAuthPort {
       });
       this.persistRegionPreference(requestedScope);
       const alreadyAuthenticated = wasAuthenticated && !deviceFlowStarted;
+      if (!alreadyAuthenticated) {
+        await this.projectLoginIdentityCache(requestedScope, sharedAuthCore);
+      }
       const result = {
         state: alreadyAuthenticated
           ? ('already-authenticated' as const)
@@ -121,6 +131,7 @@ export class McodeAuthApplication implements McodeAuthPort {
     // safe no-op in the core, and never blocking /logout keeps a wedged local
     // state recoverable.
     const result = await this.options.sharedAuthCore.logout({ revoke: true });
+    this.clearCachedLoginIdentity();
     const logoutUrl = buildMcodeLogoutUrl(this.scope);
     if (status.status === 'anonymous' && result.status === 'anonymous') {
       return { state: 'already-signed-out', message: 'Already signed out of MiniMax.', logoutUrl };
@@ -149,6 +160,46 @@ export class McodeAuthApplication implements McodeAuthPort {
       this.options.writeRegionPreference?.(this.options.dataDir, scope);
     } catch {
       // Region persistence must not invalidate an already completed OAuth login.
+    }
+  }
+
+  /**
+   * Wave 7 (owner complaint 2026-11-02): a fresh login used to leave the client
+   * identity cache (`local-runtime.auth.json`) unwritten — only the window
+   * runtime created it later, on a context refresh — so a window started right
+   * after `mcode login` showed "Temporarily unavailable" quotas and the
+   * daemon-login mismatch warning. Both login surfaces (CLI and the in-window
+   * /login) go through this application, so the grant is projected here.
+   */
+  private async projectLoginIdentityCache(
+    scope: { region: MavisRegion; buildEnv: MavisBuildEnv },
+    sharedAuthCore: McodeSharedAuthCore,
+  ): Promise<void> {
+    try {
+      const lease = await sharedAuthCore.getAccessToken({
+        requiredScopes: [...MCODE_OAUTH_SCOPES],
+        minValidityMs: 0,
+      });
+      const accessToken = lease.accessToken.trim();
+      if (!accessToken) return;
+      await persistLoginIdentityCache({
+        dataDir: this.options.dataDir,
+        scope,
+        accessToken,
+        ...(this.options.fetchImpl ? { fetchImpl: this.options.fetchImpl } : {}),
+      });
+    } catch {
+      // The identity cache is a login bonus (fail-open, like the rest of the
+      // product): an unreachable core or identity API leaves the cache stale or
+      // token-only and never fails the login it decorates.
+    }
+  }
+
+  private clearCachedLoginIdentity(): void {
+    try {
+      clearCliAuthContext(this.options.dataDir, this.scope);
+    } catch {
+      // Cache cleanup is best effort and never blocks a logout.
     }
   }
 

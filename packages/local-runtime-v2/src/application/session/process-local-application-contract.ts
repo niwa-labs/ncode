@@ -8,6 +8,7 @@ import type {
   AskQuestionnaireRequest,
 } from "@mavis/shared/questionnaire";
 import type { LocalSkillService } from "@mavis/local-runtime";
+import type { SandboxFilesystemMode } from "@mavis/config";
 import type { LocalMcpPublicFacade } from "../../service/mcp/index.js";
 import type {
   ListInstalledPluginsInput as ListInstalledPluginsReq,
@@ -77,21 +78,6 @@ interface LocalRuntimeBackgroundTaskView {
   readonly endedAt?: number;
   readonly deliveredAt?: number;
   readonly lastError?: { readonly message: string };
-  /**
-   * Terminal Tasks only: whether the root conversation still owes this Task's notification.
-   * Absent when the Runtime cannot read it; readers then treat the notification as settled.
-   */
-  readonly notification?: LocalRuntimeBackgroundTaskNotification;
-}
-
-/**
- * `pending`: terminal, and no Turn has taken the notification yet. `settled`: it was steered into
- * a running Turn or admitted as a new one (`turnId`), the result was read, or the user stopped
- * the Task. Settlement does not wait for the receiving Turn to finish.
- */
-interface LocalRuntimeBackgroundTaskNotification {
-  readonly state: 'pending' | 'settled';
-  readonly turnId?: string;
 }
 
 interface LocalRuntimeBackgroundTaskQuery {
@@ -100,11 +86,6 @@ interface LocalRuntimeBackgroundTaskQuery {
   readonly kinds?: readonly LocalRuntimeBackgroundTaskView["kind"][];
   readonly undeliveredOnly?: boolean;
   readonly limit?: number;
-  /**
-   * Read each terminal Task's root notification receipt and project `notification`. Off by
-   * default: only machine-status consumers need it, and other callers skip the ledger read.
-   */
-  readonly includeNotification?: boolean;
 }
 
 /** Internal peripheral Application surface consumed by process-local delivery. */
@@ -230,7 +211,7 @@ export interface LocalRuntimeApplication {
     }): Promise<readonly LocalRuntimePendingPermission[]>;
     reply(input: {
       requestIds: readonly string[];
-      decision: "allowAlways" | "allowOnce" | "deny";
+      decision: "allowAlways" | "allowOnce" | "deny" | "denyAlways";
     }): Promise<{ processed: readonly string[]; skipped: readonly string[] }>;
   };
   readonly account?: {
@@ -242,6 +223,18 @@ export interface LocalRuntimeApplication {
   readonly diagnostics?: {
     getRuntimeSnapshot(): Promise<Record<string, unknown>>;
     collectSessionReport?(sessionId: string): Promise<SessionReportManifest>;
+    /**
+     * W10 `/session` warmer status: the one-line prompt-cache warming status
+     * of the Session (`formatCacheWarmingStatus` render), `undefined` when
+     * the session keeps no warmer state or warming is off.
+     */
+    getSessionCacheWarmingStatus?(sessionId: string): string | undefined;
+    /**
+     * W1 §3.2: the sessions whose last durable→jsonl publication failed
+     * (`publishStale`). Status surfaces (`mcode daemon status`) read this —
+     * the durable log stays the source of truth and the next trigger retries.
+     */
+    getSessionPublishStaleSessions?(): readonly string[];
   };
   readonly instructions?: {
     listSources(input: {
@@ -255,14 +248,21 @@ export interface LocalRuntimeApplication {
     setPermissionMode(input: {
       mode: "default" | "acceptEdits" | "bypassPermissions" | "auto" | "off";
     }): Promise<unknown>;
-    /** Effective next-message suggestion switch, as this host's config projection sees it. */
-    getPromptSuggestionEnabled?(): Promise<boolean>;
-    /** Persists `promptSuggestion.enabled` in config.yaml and returns the effective value. */
-    setPromptSuggestionEnabled?(input: { enabled: boolean }): Promise<boolean>;
-    /** Effective `beta.ptc` for Sessions created (or compacted) from now on. */
-    getPtcEnabled?(): Promise<boolean>;
-    /** Persists `beta.ptc` in config.yaml and returns the effective value. */
-    setPtcEnabled?(input: { enabled: boolean }): Promise<boolean>;
+    /** Destructive-delete guard toggle; resolves the effective, fail-closed value. */
+    getDangerousCommandGateEnabled(): Promise<boolean>;
+    setDangerousCommandGateEnabled(input: {
+      enabled: boolean;
+    }): Promise<boolean>;
+    /**
+     * Sandbox filesystem level. Resolves `undefined` when the host runs no
+     * sandbox service: the layer is independent of the permission mode, and a
+     * host that enforces nothing must not report a level.
+     */
+    getSandboxFilesystemMode(): Promise<SandboxFilesystemMode | undefined>;
+    /** Re-initializes the sandbox backend and persists the new level. */
+    setSandboxFilesystemMode(input: {
+      mode: SandboxFilesystemMode;
+    }): Promise<SandboxFilesystemMode>;
   };
   readonly models?: {
     list(input?: { sessionId?: string }): Promise<readonly unknown[]>;

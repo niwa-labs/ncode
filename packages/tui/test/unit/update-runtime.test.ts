@@ -4,7 +4,9 @@ import {
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -357,6 +359,24 @@ function placeNodeBinaryAt(target: string) {
     copyFileSync(process.execPath, target);
   }
   chmodSync(target, 0o755);
+  // A dynamically linked node (e.g. Homebrew's) needs its libnode dylib
+  // reachable relative to the binary it runs from; mirror the real lib
+  // directory into the fake prefix so dyld resolves it inside the keg.
+  try {
+    const realLib = path.join(path.dirname(realpathSync(process.execPath)), '..', 'lib');
+    const fakeLib = path.join(path.dirname(target), '..', 'lib');
+    for (const entry of readdirSync(realLib)) {
+      if (!/^libnode\./.test(entry)) continue;
+      mkdirSync(fakeLib, { recursive: true });
+      try {
+        linkSync(path.join(realLib, entry), path.join(fakeLib, entry));
+      } catch {
+        copyFileSync(path.join(realLib, entry), path.join(fakeLib, entry));
+      }
+    }
+  } catch {
+    // A statically linked node has no dylib to mirror; nothing to do.
+  }
 }
 
 async function runNpmPrefixUpdate(

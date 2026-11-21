@@ -1,4 +1,5 @@
-import { getModel, type Api, type Model } from '@earendil-works/pi-ai';
+// pi 48c8f322: the static catalog helper moved to the pi-ai `./compat` entry.
+import { getModel, type Api, type Model } from '@earendil-works/pi-ai/compat';
 
 const FALLBACK_MODEL_LIMITS = {
   contextWindow: 200_000,

@@ -45,7 +45,10 @@ export interface RawTuiExecOptions extends RawSystemPromptOptions {
   lane?: string;
   outputLastMessage?: string;
   diagnosticsDir?: string;
-  ptc?: boolean;
+  /** Profile selector (`--profile`, applied to every command by the program). */
+  profile?: string;
+  /** Commander's negated `--no-daemon` flag (absent ⇒ true). */
+  daemon?: boolean;
 }
 
 export interface ResolvedTuiExecInvocation {
@@ -55,8 +58,6 @@ export interface ResolvedTuiExecInvocation {
   model?: string;
   effort?: string;
   contextMode?: McodeContextMode;
-  /** `--ptc`: PTC for a Session this Run creates; config.yaml is unchanged. */
-  ptc?: boolean;
   promptMode?: 'tui' | 'coding' | 'work';
   sessionId?: string;
   continueSession: boolean;
@@ -69,6 +70,11 @@ export interface ResolvedTuiExecInvocation {
   outputLastMessagePath?: string;
   reviewRequest?: { readonly scope: 'local_changes' };
   diagnosticsDir?: string;
+  /**
+   * Explicit `--no-daemon`: the run hosts the runtime in THIS process
+   * (overrides MCODE_SERVER_MODE) — isolated/wrapper exec runs.
+   */
+  noDaemon?: boolean;
   systemPromptOverrides?: SystemPromptOverrides;
 }
 
@@ -201,7 +207,6 @@ export async function resolveTuiExecInvocation(
     ...(options.model?.trim() ? { model: options.model.trim() } : {}),
     ...(effort === undefined ? {} : { effort }),
     ...(contextMode === 'lightweight' ? { contextMode } : {}),
-    ...(options.ptc === true ? { ptc: true } : {}),
     ...(options.session?.trim() ? { sessionId: options.session.trim() } : {}),
     continueSession: options.continue === true,
     ...(configPath ? { configPath } : {}),
@@ -212,6 +217,7 @@ export async function resolveTuiExecInvocation(
     ...(outputSchema === undefined ? {} : { outputSchema }),
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     ...(diagnosticsDir === undefined ? {} : { diagnosticsDir }),
+    ...(options.daemon === false ? { noDaemon: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }
@@ -268,6 +274,7 @@ async function resolveTuiExecReviewInvocation(
     format,
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     reviewRequest: { scope: 'local_changes' },
+    ...(options.daemon === false ? { noDaemon: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }

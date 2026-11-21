@@ -1,19 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generateImages } from "../src/images.ts";
-import type { ImagesContext, ImagesModel } from "../src/types.ts";
+import type { ImageModel, ImagesContext } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
-	clientOptions: [] as unknown[],
 	lastParams: undefined as unknown,
 	lastRequestOptions: undefined as unknown,
 }));
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
-		constructor(options: unknown) {
-			mockState.clientOptions.push(options);
-		}
-
 		chat = {
 			completions: {
 				create: (params: unknown, requestOptions?: unknown) => {
@@ -65,13 +60,13 @@ vi.mock("openai", () => {
 
 describe("openrouter images", () => {
 	beforeEach(() => {
-		mockState.clientOptions = [];
 		mockState.lastParams = undefined;
 		mockState.lastRequestOptions = undefined;
 	});
 
 	it("returns text plus images in final output", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "google/gemini-3.1-flash-image-preview",
 			name: "Gemini 3.1 Flash Image Preview",
 			api: "openrouter-images",
@@ -102,26 +97,9 @@ describe("openrouter images", () => {
 		expect(params.messages?.[0]?.content?.[0]).toMatchObject({ type: "text", text: "Generate a dog" });
 	});
 
-	it("passes custom fetch to the OpenAI image SDK client", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
-			id: "google/gemini-3.1-flash-image-preview",
-			name: "Gemini 3.1 Flash Image Preview",
-			api: "openrouter-images",
-			provider: "openrouter",
-			baseUrl: "https://openrouter.ai/api/v1",
-			input: ["text"],
-			output: ["image"],
-			cost: { input: 0.015, output: 0.03, cacheRead: 0, cacheWrite: 0 },
-		};
-		const fetchImpl = (async () => new Response()) as typeof globalThis.fetch;
-
-		await generateImages(model, { input: [{ type: "text", text: "Generate a dog" }] }, { apiKey: "test", fetch: fetchImpl });
-
-		expect(mockState.clientOptions[0]).toEqual(expect.objectContaining({ fetch: fetchImpl }));
-	});
-
 	it("passes through abort signal and returns aborted result", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "black-forest-labs/flux.2-pro",
 			name: "FLUX.2 Pro",
 			api: "openrouter-images",
@@ -144,7 +122,8 @@ describe("openrouter images", () => {
 	});
 
 	it("generateImages resolves the final assistant images result", async () => {
-		const model: ImagesModel<"openrouter-images"> = {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
 			id: "black-forest-labs/flux.2-pro",
 			name: "FLUX.2 Pro",
 			api: "openrouter-images",
@@ -160,5 +139,7 @@ describe("openrouter images", () => {
 
 		const output = await generateImages(model, context, { apiKey: "test" });
 		expect(output.output.some((item) => item.type === "image")).toBe(true);
+		// Image-only models must not request text output.
+		expect((mockState.lastParams as { modalities?: string[] }).modalities).toEqual(["image"]);
 	});
 });

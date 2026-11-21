@@ -1,5 +1,3 @@
-import { readConversationStopConfig } from '@mavis/config';
-
 import { disposeComponents } from './rendering/component.js';
 import {
   checkTuiApplicationUpdate,
@@ -38,11 +36,13 @@ import { TuiFeatureFlow } from './controller/product/feature-flow.js';
 import { TuiRuntimeEventFlow } from './controller/runtime/runtime-event-flow.js';
 import { TuiQueueFlow } from './controller/run/queue-flow.js';
 import { resolveTuiEffortChoice } from './features/model/effort.js';
+import { shouldAutoCheckin, markAutoCheckinDone } from '../checkin/auto-daily.js';
+import { TuiPromptSuggestionStore } from './features/composer/prompt-suggestion.js';
 import { TuiSessionFlow } from './controller/session-flow.js';
 import { TuiCommandFlow } from './controller/product/command-flow.js';
 import { TuiInputFlow } from './controller/interaction/input-flow.js';
-import { TuiPromptSuggestionStore } from './features/composer/prompt-suggestion.js';
 import { TuiPermissionModeFlow } from './controller/interaction/permission-mode-flow.js';
+import { TuiSandboxPolicyFlow } from './controller/interaction/sandbox-policy-flow.js';
 import { TuiPlanModeFlow } from './controller/interaction/plan-mode-flow.js';
 import { createTuiAbortLiveTurn } from './controller/run/abort-live-turn.js';
 import { createTuiUpdateFlow } from './controller/product/update-flow.js';
@@ -87,9 +87,10 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     displayModes: new TranscriptPresentationController(),
     workspaceDir: options.workspaceDir,
     appendOnly: () => renderer.mode === 'regular',
-    // Trailing frame for a streaming reply whose presentation is being paced.
-    requestRender: () => (started && !stopped ? tui.requestRender() : undefined),
   });
+  // Aggregated transcript counters join the render telemetry; the renderer
+  // re-attaches the provider after every main/fullscreen mode switch.
+  renderer.setTranscriptPerformanceProvider(() => transcriptView.getPerformanceSnapshot());
   const editor = createEditor(tui, workspaceRoots, options.runtime);
   let draftLifecycle: TuiDraftLifecycle | undefined;
   let draftStopPromise: Promise<void> | undefined;
@@ -136,6 +137,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     version: options.version,
     defaultAgentName,
     ...automationResultDelivery,
+    onAutomationResultPublished: (result) => delegationFlow.handleAutomationResultPublished(result),
     onTodoChange: (items) => tasks.setItems(items),
     onUserSubmissionProjected: () => {
       codexHandoffFlow?.dismiss();
@@ -205,7 +207,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     setEditTranscriptBoundary: transcriptVisibility.hideFromSourceMessage,
     onAgentTeamChanged: (snapshot) => tasks.setAgentTeam(snapshot),
     onBackgroundTasksChanged: (backgroundTasks) => tasks.setBackgroundTasks(backgroundTasks),
-    machineStatus: agentStatusEnabled,
     onChanged: updateChromeAndRequestRender,
     hasLiveRun,
   });
@@ -283,7 +284,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     stopTurn: () => {
       void abortLiveTurn();
     },
-    keybindings: options.keybindings,
   });
   const featureFlow = new TuiFeatureFlow({
     runtime: options.runtime,
@@ -327,11 +327,12 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     stateStore,
     transcript,
   });
-  const promptSuggestions = new TuiPromptSuggestionStore((metric) =>
-    businessEventTracker?.trackPromptSuggestion(metric),
-  );
+  // Post-turn next-message suggestion store. The Runtime gates generation per
+  // turn (interactive surface), so this only renders what was generated for a
+  // composer that can show it.
+  const promptSuggestions = new TuiPromptSuggestionStore();
   let pendingSuggestionSend:
-    | { readonly submissionToken: string; readonly reportSent: () => void }
+    | { readonly submissionToken: unknown; readonly reportSent: () => void }
     | undefined;
   editor.onAutocompleteView = (suggestions) =>
     businessEventTracker?.trackAutocompleteView(suggestions);
@@ -381,6 +382,9 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onChanged: updateChromeAndRequestRender,
     adoptRuntimeTurn: (sessionId, turnId, acceptedAtMs) =>
       runtimeEventFlow.adoptRuntimeTurn(sessionId, turnId, acceptedAtMs),
+    // Input wave 2 (FIFO): steers deliver the queued items that were typed
+    // earlier before the new message joins the live Turn.
+    drainQueueBeforeSteer: () => queueFlow.drainIntoActiveTurn(),
     queueEnabled: productFeatures.queue,
     keybindings: options.keybindings,
     isStopped: () => stopped,
@@ -401,13 +405,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       if (!stopped) tui.requestRender();
     },
     append: appendLocalCell,
-    // getConfigPath() in this process: the embedded Runtime pins it to the TUI data
-    // directory when it starts, and its own stop cascade reads the same file with
-    // the same function. Esc and the Runtime must decide from one file, or Esc
-    // could stop subagents whose cancellation notices the Runtime does not silence.
-    readStopPolicy: () => readConversationStopConfig(),
-    activeDelegatedAgentCount: () => delegationFlow.agentCounts().active,
-    observability: options.observability,
     onLiveTurnAborted: ({ turnId }) => {
       // Return the aborted prompt to the composer only when the turn produced
       // no user-visible output: any assistant text, tool call, or steer
@@ -638,12 +635,16 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     },
     isStopped: () => stopped,
   });
-  const readPtcSetting = options.runtime.getPtcSetting?.bind(options.runtime);
-  const writePtcSetting = options.runtime.setPtcEnabled?.bind(options.runtime);
-  const ptcSetting =
-    readPtcSetting && writePtcSetting
-      ? { read: () => readPtcSetting(), write: (enabled: boolean) => writePtcSetting(enabled) }
-      : undefined;
+  const sandboxPolicyFlow = new TuiSandboxPolicyFlow({
+    runtime: options.runtime,
+    append: appendLocalCell,
+    setHint: (message) => chromeFlow?.setHint(message),
+    onChanged: () => {
+      updateChrome(controller.snapshot());
+      tui.requestRender();
+    },
+    isStopped: () => stopped,
+  });
   commandFlow = new TuiCommandFlow({
     bashFlow,
     workspaceDir: options.workspaceDir,
@@ -657,20 +658,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     goalFlow,
     planModeFlow,
     permissionModeFlow,
-    ...(options.runtime.getPromptSuggestionEnabled && options.runtime.setPromptSuggestionEnabled
-      ? {
-          promptSuggestionSetting: {
-            read: () => options.runtime.getPromptSuggestionEnabled!(),
-            write: async (enabled: boolean) => {
-              const effective = await options.runtime.setPromptSuggestionEnabled!(enabled);
-              // Generation already stops in the Runtime; hide what is on screen too.
-              if (effective === false) promptSuggestions.clear();
-              return effective;
-            },
-          },
-        }
-      : {}),
-    ...(ptcSetting ? { ptcSetting } : {}),
+    sandboxPolicyFlow,
     ...(options.auth ? { auth: options.auth } : {}),
     openExternalTarget: options.openExternalTarget,
     interactionFlow,
@@ -733,6 +721,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     stateCoordinator: runtimeStateCoordinator,
     sessionFlow,
     delegationFlow,
+    promptSuggestions,
     activeRunFlow,
     interactionFlow,
     runProjection,
@@ -740,6 +729,9 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     transcript,
     refreshQueue: (sessionId) => queueFlow.refresh(sessionId),
     projectQueueItem: (item) => queueFlow.project(item),
+    // Input wave 2: a terminal that paused the Queue (user stop, final
+    // failure) must not strand typed messages — the TUI resumes the queue.
+    resumeQueueAfterTurnTerminal: () => queueFlow.resumeAfterTurnTerminal(),
     restoreFailedQueueItem: (itemId) => {
       const submission = queueFlow.takeOverFailedQueueItem(itemId);
       if (submission) commandFlow.restoreSubmission(submission);
@@ -751,7 +743,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     onRetryAvailabilityChanged: (sessionId, retryable) =>
       commandFlow.setSessionRetryable(sessionId, retryable),
     goalFlow,
-    promptSuggestions,
     updateFollowUpPanel: () => queueFlow.updatePanel(),
     onChanged: updateChromeAndRequestRender,
     append: appendLocalCell,
@@ -851,14 +842,6 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
         reportSent && submissionToken ? { submissionToken, reportSent } : undefined;
       return submissionToken;
     },
-    acceptPromptSuggestion: () => {
-      const text = composer.visiblePromptSuggestion();
-      const suggestion = promptSuggestions.candidate(controller.snapshot().session?.sessionId);
-      if (!text || !suggestion || suggestion.text !== text) return false;
-      editor.setText(text);
-      promptSuggestions.accept(suggestion);
-      return true;
-    },
     onSubmissionPrepared: (submissionToken, submission) =>
       draftLifecycle?.updatePendingSubmission(submissionToken, submission),
     onSubmissionAdmitted: (submissionToken) => {
@@ -869,11 +852,20 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       draftLifecycle?.settleSubmission(submissionToken);
     },
     onSubmissionSettled: (submissionToken) => draftLifecycle?.settleSubmission(submissionToken),
+    acceptPromptSuggestion: () => {
+      const text = composer.visiblePromptSuggestion();
+      const suggestion = promptSuggestions.candidate(controller.snapshot().session?.sessionId);
+      if (!text || !suggestion || suggestion.text !== text) return false;
+      editor.setText(text);
+      promptSuggestions.accept(suggestion);
+      return true;
+    },
     requestInteractionRender,
   });
   const detachInputFlow = inputFlow.attach();
   chromeFlow = new TuiChromeFlow({
     keybindings: options.keybindings,
+    promptSuggestion: promptSuggestions,
     version: options.version,
     workspace: options.workspaceDir,
     ...(options.homeDir ? { homeDir: options.homeDir } : {}),
@@ -906,14 +898,26 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     selectedEffort: () => featureFlow.selectedEffort(),
     permissionMode: () => permissionModeFlow.snapshot(),
     planMode: () => planModeFlow.snapshot(),
+    // W4 (§4.6): the daemon state read at EVERY projection update; the
+    // onChange subscription below triggers the update itself.
+    ...(options.daemonConnection
+      ? { daemonConnection: () => options.daemonConnection?.getState() }
+      : {}),
     sideConversation: () => sessionFlow.sideConversationSnapshot(),
     sessionState: () => stateStore.snapshot(),
     turnStartedAtMs: (turnId) => controller.turnStartedAtMs(turnId),
-    promptSuggestion: promptSuggestions,
     welcome,
     status,
     activity,
     composer,
+  });
+  // W4 (§4.6): a daemon state change (connecting/ready/reconnecting/offline)
+  // re-projects the chrome immediately — the status line never waits for the
+  // next unrelated snapshot.
+  const unsubscribeDaemonConnection = options.daemonConnection?.subscribe(() => {
+    if (!started || stopped) return;
+    updateChrome(controller.snapshot());
+    tui.requestRender();
   });
   function requestInteractionRender(): void {
     if (!started || stopped) return;
@@ -924,6 +928,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     await featureFlow.refreshSelectedModel();
     await Promise.all([
       permissionModeFlow.refresh().catch(() => undefined),
+      sandboxPolicyFlow.refresh().catch(() => undefined),
       planModeFlow.refreshCapabilities().catch(() => undefined),
     ]);
     await goalFlow?.refresh();
@@ -936,6 +941,18 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
   });
   async function stop(stopOptions: TuiStopOptions = {}): Promise<void> {
     if (stopped) return stoppedPromise;
+    // Owner bug 2026-11-06 (input lost): leaving the UI used to discard a
+    // non-empty Queue silently — the queued texts died with this process and
+    // nobody was told. Warn NOW, while the transcript can still carry the
+    // row into the exit flush (appendLocalCell refuses once `stopped`).
+    const queuedAtExit = runProjection.snapshot().queuedCount;
+    if (queuedAtExit > 0) {
+      appendLocalCell(
+        `Exiting with ${queuedAtExit} unsent message${queuedAtExit === 1 ? '' : 's'} still in the Queue — nothing was delivered.`,
+        'warning',
+      );
+      tui.requestRender();
+    }
     stateStore.dispatch({ type: 'lifecycle/leaveUi' });
     stopped = true;
     terminalNotifications.dispose();
@@ -951,10 +968,13 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
     delegationFlow.stop();
     activeRunFlow.stop();
     permissionModeFlow.stop();
+    sandboxPolicyFlow.stop();
     planModeFlow.stop();
     feedbackFlow.stop();
     updateFlow.stop();
     themeController.dispose();
+    unsubscribeDaemonConnection?.();
+    options.daemonConnection?.dispose();
     activity.dispose();
     widgets.imagePreview.dispose();
     renderer.prepareTranscriptExit();
@@ -1037,6 +1057,16 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
         .catch(() => undefined);
       void activeRunFlow.refresh().catch(() => undefined);
       void goalFlow?.refresh().catch(() => undefined);
+      // Owner request 2026-11-17: the daily check-in runs itself once per
+      // local day on interactive TUI open (never for pipe/exec surfaces —
+      // this start() path only fires for the interactive terminal UI).
+      if (process.stdout.isTTY && options.dataDir && shouldAutoCheckin(options.dataDir)) {
+        void featureFlow.runDailyCheckin().then((outcome) => {
+          if (outcome && outcome.status !== 'unavailable') {
+            markAutoCheckinDone(options.dataDir as string);
+          }
+        });
+      }
       checkTuiApplicationUpdate(options, updateNotice, () => stopped, tui);
     },
     suspend,

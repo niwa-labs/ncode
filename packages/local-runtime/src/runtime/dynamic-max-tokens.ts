@@ -1,4 +1,5 @@
-import { streamSimple, type Api, type Context, type Model } from '@earendil-works/pi-ai';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry.
+import { streamSimple, type Api, type Context, type Model } from '@earendil-works/pi-ai/compat';
 import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import { LLM_RETRY_CALL_IDENTITY } from '@mavis/agent-core/pi-turn-runner';
 import {

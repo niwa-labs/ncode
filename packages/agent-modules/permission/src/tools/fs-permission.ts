@@ -699,6 +699,33 @@ function isProtectedRuntimeRead(
   return false;
 }
 
+/**
+ * Agent-authored assets inside a private runtime root — user / agent skill
+ * directories (where skill-creator writes) and the agent's own workspace.
+ * They are mutable by design, so a write there keeps the ordinary boundary
+ * ask instead of the bypass-immune `privateRuntimeData` one (step 6.5).
+ * Canonical match only, like the read side: a symlinked `skills/` cannot
+ * redirect the exemption onto runtime state.
+ */
+function isRuntimeAgentAssetMutation(
+  canonicalPath: string,
+  agentName: string | undefined,
+  scope: RuntimeReadScope,
+): boolean {
+  return scope
+    .roots()
+    .some(
+      ({ canonicalRoot }) =>
+        isPathWithin(canonicalPath, path.join(canonicalRoot, 'skills')) ||
+        (agentName != null &&
+          (isPathWithin(canonicalPath, path.join(canonicalRoot, 'agents', agentName, 'skills')) ||
+            isPathWithin(
+              canonicalPath,
+              path.join(canonicalRoot, 'agents', agentName, 'workspace'),
+            ))),
+    );
+}
+
 type ProtectedRuntimeRoot = { readonly resolvedRoot: string; readonly canonicalRoot: string };
 
 /** The private runtime roots (`dataDir` and `~/.minimax`), lexical and canonical. */
@@ -844,8 +871,18 @@ function isPathWithin(target: string, root: string): boolean {
  * - plans/ directory
  * - automem paths
  * - agent memory paths
+ *
+ * `options.allowPermissionJson === false` (set for mutating tools) drops the
+ * two permission.json entries: the agent editing its own rule store is the
+ * "rewrite your guardrails" shape that must surface an approval even outside
+ * bypass mode (bypass-immune `privateRuntimeData` ask below), while the
+ * memory/plans assets the runtime hands the agent stay whitelisted.
  */
-export function isInternalWhitelistedPath(filePath: string, context: PathCheckContext): boolean {
+export function isInternalWhitelistedPath(
+  filePath: string,
+  context: PathCheckContext,
+  options: { allowPermissionJson?: boolean } = {},
+): boolean {
   const resolved = path.resolve(filePath);
   const { dataDir } = context;
 
@@ -854,7 +891,10 @@ export function isInternalWhitelistedPath(filePath: string, context: PathCheckCo
   const normalizedDataDir = path.resolve(dataDir);
 
   // permission.json in data dir
-  if (resolved === path.join(normalizedDataDir, 'permission.json')) {
+  if (
+    options.allowPermissionJson !== false &&
+    resolved === path.join(normalizedDataDir, 'permission.json')
+  ) {
     return true;
   }
 
@@ -892,7 +932,10 @@ export function isInternalWhitelistedPath(filePath: string, context: PathCheckCo
     }
 
     // agent permission.json
-    if (resolved === path.join(agentDir, 'permission.json')) {
+    if (
+      options.allowPermissionJson !== false &&
+      resolved === path.join(agentDir, 'permission.json')
+    ) {
       return true;
     }
   }
@@ -1106,7 +1149,13 @@ export function isPathAllowed(
   }
 
   // Step 2: Internal path whitelist
-  if (isInternalWhitelistedPath(resolved, context)) {
+  if (
+    isInternalWhitelistedPath(resolved, context, {
+      // Mutating tools lose the permission.json whitelist entry: the rule
+      // store is runtime-owned state (see step 6.5 below).
+      allowPermissionJson: READ_ONLY_TOOLS.has(toolName),
+    })
+  ) {
     return {
       allowed: true,
       reason: { type: 'internalWhitelist', path: resolved },
@@ -1285,12 +1334,30 @@ export function isPathAllowed(
     };
   }
 
+  // Mutation (write / delete) inside the private runtime tree (see step 6.5).
+  // Computed before step 6 because a bare-tool allow must not cover it.
+  // `execute` is not a mutation: running an installed skill script from the
+  // runtime tree (`bash ~/.minimax/skills/x/run.sh`) keeps its ordinary,
+  // bypass-waivable boundary ask instead of becoming a bypass-immune one;
+  // so does writing an agent-authored asset (skills, agent workspace).
+  const mutationCanonical =
+    !READ_ONLY_TOOLS.has(toolName) && toolName !== 'execute' ? resolveExistingPath(resolved) : '';
+  const privateRuntimeMutation =
+    mutationCanonical !== '' &&
+    isInsideRuntimeRoot(resolved, mutationCanonical, runtimeReadScope) &&
+    !isRuntimeAgentAssetMutation(mutationCanonical, context.agentName, runtimeReadScope);
+
   // Step 6: Allow rule matching
   for (const rule of toolRules) {
     if (rule.ruleBehavior !== 'allow') continue;
 
     if (!rule.ruleValue.ruleContent) {
-      // Bare tool allow — allows all operations for this tool
+      // Bare tool allow — allows all operations for this tool, except a
+      // private runtime tree mutation: the acceptEdits seed is exactly such a
+      // bare `edit`/`write`/`apply_patch` allow and must not silently grant
+      // permission.json edits (step 6.5). A path-specific content rule below
+      // still may (same shape as path-capability's immune-path allow rules).
+      if (privateRuntimeMutation) continue;
       return {
         allowed: true,
         reason: { type: 'rule', rule },
@@ -1303,6 +1370,34 @@ export function isPathAllowed(
         reason: { type: 'rule', rule },
       };
     }
+  }
+
+  // Step 6.5: private runtime tree mutations (write / delete).
+  //
+  // Reads are guarded near the top (isProtectedRuntimeRead); until now a
+  // WRITE into the runtime's own state tree — the rule store's
+  // permission.json, config, credentials, other sessions' artifacts — fell
+  // through to this ordinary boundary ask, which bypassPermissions silently
+  // allows. The agent rewriting its own guardrails is exactly the shape
+  // bypass must not auto-approve, so relabel the ask with the
+  // `privateRuntimeData` category: it is in BYPASS_IMMUNE_SAFETY_CATEGORIES,
+  // making the ask bypass-immune in every mode (engine step 1g).
+  //
+  // Everything the host genuinely grants for mutation has already returned
+  // above (internal whitelist minus permission.json, trusted exact write
+  // targets, session workspace / allowed working paths, sandbox, path-specific
+  // allow rules), so this only re-labels asks that would otherwise be plain
+  // out-of-workspace boundary asks.
+  if (privateRuntimeMutation) {
+    return {
+      allowed: false,
+      reason: {
+        type: 'safetyCheck',
+        description: `Private runtime data modification requires approval. Path: ${resolved}`,
+        category: 'privateRuntimeData',
+        classifierApprovable: false,
+      },
+    };
   }
 
   // Default: path is outside working directory/scratch/allow-list with no

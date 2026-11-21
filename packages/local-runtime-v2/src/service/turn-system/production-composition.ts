@@ -1,17 +1,28 @@
+import { randomUUID as compactionProgressId } from 'node:crypto';
+import { join as joinContextPath } from 'node:path';
+import { ContextOperationStore } from './compaction/context-operation-store.js';
 import { createProductionRunawayGuardExtension } from './runaway-guard/extension.js';
-import { streamSimple, type Api, type Context, type Model, type Tool } from '@earendil-works/pi-ai';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry; streamFns
+// take the normalized TranscriptContext (system prompt folded into the leading
+// system message).
+import {
+  normalizeContext,
+  streamSimple,
+  type Api,
+  type Context,
+  type Model,
+  type Tool,
+} from '@earendil-works/pi-ai/compat';
 import type {
   AgentExtension,
   InternalTurnPromptReadRegistry,
   PromptSnapshotSource,
 } from '@mavis/agent-runtime';
 import {
-  outputLimitRecoveryExtension,
-  requestMediaExtension,
   sessionReportExtension,
+  terminalResponseRecoveryExtension,
   toolOutputBudgetExtension,
-  type OutputLimitRecoveryObservation,
-  type RequestMediaExtensionOptions,
+  type ToolOutputArtifact,
   type ToolOutputArtifactInput,
 } from '@mavis/agent-extension';
 import type { LLMRetryOptions } from '@mavis/agent-core/pi-turn-runner';
@@ -20,14 +31,15 @@ import type { IAgentConfig } from '@mavis/protocol';
 import type { GlobalEventInput } from '@mavis/shared/global-events';
 import {
   TOOL_RESULT_COMPACTION_DEFAULTS,
-  parseRequestMediaConfig,
   parseToolResultCompactionConfig,
-  type RequestImageSettings,
-  type RequestMediaSettings,
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
 } from '@mavis/config';
 import { isValidCompactionTriggerSetting } from '@mavis/context-manager';
+import { createLogger } from '@mavis/logging';
+import { openCas, parseCasSpillRef, type CasStore } from '@mavis/cas';
+import { createCasToolOutputSpill } from '@mavis/agent-tools/truncation/cas-spill';
+import { readProfileEnv, resolveDurableRoot } from '@mavis/config';
 import type { AppDb } from '../../infra/db/client.js';
 
 import type { ContentSafetyService } from '../content-safety/index.js';
@@ -64,11 +76,11 @@ import {
   type NativeAgentPreparationOptions,
   type NativeLocalAgentPreparationOptions,
 } from './agent-host/index.js';
-import type {
-  AgentExecutionSnapshot,
-  AgentHost,
-  AgentHostDependencies,
-} from './agent-host/contracts.js';
+import type { AgentExecutionSnapshot, AgentHost, AgentHostDependencies } from './agent-host/contracts.js';
+import type { SessionCacheWarming } from './agent-host/runner/index.js';
+import { resolveExecutorCheckpointBarrier } from './agent-host/execution/turn-checkpoint-policy.js';
+import { createLlmContextOverflowRecovery } from './agent-host/execution/llm-overflow-recovery.js';
+import type { StorageWorker } from '@mavis/storage-worker';
 import type { CanonicalHistoryCompactionChange } from './agent-host/history/contracts.js';
 import type { DurableCanonicalHistoryProvider } from './agent-host/history/durable-canonical-history-store.js';
 import { captureSemanticSnapshot } from './agent-host/history/semantic-identity.js';
@@ -78,34 +90,47 @@ import type {
   RequiredAgentEventProjector,
   RequiredAgentRuntimeProjector,
 } from './agent-host/events/required-agent-event-delivery.js';
-import { readCompactionCommitMetadata } from './agent-host/compaction/compaction-commit-metadata.js';
+import { readCompactionCommitMetadata } from './agent-host/compaction/context-compaction.js';
+import {
+  createTurnContextWire,
+  resolveContextWireEnabled,
+  DEFAULT_MAX_PAYLOAD_BYTES,
+  type TurnContextWire,
+} from './compaction/context-wire.js';
+// Wave-0 item 0.5: the current-turn image residency overlay (wire mode).
+import { TurnImageResidency } from './compaction/turn-image-residency.js';
 import { LocalContextCompactor } from './compaction/local-context-compactor.js';
 import {
   AutomaticContextCompactor,
   createAutomaticContextRequestFilterHook,
-  createRequestMediaGuardHook,
+  type AutomaticByteTrigger,
 } from './compaction/automatic-context-compactor.js';
+import {
+  createProductUnifiedCompaction,
+  type ProductUnifiedCompaction,
+} from './compaction/product-unified-compaction.js';
 import type {
-  EarlierFilesResolver,
   ToolResultCompactionConfig,
   SubagentCheckpointStateSource,
 } from './compaction/contracts.js';
 import { ContextUsageAnchorState } from './compaction/execution/usage-anchor.js';
 import { ToolResultArchiver } from './compaction/algorithm/tool-result-archiver.js';
+// Wave 2 (canon 05 §2.2/§2.5): the tool-result TEXT offload axis (the legacy
+// tool_archive compaction demoted to an offload pass) and the image artifact
+// store handle the residency resolves offloaded bytes from.
+import { createToolResultTextOffloader } from './compaction/tool-result-text-offloader.js';
+import {
+  ImageArtifactStore,
+  resolveArtifactsDir,
+} from '../session-system/messages/history/image-artifact-store.js';
 import { createFileApiUploadStoreSource } from './persistence/file-api-upload.repository.js';
 import { ToolOutputArtifactRepository } from './persistence/tool-output-artifact.repository.js';
-import {
-  compactionSnapshotGrantSource,
-  createSessionReadableGrantResolver,
-  runtimeWorkspaceGrantSource,
-  sessionAttachmentGrantSource,
-  toolOutputGrantSource,
-} from './agent-host/runner/policy/session-readable-grants.js';
 import type { MessagesFileApiPatcherLogger } from './agent-host/assembly/messages-file-api-patcher.js';
 import { isProductionRuntimeErrorRetryable } from './runtime-error-retry-policy.js';
 import { createTodoCadenceReminderHook } from './execution/reminder/todo-cadence-reminder.js';
 import { createBackgroundCadenceReminder } from './execution/reminder/background-cadence-reminder.js';
 import { createSessionIdentityReminderHook } from './execution/reminder/session-identity-reminder.js';
+import { createCompactionContinuationReminderHook } from './execution/reminder/compaction-continuation-reminder.js';
 import { fitsReminderInFinalRequest } from './execution/reminder/reminder-admission.js';
 import { readSessionAgentExecutionSnapshot } from './agent-host/preparation/session-agent-execution-snapshot.js';
 import { McpToolResultHistoryExternalizer } from './agent-host/execution/mcp-tool-result-history-externalizer.js';
@@ -159,13 +184,6 @@ export interface ProductionAgentProductCapabilities<
     }): Promise<unknown>;
   };
   readonly permission: LocalTurnPermissionGateOptions;
-  /**
-   * Asset files (attachments, generated media) the given Sessions registered.
-   * They become part of the Session read grant; see `session-readable-grants.ts`.
-   */
-  readonly sessionAssets?: {
-    listSessionReadablePaths(sessionIds: readonly string[]): Promise<readonly string[]>;
-  };
   readonly runner: Omit<LocalAgentTurnRunnerOptions, 'reviewContent'>;
   readonly executor: Omit<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>,
@@ -190,6 +208,8 @@ export interface ProductionAgentProductCapabilities<
   /** Required post-settlement product participant; failures remain visible to TurnSystem. */
   readonly turnSettlement?: RequiredAgentTurnSettlement;
   readonly normalExtensions?: readonly AgentExtension[];
+  /** SE-SW-002: the durable storage worker for the fail-closed checkpoint barrier. */
+  readonly checkpointStorageWorker?: StorageWorker;
 }
 
 interface RequiredAgentTurnSettlement {
@@ -229,6 +249,7 @@ export interface CreateLocalAgentHostOptions<
   readonly safety: Pick<ContentSafetyService, 'review'>;
   readonly turnControl: TurnSystemHostCapabilities['turnControl'];
   readonly turnFacts: RequiredAgentEventProjector;
+  readonly publishCompactionProgress?: (event: GlobalEventInput<'session.compaction.progress'>) => void;
   readonly pluginHookSessionOwnership: TurnSystemHostCapabilities['pluginHookSessionOwnership'];
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
   /** Binds the Goal verifier child's opt-in attempt cap to its provider requests. */
@@ -237,7 +258,6 @@ export interface CreateLocalAgentHostOptions<
   readonly eventObserver?: AgentEventBestEffortObserver;
   readonly contextUsageProjection?: RequiredAgentRuntimeProjector;
   readonly assemblyObserver?: AgentHostAssemblyObserver;
-  readonly promptSuggestion?: AgentHostDependencies['promptSuggestion'];
   readonly onSteeringConsumed: NonNullable<
     LocalRuntimeTurnExecutorOptions<TAgent, LocalRuntimeTurnToolContext>['onSteeringConsumed']
   >;
@@ -248,13 +268,32 @@ export interface CreateLocalAgentHostOptions<
     TAgent,
     LocalRuntimeTurnToolContext
   >['resolveLlmRetry'];
+  /**
+   * Reactive subagents §1.7 (wave 3): the accepted-owner-input generation
+   * probe factory wired from the durable steering composition's native wait
+   * binding. Absent (jsonl, embeddings): nothing attaches and the sequential
+   * batch behaves exactly as before.
+   */
+  readonly resolveOwnerInputGeneration?: LocalRuntimeTurnExecutorOptions<
+    TAgent,
+    LocalRuntimeTurnToolContext
+  >['resolveOwnerInputGeneration'];
   readonly nowMs?: () => number;
   readonly turnCapabilities?: AgentHostTurnCapabilityLifecycle;
+  /** Optional next-message suggestion port; composition forwards it verbatim. */
+  readonly promptSuggestion?: AgentHostDependencies['promptSuggestion'];
   readonly cliProductPolicy?: boolean;
   readonly tuiProductPolicy?: boolean;
   readonly contentReviewEnabled?: boolean;
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
   readonly getToolResultCompactionConfig?: () => ToolResultCompactionConfig | undefined;
+  /** SE-SW-002: the durable storage worker for the fail-closed checkpoint barrier. */
+  readonly checkpointStorageWorker?: StorageWorker;
+  /**
+   * W06 cache warming: the session-warming controller composed into the
+   * runner's MAIN stream path. Absent — no wrapper, legacy composition.
+   */
+  readonly cacheWarming?: SessionCacheWarming;
 }
 
 export interface LocalAgentHostComposition {
@@ -298,12 +337,13 @@ export function createProductionSessionTitleModel<
         ...(resolvedStream
           ? {
               stream: (model, context, options) =>
-                resolvedStream(model, mutableTitleContext(context), options),
+                resolvedStream(model, normalizeContext(mutableTitleContext(context)), options),
             }
           : {}),
       };
     },
-    stream: (model, context, options) => streamSimple(model, mutableTitleContext(context), options),
+    stream: (model, context, options) =>
+      streamSimple(model, mutableTitleContext(context), options),
     ...(nowMs ? { nowMs } : {}),
   });
 }
@@ -339,15 +379,14 @@ export function createProductionRootArchiveTitleModel<
         ...(resolvedStream
           ? {
               stream: (model, context, options) =>
-                resolvedStream(model, mutableTitleContext(context), options),
+                resolvedStream(model, normalizeContext(mutableTitleContext(context)), options),
             }
           : {}),
-        // The same decision as this turn's reply: an archive title from a BYOK model is not reviewed.
-        contentReviewRequired: resolved.managedProvider === true,
       };
     },
     review: product.safety.review,
-    stream: (model, context, options) => streamSimple(model, mutableTitleContext(context), options),
+    stream: (model, context, options) =>
+      streamSimple(model, mutableTitleContext(context), options),
     ...(nowMs ? { nowMs } : {}),
   });
 }
@@ -355,7 +394,6 @@ export function createProductionRootArchiveTitleModel<
 /** Desktop Peek adds mutation approval; BTW shares the ordinary runtime permission policy. */
 function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
-  toolOutputArtifacts: ToolOutputArtifactRepository,
 ) {
   return {
     ...options.product.permission,
@@ -365,28 +403,6 @@ function createHostPermissionPolicy<TAgent extends AgentExecutionSnapshot>(
         return session ? session.purpose !== 'peek_btw_session' && isPeekSession(session) : false;
       },
     },
-    // Paths the runtime hands the Agent inside its private data directory are
-    // granted by the runtime, never derived by the permission engine. Every
-    // such feature registers one source here (see session-readable-grants.ts).
-    resolveSessionOwnedReadablePaths: createSessionReadableGrantResolver({
-      loadSession: (sessionId) =>
-        options.sessions.sessions.execution.getExecutionSnapshot(sessionId),
-      sources: [
-        toolOutputGrantSource(toolOutputArtifacts),
-        compactionSnapshotGrantSource({
-          inspectSnapshotsDirectory: (sessionId) =>
-            options.sessions.artifacts.inspectSnapshotsDirectory(sessionId),
-        }),
-        runtimeWorkspaceGrantSource({
-          dataDir: () => options.product.preparation.configBuilder.config().dataDir,
-        }),
-        ...(options.product.sessionAssets
-          ? [sessionAttachmentGrantSource(options.product.sessionAssets)]
-          : []),
-      ],
-      ...(options.product.permission.logger ? { logger: options.product.permission.logger } : {}),
-    }),
-
   };
 }
 
@@ -399,17 +415,10 @@ export async function createLocalAgentHost<
     options.eventObserver,
   );
   const contextUsageAnchor = new ContextUsageAnchorState();
-  const toolOutputArtifacts = new ToolOutputArtifactRepository({
-    resolveSessionReportsDirectory: (id) => options.sessions.artifacts.ensureReportsDirectory(id),
-    inspectSessionReportsDirectory: (id) => options.sessions.artifacts.inspectReportsDirectory(id),
-  });
+  const toolOutputArtifacts = createToolOutputArtifactRepository(options);
   const getToolResultCompactionConfig = createToolResultCompactionConfigGetter(options);
-  const getRequestMediaConfig = createRequestMediaConfigGetter(options);
-  const getImageEncoding = () => requestImageEncoding(getRequestMediaConfig().image);
-  const getRecoveryDivisor = () => getRequestMediaConfig().recoveryDivisor;
   const toolResultArchiver = new ToolResultArchiver({
     writeArtifact: (input) => toolOutputArtifacts.write(input),
-    writeImageArtifact: (input) => toolOutputArtifacts.writeImage(input),
     logger: options.product.runner.logger,
     getConfig: getToolResultCompactionConfig,
   });
@@ -422,7 +431,75 @@ export async function createLocalAgentHost<
     options,
     toolOutputArtifacts,
     getToolResultCompactionConfig,
-    getImageEncoding,
+  );
+  // SE-SW-002: the fail-closed durability barrier of the turn path — composed
+  // around the storage worker this composition runs against; an explicitly
+  // composed barrier on the executor options wins. Without either, the turn
+  // path behaves exactly as before (the policy stays dormant).
+  const checkpointBarrier = resolveExecutorCheckpointBarrier(
+    options.product.executor.checkpointBarrier,
+    options.checkpointStorageWorker,
+  );
+  // Ш4/W10: the memoized context-wire payload assembly (ContextWirePipeline
+  // over the wave-2 context packages), fed from the canonical history commits
+  // and read at the runner's `convertToLlm` seam. The gate follows the
+  // canonical-history mode (resolveContextWireEnabled): DURABLE (the W10
+  // default) composes it ON — the wire pipeline is the default projection
+  // path; the explicit jsonl compatibility mode keeps it OFF and the turn
+  // path stays on the legacy per-request conversion exactly.
+  const contextWireEnabled = resolveContextWireEnabled();
+  // W10 unified compaction (review w10-review-p1 item 2; W05 «Product
+  // switch = W10»): composed only in wire mode — the W05 APIs
+  // (resolveCompactionSettings/resolveCompactionBudgets/createModelSummarizer)
+  // reach the product seam through `compactionFor`, with per-session budgets
+  // from the turn's resolved model and checkpoints committed back through
+  // the canonical `compact` seam. jsonl composes none of it.
+  const unifiedCompaction = contextWireEnabled
+    ? createProductUnifiedCompaction({
+        requestFork: true,
+        onProgress: (sessionId, stage) => options.publishCompactionProgress?.({
+          type: 'session.compaction.progress', payload: { sessionId, stage, progressId: compactionProgressId() },
+        }),
+        operations: new ContextOperationStore(joinContextPath(options.product.preparation.configBuilder.config().dataDir, 'context-operations')),
+        sessions: {
+          get: (sessionId) => options.sessions.sessions.repository.get(sessionId),
+        },
+        agents: options.product.agents,
+        preparation: options.preparation,
+        canonicalHistory: options.sessions.canonicalHistory,
+      })
+    : undefined;
+  // Fixed one-turn image residency (owner decision 2026-11-08): batch
+  // eviction on the turn boundary, the token budget, and the artifact store
+  // resolving an OFFLOADED image's bytes back out of
+  // `<dataDir>/artifacts/<sha256>.<ext>` (the durable log stores references;
+  // the store instance here is a second handle on the same content-addressed
+  // directory the canonical-history provider offloads into — file names are
+  // content addresses, so the handles agree by construction).
+  const turnImageResidency = contextWireEnabled
+    ? new TurnImageResidency(undefined, {
+        artifacts: new ImageArtifactStore({
+          artifactsDir: resolveArtifactsDir(
+            options.product.preparation.configBuilder.config().dataDir,
+          ),
+        }),
+      })
+    : undefined;
+  const contextWire: TurnContextWire | undefined = contextWireEnabled
+    ? feedUnifiedCompactionLog(
+        createTurnContextWire({
+          ...(turnImageResidency ? { residency: turnImageResidency } : {}),
+          ...(unifiedCompaction ? { compactionFor: unifiedCompaction.compactionFor } : {}),
+        }),
+        unifiedCompaction,
+      )
+    : undefined;
+  // The adapted canonical-history seam, hoisted so the compaction deps'
+  // TEXT-offload axis (wave 2, item 2.4) reads and offloads through the SAME
+  // validated provider view the turn path commits through.
+  const adaptedCanonicalHistory = adaptCanonicalHistory(
+    options.sessions.canonicalHistory,
+    options.sessions.sessions.historyMutation,
   );
   const dependencies = await createNativeAgentHostProductionDependencies({
     sessions: {
@@ -435,6 +512,9 @@ export async function createLocalAgentHost<
     preparation: options.preparation,
     toolCatalog: {
       ...optionalDesktopHostCapabilities(options.cliProductPolicy),
+      // K2: the run_code gate reads the conversation beta per catalog build,
+      // the same fact the profile render turns into the prompt section.
+      beta: () => options.product.preparation.configBuilder.config().beta,
       resolveSources: async (input) => {
         const session = await requireExecutionSession(options.sessions, input);
         return options.product.toolSources.resolve({
@@ -466,20 +546,30 @@ export async function createLocalAgentHost<
       },
       config: options.product.preparation.configBuilder.config().mcpToolSearch,
       env: process.env,
-      // run_code saves a return value over 64 KiB where oversized results are externalized.
-      writePtcReturnArtifact: (input) => toolOutputArtifacts.write(input),
     },
-    inputPreparation: { ...options.product.inputPreparation, getImageEncoding },
-    permission: createHostPermissionPolicy(options, toolOutputArtifacts),
+    inputPreparation: options.product.inputPreparation,
+    permission: createHostPermissionPolicy(options),
     runner: {
       ...options.product.runner,
       reviewContent: options.safety.review,
+      ...(options.cacheWarming ? { cacheWarming: options.cacheWarming } : {}),
     },
     ...optionalToolPolicyGuard(options.toolPolicyGuard),
     executor: {
       ...options.product.executor,
-      nativeDelete: () =>
-        options.product.preparation.configBuilder.config().permission?.nativeDelete === true,
+      // SE-SW-002: durability is confirmed BEFORE every provider request
+      // (`beforeLlmRequest`, first-position hook) and BEFORE every tool
+      // effect (`runToolEffect`); interrupted calls resolve to
+      // TOOL_OUTCOME_UNKNOWN and are never re-run implicitly.
+      ...(checkpointBarrier ? { checkpointBarrier } : {}),
+      // Ш3: the storage worker is injected exactly in durable mode, where the
+      // canonical history provider serves ownership-transferred snapshots —
+      // the turn path may then skip its per-turn Pi-compatibility copy.
+      ...(options.checkpointStorageWorker ? { piCompatibleHistorySnapshots: true } : {}),
+      // Ш4: the context-wire bridge — present only when the env gate
+      // composed it; the executor then seeds and feeds it from the canonical
+      // history commits of each turn.
+      ...(contextWire ? { contextWire } : {}),
       logger: options.product.runner.logger,
       backgroundCadenceReminder: createBackgroundCadenceReminder(contextUsageAnchor),
       canAppendExecutionBudgetReminder: (input, marker) =>
@@ -511,47 +601,139 @@ export async function createLocalAgentHost<
       activatePluginHookSessionOwnership: options.pluginHookSessionOwnership.activate,
       afterCompactionBeforeLlmCallHooks: [
         createAutomaticContextRequestFilterHook(),
-        createRequestMediaGuardHook(),
         createSessionIdentityReminderHook(contextUsageAnchor),
         createTodoCadenceReminderHook(contextUsageAnchor),
+        // Wave 3 (item 3.5, canon 05 §2.4): the continuation reminder —
+        // exactly one per compaction.id, delivered after the compaction
+        // hook's cut reached the canonical history.
+        createCompactionContinuationReminderHook(),
       ],
       onSteeringConsumed: options.onSteeringConsumed,
       onInputReviewResolved: options.onInputReviewResolved,
       resolveLlmRetry: options.resolveLlmRetry,
+      // Reactive subagents §1.7 (wave 3): the yield-to-owner-input probe of
+      // the sequential executor, resolved per turn from the native wait
+      // binding. jsonl/embeddings compositions omit it.
+      ...(options.resolveOwnerInputGeneration
+        ? { resolveOwnerInputGeneration: options.resolveOwnerInputGeneration }
+        : {}),
+      // В1 (opus-decisions-20261101): the overflow half of the llm-retry
+      // seam — runWithOverflowRecovery composed over the unified scheduler
+      // (compact → replaceMessages) + the wire reseed (fact 1: the
+      // scheduler's own commit never folds into THIS turn's pipeline), so
+      // the ONE retried request compiles the cut window, and the failed
+      // attempt's omission rides the unified log on the second failure.
+      // jsonl composes none of it: the legacy turn path stays exact.
+      ...(unifiedCompaction && contextWire
+        ? {
+            contextOverflowRecoveryFor: ({
+              sessionId,
+              signal,
+            }: {
+              sessionId: string;
+              signal?: AbortSignal;
+            }) =>
+              createLlmContextOverflowRecovery({
+                sessionId,
+                ...(signal ? { signal } : {}),
+                barrier: () => contextWire.compactionBarrier(sessionId),
+                reseed: (messages) => contextWire.reseed(sessionId, messages),
+                resolveFailedAttemptEntryIds: (id) =>
+                  unifiedCompaction.resolveFailedAttemptEntryIds(id),
+                appendOmissionDraft: (id, draft) =>
+                  unifiedCompaction.appendOmissionDraft(id, draft),
+              }),
+          }
+        : {}),
       ...(options.outputTokenCap ? { outputTokenCap: options.outputTokenCap } : {}),
     },
     ...optionalNormalExtensions(normalExtensions),
     turnControl: options.turnControl,
-    ...optionalTurnHooks(options),
-    canonicalHistory: adaptCanonicalHistory(
-      options.sessions.canonicalHistory,
-      options.sessions.sessions.historyMutation,
-    ),
+    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
+    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
+    ...(options.promptSuggestion ? { promptSuggestion: options.promptSuggestion } : {}),
+    canonicalHistory: adaptedCanonicalHistory,
     compaction: {
-      ...createContextCompactors({
-        contextUsageAnchor,
-        checkpointState: options.product.checkpointState,
-        logger: options.product.runner.logger,
-        toolResultArchiver,
-        promptSnapshots: options.product.promptSnapshots,
-        getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
-        getRecoveryDivisor,
-        resolveEarlierFiles: async (sessionId) => {
-          const [snapshots, toolOutputs] = await Promise.all([
-            options.sessions.artifacts.resolveSnapshotsDirectory(sessionId),
-            toolOutputArtifacts.directory(sessionId),
-          ]);
-          return { snapshots, toolOutputs };
-        },
-      }),
+      // Wave 2 (canon 05 §2.2: "Legacy-компактор в wire-режиме удаляется
+      // полностью"): wire mode composes NO legacy compactor — no
+      // AutomaticContextCompactor probe (the unified scheduler owns the
+      // context triggers), no LocalContextCompactor manual path (the manual
+      // /compact routes through the unified barrier), and the tool axis is
+      // the TEXT offload pass below — offload events, never the whole-history
+      // rewrite. The jsonl compatibility composition keeps the exact legacy
+      // semantics (both compactors, no barrier, no offload).
+      ...(contextWire
+        ? {}
+        : createContextCompactors({
+            contextUsageAnchor,
+            checkpointState: options.product.checkpointState,
+            logger: options.product.runner.logger,
+            toolResultArchiver,
+            promptSnapshots: options.product.promptSnapshots,
+            getCompactionTriggerAt: createCompactionTriggerAtGetter(options),
+          })),
       control: options.turnControl,
       lifecycle: options.sessions.agentProjection.compactionLifecycle,
       observer: options.sessions.agentProjection.compactionObserver,
-      checkpointSharedPrefixEnabled: createCheckpointSharedPrefixSwitch(options),
       ...(options.product.runner.metricsClient
         ? { metricsClient: options.product.runner.metricsClient }
         : {}),
       usageAnchor: contextUsageAnchor,
+      // В1: the wire-mode admission point — the before-LLM compaction hook
+      // awaits the unified scheduler's blocking compaction through it and
+      // feeds the committed checkpoint back as its `replaceMessages`
+      // decision (which reseeds the wire pipeline with the CUT window).
+      // jsonl composes none of it.
+      ...(contextWire
+        ? {
+            wireCompactionBarrier: (sessionId: string) => contextWire.compactionBarrier(sessionId),
+            prepareManualWireCompaction: async (sessionId: string, turnId: string) => {
+              const existing = contextWire.compactionBarrier(sessionId);
+              if (existing) return existing;
+              const session = await options.sessions.sessions.repository.get(sessionId);
+              if (!session) throw new Error(`Compaction session not found: ${sessionId}`);
+              const agent = await readSessionAgentExecutionSnapshot(options.product.agents, session);
+              if (!agent) throw new Error(`Compaction Agent not found: ${session.agentName}`);
+              const history = await adaptedCanonicalHistory.readActive(sessionId);
+              const prepared = await options.preparation.prepareCompaction({
+                session, agent, history, turnId,
+              });
+              const model = prepared.llm.model;
+              contextWire.seed({
+                sessionId,
+                messages: history.messages,
+                ...(Number.isFinite(model.contextWindow) && model.contextWindow > 0
+                  ? { model: {
+                      provider: model.provider,
+                      modelId: model.id,
+                      contextWindowTokens: model.contextWindow,
+                      ...(model.maxTokens > 0 ? { maxOutputTokens: model.maxTokens } : {}),
+                      ...(prepared.llm.thinkingLevel && prepared.llm.thinkingLevel !== 'off'
+                        ? { thinkingLevel: prepared.llm.thinkingLevel } : {}),
+                    } }
+                  : {}),
+              });
+              return contextWire.compactionBarrier(sessionId);
+            },
+          }
+        : {}),
+      // Wave 2 (item 2.4): the tool-result TEXT offload axis — planned over
+      // the canonical history by the SAME archiver, applied as `offload`
+      // events through the durable provider's seam. Best-effort; the hook
+      // catches and logs.
+      ...(contextWire
+        ? {
+            toolResultOffload: (sessionId: string): Promise<void> =>
+              createToolResultTextOffloader({
+                archiver: toolResultArchiver,
+                readActiveMessages: async (id) => {
+                  const snapshot = await adaptedCanonicalHistory.readActive(id);
+                  return snapshot.messages;
+                },
+                offloadToolText: adaptedCanonicalHistory.offloadToolText,
+              })(sessionId).then(() => undefined),
+          }
+        : {}),
     },
     usage: {
       projector: options.sessions.usage.projector,
@@ -590,7 +772,6 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
   toolOutputArtifacts: ToolOutputArtifactRepository,
   getToolResultCompactionConfig: () => ToolResultCompactionConfig,
-  getImageEncoding: RequestMediaExtensionOptions['getImageEncoding'],
 ): readonly AgentExtension[] | undefined {
   return mergeNormalExtensions(
     [
@@ -599,25 +780,34 @@ function createHostNormalExtensions<TAgent extends AgentExecutionSnapshot>(
         reportFailure: options.product.executor.reportFailure,
       }),
       createHostRunawayGuardExtension(options),
-      createHostOutputLimitRecoveryExtension(options),
-      requestMediaExtension({ getImageEncoding }),
+      // Revision 11 F1: the exported safety-net was never composed — an empty
+      // assistant response after a successful tool batch now gets one bounded
+      // retry; a second empty response fails the turn with `terminal_empty`
+      // instead of reporting a blank success. Observation goes to the runner
+      // log only; observability must not change recovery semantics.
+      terminalResponseRecoveryExtension({
+        onRecovered: (observation) =>
+          options.product.runner.logger?.info?.({
+            event: 'terminal_response_recovery',
+            outcome: 'recovered',
+            ...observation,
+          }),
+        onFailed: (observation) =>
+          options.product.runner.logger?.error?.({
+            event: 'terminal_response_recovery',
+            outcome: 'terminal_empty',
+            ...observation,
+          }),
+      }),
       toolOutputBudgetExtension({
         maxInlineBytes: TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024,
         getMaxInlineBytes: () => getToolResultCompactionConfig().maxInlineBytes,
         fallbackPreviewBytes: 2 * 1_024,
-        writeArtifact: async (input) => {
-          const maxInlineBytes =
-            getToolResultCompactionConfig().maxInlineBytes ??
-            TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024;
-          const artifact = await toolOutputArtifacts.write(input);
-          logToolOutputBudgetDecisionBestEffort(options.product.runner.logger, {
-            input,
-            maxInlineBytes,
-            outcome: 'externalized',
-            artifactReadFormat: artifact.metadata?.read_format,
-          });
-          return artifact;
-        },
+        writeArtifact: createToolOutputArtifactWriter(
+          options,
+          toolOutputArtifacts,
+          getToolResultCompactionConfig,
+        ),
         onArtifactError: (error, input) =>
           logToolOutputBudgetDecisionBestEffort(options.product.runner.logger, {
             input,
@@ -648,32 +838,117 @@ function createHostRunawayGuardExtension<TAgent extends AgentExecutionSnapshot>(
   });
 }
 
-function createHostOutputLimitRecoveryExtension<TAgent extends AgentExecutionSnapshot>(
+/** Env flag selecting the tool-output spill backend; default (legacy) is `file`. */
+const TOOL_SPILL_ENV = 'MCODE_TOOL_SPILL';
+
+/** Spec §4 registry: `mcode:turn` is local-runtime-v2's namespace. */
+const spillLog = createLogger('mcode:turn');
+
+type ToolSpillMode = 'cas' | 'file';
+
+/** Resolves the spill backend from the env; unknown values degrade to `file`. */
+function resolveToolSpillMode(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ToolSpillMode {
+  const raw = env[TOOL_SPILL_ENV]?.trim().toLowerCase();
+  if (!raw || raw === 'file') return 'file';
+  if (raw === 'cas') return 'cas';
+  spillLog.warn('unknown MCODE_TOOL_SPILL value; using the file spill backend', { value: raw });
+  return 'file';
+}
+
+/**
+ * The `toolOutputBudgetExtension.writeArtifact` seam (integration plan Ш6
+ * CAS). `MCODE_TOOL_SPILL=file` (the default) keeps the legacy Session
+ * reports-directory repository — byte-identical to the previous inline
+ * implementation, including the decision log. `MCODE_TOOL_SPILL=cas` spills
+ * the oversized tool output into the content-addressed store at the durable
+ * root (`<root>/cas/<aa>/…`, profile-aware through `readProfileEnv`) and the
+ * history receives the canonical `cas://sha256/<digest>#<size>` reference
+ * instead of a file path.
+ *
+ * CAS failure policy (never silent): a fatal store error (ENOSPC/EACCES/…)
+ * throws `CasSpillFatalError`, which the extension's own error path converts
+ * into the bounded preview fallback and the `fallback` decision log; a
+ * non-fatal store failure degrades to `undefined` (reported to the issue
+ * listener) and this writer recovers through the legacy file repository, so
+ * the receipt always carries a working reference. Both modes emit the same
+ * `tool_output_budget_decision` log; the CAS artifact's `read_format`
+ * (`cas_v1`) travels in its metadata.
+ */
+function createToolOutputArtifactWriter<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
-): AgentExtension {
-  const log =
-    (outcome: 'retry' | 'recovered' | 'exhausted') =>
-    (observation: OutputLimitRecoveryObservation): void => {
-      options.product.runner.logger?.[outcome === 'exhausted' ? 'error' : 'info']?.(
-        {
-          event: 'output_limit_recovery',
-          outcome,
-          session_id: observation.sessionId,
-          turn_id: observation.turnId,
-          attempts: observation.attempts,
-          ...(observation.truncatedToolCall === undefined
-            ? {}
-            : { truncated_tool_call: observation.truncatedToolCall }),
-          ...(observation.model === undefined ? {} : { model: observation.model }),
-        },
-        '[local-runtime-v2] Output limit recovery',
-      );
+  toolOutputArtifacts: ToolOutputArtifactRepository,
+  getToolResultCompactionConfig: () => ToolResultCompactionConfig,
+): (input: ToolOutputArtifactInput) => Promise<ToolOutputArtifact> {
+  const write: (input: ToolOutputArtifactInput) => Promise<ToolOutputArtifact> =
+    resolveToolSpillMode() === 'cas'
+      ? createCasToolOutputArtifactSpill(toolOutputArtifacts)
+      : (input) => toolOutputArtifacts.write(input);
+  return async (input) => {
+    const maxInlineBytes =
+      getToolResultCompactionConfig().maxInlineBytes ??
+      TOOL_RESULT_COMPACTION_DEFAULTS.maxInlineKiB * 1_024;
+    const artifact = await write(input);
+    logToolOutputBudgetDecisionBestEffort(options.product.runner.logger, {
+      input,
+      maxInlineBytes,
+      outcome: 'externalized',
+      artifactReadFormat: artifact.metadata?.read_format,
+    });
+    return artifact;
+  };
+}
+
+/**
+ * The CAS-backed artifact writer. The store is opened lazily on the first
+ * spill and shared for the host's lifetime; `openCas` takes the durable ROOT
+ * and appends the `cas` layout itself (the same convention as the v2
+ * importer's default root). A non-fatal store failure degrades the spill to
+ * `undefined` and recovers through the legacy file repository.
+ */
+function createCasToolOutputArtifactSpill(
+  toolOutputArtifacts: ToolOutputArtifactRepository,
+): (input: ToolOutputArtifactInput) => Promise<ToolOutputArtifact> {
+  let storePromise: Promise<CasStore> | undefined;
+  const store = (): Promise<CasStore> => {
+    storePromise ??= openCas(resolveDurableRoot(readProfileEnv()));
+    return storePromise;
+  };
+  const spill = createCasToolOutputSpill(
+    {
+      putBytes: async (data) => await (await store()).putBytes(data),
+      putFile: async (sourcePath) => await (await store()).putFile(sourcePath),
+      putBase64: async (base64) => await (await store()).putBase64(base64),
+    },
+    (issue) => {
+      // The issue listener fires outside any per-call artifact input, so only
+      // the code and reason are known here (no session correlation).
+      spillLog.warn('tool output CAS spill degraded', {
+        code: issue.code,
+        reason: issue.message,
+      });
+    },
+  );
+  return async (input) => {
+    const reference = await spill.spill(input.text);
+    if (reference === undefined) {
+      // Non-fatal degradation (already reported): the legacy file repository
+      // keeps the receipt recoverable.
+      return await toolOutputArtifacts.write(input);
+    }
+    const digest = parseCasSpillRef(reference);
+    return {
+      reference,
+      metadata: {
+        artifact_kind: 'tool_output',
+        spill: 'cas',
+        sensitive: input.sensitive,
+        read_format: 'cas_v1',
+        ...(digest ? { content_sha256: digest.sha256, bytes: digest.size } : {}),
+      },
     };
-  return outputLimitRecoveryExtension({
-    onRetry: log('retry'),
-    onRecovered: log('recovered'),
-    onExhausted: log('exhausted'),
-  });
+  };
 }
 
 function createMcpToolResultHistoryExternalizer<TAgent extends AgentExecutionSnapshot>(
@@ -695,8 +970,6 @@ function createToolOutputArtifactRepository<TAgent extends AgentExecutionSnapsho
   return new ToolOutputArtifactRepository({
     resolveSessionReportsDirectory: (sessionId) =>
       options.sessions.artifacts.ensureReportsDirectory(sessionId),
-    inspectSessionReportsDirectory: (sessionId) =>
-      options.sessions.artifacts.inspectReportsDirectory(sessionId),
   });
 }
 
@@ -707,8 +980,10 @@ function createContextCompactors(input: {
   readonly toolResultArchiver: ToolResultArchiver;
   readonly promptSnapshots: ConstructorParameters<typeof LocalContextCompactor>[2];
   readonly getCompactionTriggerAt: () => number | undefined;
-  readonly getRecoveryDivisor: () => number;
-  readonly resolveEarlierFiles: EarlierFilesResolver;
+  /** Ш5: the projection-window byte axis; composed only in context-wire mode. */
+  readonly byteTrigger?: AutomaticByteTrigger;
+  /** W10: the unified scheduler owns the context triggers (wire mode). */
+  readonly disableContextTriggers?: boolean;
 }) {
   return {
     automatic: new AutomaticContextCompactor(
@@ -719,14 +994,69 @@ function createContextCompactors(input: {
         toolResultArchiver: input.toolResultArchiver,
         promptSnapshots: input.promptSnapshots,
         getCompactionTriggerAt: input.getCompactionTriggerAt,
-        getRecoveryDivisor: input.getRecoveryDivisor,
-        resolveEarlierFiles: input.resolveEarlierFiles,
+        ...(input.disableContextTriggers ? { disableContextTriggers: true } : {}),
+        // Wave-0 item 0.4 (canon 05 §2.2, owner decision): in wire mode the
+        // tool_archive axis is NOT an auto-trigger while there is no offload
+        // event — the axis rewrites the whole history as a no-summary
+        // `full reason=compact` and re-serializes inline media on every
+        // firing (incident 2026-11-07, batch 17268). The explicit
+        // MCODE_TOOL_ARCHIVE_TRIGGER=1 knob turns the axis back on.
+        ...(input.disableContextTriggers
+          ? { disableToolArchiveTrigger: !resolveToolArchiveTriggerEnabled() }
+          : {}),
+        ...(input.byteTrigger ? { byteTrigger: input.byteTrigger } : {}),
       },
     ),
-    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots, {
-      imageFileWriter: input.toolResultArchiver,
-      resolveEarlierFiles: input.resolveEarlierFiles,
-    }),
+    manual: new LocalContextCompactor(input.checkpointState, input.logger, input.promptSnapshots),
+  };
+}
+
+/** Env knob re-enabling the legacy tool_archive AUTO axis in wire mode. */
+const TOOL_ARCHIVE_TRIGGER_ENV = 'MCODE_TOOL_ARCHIVE_TRIGGER';
+
+/**
+ * Resolves the tool_archive auto-trigger knob (wave-0 item 0.4). Unset or
+ * falsy keeps the wire-mode default (the axis never starts a compaction on
+ * its own); `1/true/on` re-enables the axis for a session that wants the
+ * text-only tool-result squeeze back. Unknown values fail closed with a
+ * clear error — the same convention as `resolveContextWireEnabled`.
+ */
+export function resolveToolArchiveTriggerEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const raw = env[TOOL_ARCHIVE_TRIGGER_ENV]?.trim().toLowerCase();
+  if (!raw || raw === '0' || raw === 'false' || raw === 'off') return false;
+  if (raw === '1' || raw === 'true' || raw === 'on') return true;
+  throw new Error(
+    `Unsupported ${TOOL_ARCHIVE_TRIGGER_ENV} value '${raw}' (supported: '1'/'true'/'on', '0'/'false'/'off', or unset for the wire-mode default: off)`,
+  );
+}
+
+/**
+ * W10: feeds the unified compaction's live canonical-log projection from the
+ * SAME commits the context-wire bridge observes (and the turn seed's model
+ * context), so the seam's `entries()` stays live without a second storage
+ * read. Without a unified composition the bridge passes through untouched.
+ */
+function feedUnifiedCompactionLog(
+  contextWire: TurnContextWire,
+  unifiedCompaction: ProductUnifiedCompaction | undefined,
+): TurnContextWire {
+  if (!unifiedCompaction) return contextWire;
+  return {
+    ...contextWire,
+    projection: (sessionId) => {
+      const projection = contextWire.projection(sessionId);
+      return projection ? unifiedCompaction.bindRequestFork(sessionId, projection) : undefined;
+    },
+    seed: (input) => {
+      unifiedCompaction.observeSeed(input);
+      contextWire.seed(input);
+    },
+    observeCommit: (change) => {
+      unifiedCompaction.observeCommit(change);
+      contextWire.observeCommit(change);
+    },
   };
 }
 
@@ -753,42 +1083,11 @@ function createCompactionTriggerAtGetter<TAgent extends AgentExecutionSnapshot>(
   return read;
 }
 
-function createRequestMediaConfigGetter<TAgent extends AgentExecutionSnapshot>(
-  options: CreateLocalAgentHostOptions<TAgent>,
-): () => RequestMediaSettings {
-  return () => {
-    let raw: unknown;
-    try {
-      raw = options.product.preparation.configBuilder.config().requestMedia;
-    } catch {
-      raw = undefined;
-    }
-    return parseRequestMediaConfig(raw);
-  };
-}
-
-function requestImageEncoding(image: RequestImageSettings) {
-  return {
-    maxWidth: image.max_width,
-    maxHeight: image.max_height,
-    maxBase64Bytes: image.max_base64_bytes,
-  };
-}
-
-/** Remote kill switch: only an explicit Apollo `false` restores the isolated checkpoint request. */
-function createCheckpointSharedPrefixSwitch<TAgent extends AgentExecutionSnapshot>(
-  options: CreateLocalAgentHostOptions<TAgent>,
-): () => boolean {
-  return () =>
-    readToolResultCompactionOverride(options.getToolResultCompactionConfig)
-      ?.checkpointSharedPrefix !== false;
-}
-
 function createToolResultCompactionConfigGetter<TAgent extends AgentExecutionSnapshot>(
   options: CreateLocalAgentHostOptions<TAgent>,
 ): () => ToolResultCompactionConfig {
   const fileConfig = parseToolResultCompactionConfig(readToolResultCompactionFileConfig(options));
-  const base: Required<Omit<ToolResultCompactionConfig, 'checkpointSharedPrefix'>> = {
+  const base: Required<ToolResultCompactionConfig> = {
     enabled: fileConfig.enabled,
     maxInlineBytes: fileConfig.maxInlineKiB * 1_024,
     mcpDetailsMaxInlineBytes: fileConfig.mcpDetailsMaxInlineKiB * 1_024,
@@ -943,20 +1242,6 @@ function optionalNormalExtensions(normalExtensions: readonly AgentExtension[] | 
   return normalExtensions ? { normalExtensions } : {};
 }
 
-/** Optional per-Turn seams; absent ones are omitted rather than set to undefined. */
-function optionalTurnHooks(
-  options: Pick<
-    CreateLocalAgentHostOptions,
-    'turnCapabilities' | 'assemblyObserver' | 'promptSuggestion'
-  >,
-) {
-  return {
-    ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
-    ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
-    ...(options.promptSuggestion ? { promptSuggestion: options.promptSuggestion } : {}),
-  };
-}
-
 export function combineAgentEventObservers(
   ...observers: readonly (AgentEventBestEffortObserver | undefined)[]
 ): AgentEventBestEffortObserver | undefined {
@@ -1069,6 +1354,20 @@ function adaptCanonicalHistory(
       validateCanonicalHistoryMessages(committed.messages);
       return { ...committed, messages: committed.messages };
     },
+    // Wave 2 (canon 05 §2.2, item 2.4): the durable TEXT offload seam,
+    // forwarded when the underlying provider implements it (durable mode).
+    ...(provider.offloadToolText
+      ? {
+          offloadToolText: (
+            sessionId: string,
+            items: readonly {
+              readonly envelopeIndex: number;
+              readonly replacement: string;
+              readonly reference: string;
+            }[],
+          ) => provider.offloadToolText!(sessionId, items),
+        }
+      : {}),
     replace: async (change) => {
       const committed = await provider.replace(requireHistoryOperation(change));
       validateCanonicalHistoryMessages(committed.messages);
@@ -1089,12 +1388,7 @@ function adaptCanonicalHistory(
         summary: metadata.summary,
         ...(metadata.currentUserSourceIndex === undefined
           ? {}
-          : {
-              currentUserSourceIndex: metadata.currentUserSourceIndex,
-              ...(metadata.placedMarkerCount === undefined
-                ? {}
-                : { placedMarkerCount: metadata.placedMarkerCount }),
-            }),
+          : { currentUserSourceIndex: metadata.currentUserSourceIndex }),
       } as const;
       if (metadata.method !== 'llm_checkpoint') {
         const committed = await provider.compact({

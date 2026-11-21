@@ -1,0 +1,30 @@
+{
+  "name": "@mavis/prompt-cache",
+  "version": "0.1.0",
+  "description": "Prompt-cache services (W06 part B): cacheRetention/session-affinity policy over the pinned pi-ai rules, prompt-cache tier TTLs, and the ONE CacheWarmer controller that keeps a session's server-side prompt-cache entry warm — the single warm-intention point for agent and speculation sources (map row `speculation prewarm`: warming is delegated here, never a second warmer).",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "workspace:*",
+    "@earendil-works/pi-ai": "workspace:*",
+    "@mavis/logging": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "private": true,
+  "license": "MIT"
+}

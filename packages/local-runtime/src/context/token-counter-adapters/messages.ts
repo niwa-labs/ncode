@@ -47,6 +47,7 @@ function buildMessagesCounterRequest(
 
   return {
     url: `${baseUrl}/v1/messages/count_tokens`,
+    unsupportedCacheKey: `messages:${baseUrl}`,
     body,
     headers: {
       ...authHeaders,

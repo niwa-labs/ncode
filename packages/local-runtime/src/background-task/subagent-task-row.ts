@@ -14,6 +14,9 @@ export type LocalSubagentTaskExecutionMode = 'foreground' | 'background' | 'appe
  * Creates the `queued` row shared by every local subagent task so a foreground
  * run is as observable and as recoverable as a background one: it has a taskId
  * handle, an output log, and a row that startup reconciliation can mark `lost`.
+ * A reactive foreground run also records its durable wait identity
+ * (`nativeWaitId`), so recovery can join the seam outcome with the canonical
+ * result by turn/toolCallId exactly once (verdict 09 §1.8).
  */
 export function createLocalSubagentTaskRow(input: {
   host: LocalTaskRunnerHostWithSessionLookup;
@@ -24,6 +27,7 @@ export function createLocalSubagentTaskRow(input: {
   toolCtx: LocalRuntimeToolContext;
   taskInput: LocalTaskToolInput;
   target: LocalTaskTargetFacts;
+  nativeWaitId?: string;
 }): Promise<BackgroundTask> {
   const now = input.host.nowMs();
   return input.host.backgroundTaskService.create({
@@ -45,6 +49,7 @@ export function createLocalSubagentTaskRow(input: {
       trustedBuiltin: input.target.trustedBuiltin,
       subTurnId: input.turnId,
       executionMode: input.executionMode,
+      ...(input.nativeWaitId ? { nativeWaitId: input.nativeWaitId } : {}),
       ...(input.target.canonicalRole ? { canonicalRole: input.target.canonicalRole } : {}),
     },
   });

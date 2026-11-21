@@ -40,7 +40,8 @@ export function createLocalContextFootprintMeasurer(
   strictStringify({ systemPrompt: options.systemPrompt ?? '', tools, messages: [] });
 
   const measureFresh = (messages: readonly AgentMessage[]): ContextFootprint => {
-    const projected = projectAgentMessagesForModel(messages, options.model).messages;
+    const projected = projectAgentMessagesForModel(messages, options.model).messages
+      .filter((message) => options.systemPrompt === undefined || message.role !== 'system');
     const inputTokens = fixedTokens + estimator.estimateMessages(projected);
     const serializedBytes = Buffer.byteLength(
       strictStringify({ systemPrompt: options.systemPrompt ?? '', tools, messages: projected }),
@@ -58,7 +59,8 @@ export function createLocalContextFootprintMeasurer(
       messages,
     });
     if (!match) return fresh;
-    const trailing = projectAgentMessagesForModel(match.trailingMessages, options.model).messages;
+    const trailing = projectAgentMessagesForModel(match.trailingMessages, options.model).messages
+      .filter((message) => options.systemPrompt === undefined || message.role !== 'system');
     const hintTokens = match.absoluteTokens + estimator.estimateMessages(trailing);
     validateFootprint(hintTokens, fresh.serializedBytes);
     return { ...fresh, inputTokens: Math.max(fresh.inputTokens, hintTokens) };

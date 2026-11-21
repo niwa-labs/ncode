@@ -79,8 +79,8 @@ export class LocalPermissionApprovalService {
         : {}),
       ...(input.toolInput ? { toolInput: input.toolInput } : {}),
       toolDescription: input.toolDescription ?? input.toolName,
-      ...ptcRequestFields(input),
       reason: input.reason,
+      ...(input.bypassImmune ? { bypassImmune: true } : {}),
       createdAt: this.deps.nowMs(),
       waiters: new Set<LocalPermissionRequestWaiter>(),
       resolve: (decision) => {
@@ -138,36 +138,37 @@ export class LocalPermissionApprovalService {
         );
         continue;
       }
+      // A bypass-immune request never persists a rule, whatever the reply
+      // claims (the surface offers no allow-always / deny-always for it).
       const ruleContents =
-        record.ruleContents.length > 0
-          ? record.ruleContents
-          : record.persistWholeToolRuleOnReply
-            ? ['*']
-            : [];
+        record.bypassImmune !== true && (decision === 'allowAlways' || decision === 'denyAlways')
+          ? record.ruleContents.length > 0
+            ? record.ruleContents
+            : record.persistWholeToolRuleOnReply
+              ? ['*']
+              : []
+          : [];
       try {
+        // Only persistent replies write rules: allowAlways/denyAlways go to
+        // the global store; one-time replies (allowOnce/deny) leave no rule.
         if (ruleContents.length > 0) {
-          const global = decision === 'allowAlways';
-          const persistenceSource = global ? 'global' : 'session';
           logger.info(
             {
               request_id: requestId,
               session_id: record.sessionId,
               lifecycle: 'rule_persist_start',
-              source: persistenceSource,
+              source: 'global',
               rule_count: ruleContents.length,
             },
             'permission.lifecycle',
           );
           await this.deps.permissionRules.applyUpdate({
             type: 'addRules',
-            source: global ? 'global' : 'session',
-            destination: global ? 'global' : record.sessionId,
-            behavior: decision === 'deny' ? 'deny' : 'allow',
+            source: 'global',
+            destination: 'global',
+            behavior: decision === 'denyAlways' ? 'deny' : 'allow',
             rules: ruleContents.map((ruleContent, index) => ({
-              tool_name:
-                decision === 'deny'
-                  ? record.toolName
-                  : localPermissionRuleToolName(record.toolName),
+              tool_name: localPermissionRuleToolName(record.toolName),
               ...(record.ruleMatchers?.[index]
                 ? { matcher: record.ruleMatchers[index] }
                 : { rule_content: ruleContent }),
@@ -178,7 +179,7 @@ export class LocalPermissionApprovalService {
               request_id: requestId,
               session_id: record.sessionId,
               lifecycle: 'rule_persisted',
-              source: persistenceSource,
+              source: 'global',
               rule_count: ruleContents.length,
             },
             'permission.lifecycle',
@@ -285,9 +286,9 @@ export class LocalPermissionApprovalService {
           sessionId: record.sessionId,
           agentName: record.agentName,
           toolName: record.toolName,
-          ...channelToolDescription(record),
+          ...(record.toolDescription ? { toolDescription: record.toolDescription } : {}),
           ...(record.toolInput ? { toolInput: record.toolInput } : {}),
-          reason: record.parentToolCallId ? `来自 PTC：${record.reason}` : record.reason,
+          reason: record.reason,
           ruleContents: record.ruleContents,
           createdAt: record.createdAt,
         },
@@ -356,23 +357,4 @@ function cloneRuleMatcher<T extends NonNullable<LocalPermissionRequest['ruleMatc
     ...matcher,
     ...(matcher.kind === 'path' && matcher.actions ? { actions: [...matcher.actions] } : {}),
   } as T;
-}
-
-/** Fields present only when the ask comes from a trusted PTC child call. */
-function ptcRequestFields(
-  input: LocalPermissionRequestInput,
-): Pick<LocalPermissionRequest, 'parentToolCallId' | 'parentToolDescription' | 'stopPtcOnDeny'> {
-  return {
-    ...(input.parentToolCallId ? { parentToolCallId: input.parentToolCallId } : {}),
-    ...(input.parentToolDescription ? { parentToolDescription: input.parentToolDescription } : {}),
-    ...(input.stopPtcOnDeny ? { stopPtcOnDeny: true } : {}),
-  };
-}
-
-/** A PTC child ask names its run_code program on the channel card. */
-function channelToolDescription(record: LocalPermissionRequest): { toolDescription?: string } {
-  if (record.parentToolDescription) {
-    return { toolDescription: `PTC: ${record.parentToolDescription}` };
-  }
-  return record.toolDescription ? { toolDescription: record.toolDescription } : {};
 }

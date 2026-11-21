@@ -13,16 +13,12 @@
  *   * Absent metrics port = noop, zero behavior change (the rest of the pool
  *     suite runs without a port and stays green).
  *
- * The happy path uses the SDK's `InMemoryTransport` + a real low-level
- * `Server` so `client.connect` performs a genuine MCP handshake; only
- * `createTransport` is mocked (it normally spawns stdio children).
+ * W08 pi-mcp absorption: the happy path runs a genuine MCP handshake through
+ * the pinned pi-mcp protocol (in-memory transport pair + scripted server, see
+ * `helpers/pi-mcp-fake-server.ts`); only `createTransport` is mocked (it
+ * normally spawns stdio children or opens HTTP streams).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import { McpConnectionPool } from '../src/runtime/connection-pool.js';
 import type {
@@ -31,9 +27,10 @@ import type {
   McpToolCallResult,
   ResolvedMcpServer,
 } from '../src/runtime/types.js';
+import { createScriptedMcpServer, type ScriptedServer } from './helpers/pi-mcp-fake-server.js';
 
 const { createTransportMock } = vi.hoisted(() => ({
-  createTransportMock: vi.fn<(config: unknown, overrides?: unknown) => Transport>(),
+  createTransportMock: vi.fn<(config: unknown, overrides?: unknown) => unknown>(),
 }));
 
 vi.mock('../src/runtime/transport/factory.js', () => ({
@@ -62,27 +59,14 @@ function stubLookup(server: ResolvedMcpServer): { getResolvedServer: () => Resol
   return { getResolvedServer: () => server };
 }
 
-/** Real MCP server over an in-memory linked transport pair. */
-async function startFakeServer(): Promise<Transport> {
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = new Server(
-    { name: 'fake-mcp', version: '1.0.0' },
-    { capabilities: { tools: {} } },
-  );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+/** Real MCP server over a pi-mcp in-memory linked transport pair. */
+function startFakeServer(): ScriptedServer {
+  return createScriptedMcpServer({
     tools: [
       { name: 'ping', inputSchema: { type: 'object' } },
       { name: 'boom', inputSchema: { type: 'object' } },
     ],
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    if (req.params.name === 'boom') {
-      return { content: [{ type: 'text', text: 'tool failed' }], isError: true };
-    }
-    return { content: [{ type: 'text', text: 'pong' }] };
   });
-  await server.connect(serverTransport);
-  return clientTransport;
 }
 
 /**
@@ -93,13 +77,13 @@ async function startFakeServer(): Promise<Transport> {
 function seedFakeConnection(
   pool: McpConnectionPool,
   serverName: string,
-  behaviour: (options?: { timeout?: number; signal?: AbortSignal }) => Promise<McpToolCallResult>,
+  behaviour: (options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<McpToolCallResult>,
 ): void {
   const fakeClient = {
     async callTool(
-      _params: { name: string; arguments: Record<string, unknown> },
-      _resultSchema: unknown,
-      options?: { timeout?: number; signal?: AbortSignal },
+      _name: string,
+      _args: Record<string, unknown>,
+      options?: { timeoutMs?: number; signal?: AbortSignal },
     ): Promise<McpToolCallResult> {
       return behaviour(options);
     },
@@ -132,15 +116,18 @@ beforeEach(() => {
 
 describe('McpConnectionPool — metrics emission', () => {
   let pool: McpConnectionPool | undefined;
+  let scripted: ScriptedServer | undefined;
 
   afterEach(async () => {
     await pool?.shutdown();
     pool = undefined;
+    await scripted?.close();
+    scripted = undefined;
   });
 
   it('emits connect ok + tool call ok + duration through a real MCP handshake', async () => {
-    const clientTransport = await startFakeServer();
-    createTransportMock.mockImplementation(() => clientTransport);
+    scripted = startFakeServer();
+    createTransportMock.mockImplementation(() => scripted!.clientTransport);
 
     const { events, metrics } = makeRecorder();
     const info = vi.fn();
@@ -194,8 +181,8 @@ describe('McpConnectionPool — metrics emission', () => {
   });
 
   it('classifies MCP protocol-level tool errors (isError) as tool_error with duration', async () => {
-    const clientTransport = await startFakeServer();
-    createTransportMock.mockImplementation(() => clientTransport);
+    scripted = startFakeServer();
+    createTransportMock.mockImplementation(() => scripted!.clientTransport);
 
     const { events, metrics } = makeRecorder();
     pool = new McpConnectionPool(stubLookup(stdioServer), { metrics });
@@ -222,7 +209,10 @@ describe('McpConnectionPool — metrics emission', () => {
           start: () => Promise.reject(new Error('spawn failed')),
           send: async () => {},
           close: async () => {},
-        }) as unknown as Transport,
+          onMessage: () => () => undefined,
+          onError: () => () => undefined,
+          onClose: () => () => undefined,
+        }) as unknown,
     );
 
     const { events, metrics } = makeRecorder();
@@ -285,23 +275,6 @@ describe('McpConnectionPool — metrics emission', () => {
     expect(events).toEqual([
       { kind: 'incr', name: 'mcp_tool_call_total', tags: { status: 'aborted' } },
     ]);
-  });
-
-  it('keeps the original protocol error as the cause of the wrapped call failure', async () => {
-    pool = new McpConnectionPool(stubLookup(stdioServer));
-    const protocolError = Object.assign(new Error('MCP error -32602: Invalid params'), {
-      name: 'McpError',
-      code: -32602,
-      data: { field: 'query' },
-    });
-    seedFakeConnection(pool, 'demo', async () => {
-      throw protocolError;
-    });
-
-    const failure = await pool.callTool('demo', 'ping', {}).catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe('MCP tool call failed: MCP error -32602: Invalid params');
-    expect((failure as Error).cause).toBe(protocolError);
   });
 
   it('does not count pre-dispatch aborts (never acquired a permit)', async () => {

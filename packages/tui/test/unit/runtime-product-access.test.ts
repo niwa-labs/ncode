@@ -6,7 +6,6 @@ import type { CliService } from "@mavis/local-runtime-v2/cli-service";
 import { describe, expect, it, vi } from "vitest";
 
 import { TuiRuntimeAdapter } from "../../src/runtime/adapter.js";
-import { projectAccountDisplayIdentity } from "../../src/account/display-identity.js";
 import { buildTuiSkillCommands } from "../../src/tui/controller/run/active-run-flow.js";
 
 describe("TuiRuntimeAdapter product access", () => {
@@ -286,51 +285,11 @@ describe("TuiRuntimeAdapter product access", () => {
     });
     const adapter = new TuiRuntimeAdapter(cliService);
 
-    const snapshot = await adapter.getActiveRun("session-1");
-    expect(snapshot).toMatchObject({
-      state: "running",
-      turnId: "turn-foreign",
-      actions: { steer: false },
-    });
-    // Not yet registered locally is not the same as owned elsewhere.
-    expect(snapshot).not.toHaveProperty("runningElsewhere");
-  });
-
-  it("marks a running Turn owned by another live MCode process as running elsewhere", async () => {
-    const cliService = cliServiceFixture();
-    vi.mocked(cliService.getActiveTurn).mockResolvedValueOnce({
-      turnId: "turn-foreign",
-      busyReason: "turn",
-      locallyOwned: false,
-      ownedByOtherRuntime: true,
-    });
-    const adapter = new TuiRuntimeAdapter(cliService);
-
     await expect(adapter.getActiveRun("session-1")).resolves.toMatchObject({
       state: "running",
       turnId: "turn-foreign",
       actions: { steer: false },
-      runningElsewhere: true,
     });
-  });
-
-  it("reports the next-message suggestion switch, or that the Runtime has none", async () => {
-    const setPromptSuggestionEnabled = vi.fn(async (enabled: boolean) => enabled);
-    const supported = new TuiRuntimeAdapter({
-      getPromptSuggestionEnabled: vi.fn(async () => true),
-      setPromptSuggestionEnabled,
-    } as never);
-    await expect(supported.getPromptSuggestionEnabled()).resolves.toBe(true);
-    await expect(supported.setPromptSuggestionEnabled(false)).resolves.toBe(false);
-    expect(setPromptSuggestionEnabled).toHaveBeenCalledWith(false);
-
-    // CliService answers undefined when its host cannot read or persist the switch.
-    const unsupported = new TuiRuntimeAdapter({
-      getPromptSuggestionEnabled: vi.fn(() => undefined),
-      setPromptSuggestionEnabled: vi.fn(() => undefined),
-    } as never);
-    await expect(unsupported.getPromptSuggestionEnabled()).resolves.toBeUndefined();
-    await expect(unsupported.setPromptSuggestionEnabled(true)).resolves.toBeUndefined();
   });
 
   it("routes peripheral product capabilities through CliService", async () => {
@@ -414,62 +373,136 @@ describe("TuiRuntimeAdapter product access", () => {
     ).toBeUndefined();
   });
 
-  it("re-reads the account name only for explicit refreshed inspections", async () => {
-    const accountIdentityRefresher = vi.fn(async () => ({ name: "Renamed" }));
-    const adapter = new TuiRuntimeAdapter(cliServiceFixture(), {
-      tokenPlanAccountStatusGetter: async () => ({
-        quotaState: "available" as const,
-      }),
-      accountIdentityGetter: () => ({ name: "Registered" }),
-      accountIdentityRefresher,
+  it("carries the daemon identity fields (profile, dataDir, loginEpoch) through normalization", async () => {
+    const service = cliServiceFixture();
+    vi.mocked(service.getAccountStatus).mockResolvedValue({
+      selection: { defaultModel: "minimax/MiniMax-M3" },
+      provider: { id: "minimax", authMode: "managed-login" },
+      auth: { tokenPresent: true },
+      profile: "cedar",
+      dataDir: "/home/user/.minimax-cedar",
+      loginEpoch: "epoch-cedar",
+      warnings: [],
     });
-
-    expect((await adapter.getAccountStatus()).identity).toEqual({
-      name: "Registered",
+    const adapter = new TuiRuntimeAdapter(service);
+    await expect(adapter.getAccountStatus()).resolves.toMatchObject({
+      profile: "cedar",
+      dataDir: "/home/user/.minimax-cedar",
+      loginEpoch: "epoch-cedar",
     });
-    expect(
-      (await adapter.getAccountStatus(undefined, { forceRefresh: true }))
-        .identity,
-    ).toEqual({ name: "Registered" });
-    expect(accountIdentityRefresher).not.toHaveBeenCalled();
-
-    const inspected = await adapter.getAccountStatus(undefined, {
-      includeMembership: true,
-      forceRefresh: true,
-    });
-    expect(inspected).toMatchObject({
-      identity: { name: "Renamed" },
-      tokenPlanQuotaState: "available",
-    });
-    expect(accountIdentityRefresher).toHaveBeenCalledOnce();
-
-    accountIdentityRefresher.mockRejectedValueOnce(
-      new TypeError("fetch failed"),
-    );
-    expect(
-      (
-        await adapter.getAccountStatus(undefined, {
-          includeMembership: true,
-          forceRefresh: true,
-        })
-      ).identity,
-    ).toEqual({ name: "Registered" });
   });
 
-  it("prefers the editable profile name over the registration name", () => {
-    expect(
-      projectAccountDisplayIdentity({
-        userEmail: " dev@example.com ",
-        userName: "Registered",
-        subUserName: "令酱",
+  it("enriches the account view only when the daemon login epoch matches this window", async () => {
+    const tokenPlanAccountStatusGetter = vi.fn(async () => ({
+      quotaState: "available" as const,
+      quota: {
+        fiveHour: { remainingPercent: 70, unlimited: false },
+        weekly: { remainingPercent: 60, unlimited: false },
+      },
+    }));
+    const service = cliServiceFixture();
+    vi.mocked(service.getAccountStatus).mockResolvedValue({
+      selection: { defaultModel: "minimax/MiniMax-M3" },
+      provider: { id: "minimax", authMode: "managed-login" },
+      auth: { tokenPresent: true },
+      profile: "cedar",
+      dataDir: "/home/user/.minimax-cedar",
+      loginEpoch: "epoch-cedar",
+      warnings: [],
+    });
+    const adapter = new TuiRuntimeAdapter(service, {
+      authLoginEpochGetter: () => "epoch-cedar",
+      accountIdentityGetter: () => ({
+        email: "cedar@example.com",
+        name: "Cedar",
       }),
-    ).toEqual({ email: "dev@example.com", name: "令酱" });
-    expect(
-      projectAccountDisplayIdentity({
-        userName: "Registered",
-        subUserName: "  ",
+      tokenPlanAccountStatusGetter,
+    });
+
+    const account = await adapter.getAccountStatus();
+    expect(account.identity).toEqual({
+      email: "cedar@example.com",
+      name: "Cedar",
+    });
+    expect(account.warnings).toEqual([]);
+    await expect(
+      adapter.getAccountStatus(undefined, { includeMembership: true }),
+    ).resolves.toMatchObject({
+      identity: { email: "cedar@example.com", name: "Cedar" },
+      tokenPlanQuota: { fiveHour: { remainingPercent: 70 } },
+    });
+    // Two /status calls, each hydrating the quota exactly once — the gate
+    // never blocks a matching epoch.
+    expect(tokenPlanAccountStatusGetter).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-syncs on a daemon epoch mismatch, then shows daemon data plus a warning without client fields", async () => {
+    const tokenPlanAccountStatusGetter = vi.fn(async () => ({
+      quotaState: "available" as const,
+      quota: {
+        fiveHour: { remainingPercent: 99, unlimited: false },
+        weekly: { remainingPercent: 99, unlimited: false },
+      },
+    }));
+    const service = cliServiceFixture();
+    // BYOK route: managed-auth sync would NOT trigger here, so the epoch
+    // disagreement below is the only `synchronizeAuth` input. The mismatch
+    // persists after the re-sync — the daemon really serves another login.
+    vi.mocked(service.getAccountStatus).mockResolvedValue({
+      selection: { defaultModel: "custom/model" },
+      provider: { id: "custom_provider:example", authMode: "api-key" },
+      auth: { tokenPresent: true },
+      profile: "cedar",
+      dataDir: "/home/user/.minimax-cedar",
+      loginEpoch: "epoch-daemon",
+      warnings: [],
+    });
+    const synchronizeAuth = vi.fn(async () => undefined);
+    const adapter = new TuiRuntimeAdapter(service, {
+      synchronizeAuth,
+      authLoginEpochGetter: () => "epoch-window",
+      accountIdentityGetter: () => ({
+        email: "window@example.com",
+        name: "Window",
       }),
-    ).toEqual({ name: "Registered" });
+      tokenPlanAccountStatusGetter,
+    });
+
+    const account = await adapter.getAccountStatus();
+    // The one-shot re-sync ran (and ONLY the epoch could have triggered it)
+    // before judging the mismatch permanent.
+    expect(synchronizeAuth).toHaveBeenCalledOnce();
+    expect(service.getAccountStatus).toHaveBeenCalledTimes(2);
+    // Daemon data stands; client identity/quota are another login's and are
+    // withheld — no field mixing, only the explicit warning.
+    expect(account).toMatchObject({
+      modelSource: "byok",
+      managedTokenPresent: true,
+      profile: "cedar",
+      dataDir: "/home/user/.minimax-cedar",
+      loginEpoch: "epoch-daemon",
+    });
+    expect(account.identity).toBeUndefined();
+    expect(account.tokenPlanQuota).toBeUndefined();
+    expect(tokenPlanAccountStatusGetter).not.toHaveBeenCalled();
+    expect(account.warnings).toHaveLength(1);
+    expect(account.warnings[0]).toContain("different login");
+  });
+
+  it("keeps the enrichment gate open when the daemon predates the login epoch field", async () => {
+    const service = cliServiceFixture();
+    // No `loginEpoch` in the record — an older daemon or in-process host.
+    const adapter = new TuiRuntimeAdapter(service, {
+      authLoginEpochGetter: () => "epoch-window",
+      accountIdentityGetter: () => ({
+        email: "legacy@example.com",
+        name: "Legacy",
+      }),
+    });
+    await expect(adapter.getAccountStatus()).resolves.toMatchObject({
+      identity: { email: "legacy@example.com", name: "Legacy" },
+      warnings: [],
+    });
   });
 
   it("keeps BYOK usable while account-only actions surface unavailable OAuth", async () => {

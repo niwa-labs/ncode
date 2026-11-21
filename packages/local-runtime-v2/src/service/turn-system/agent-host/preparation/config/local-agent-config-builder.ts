@@ -28,6 +28,7 @@ import {
   type LocalConversationRuntimeConfig,
 } from '../../../../model-system/index.js';
 import { INSTRUCTIONS_CONTEXT_PREAMBLE } from '../prompt-blocks.js';
+import { isRunCodeEnabled } from '../../codemode-gate.js';
 import {
   createLocalStaticPromptReader,
   type LocalStaticPromptReader,
@@ -217,11 +218,10 @@ export class LocalAgentConfigBuilder {
     promptRead?: PromptReadScope,
   ): Promise<IAgentConfig> {
     const config = this.options.config();
-    const runtimeFacts = resolveAgentRuntimeFacts(input.agent, config, input.session);
+    const runtimeFacts = resolveAgentRuntimeFacts(input.agent, config);
     const profileAndBinding = await this.renderProfileForTurn({
       ...input,
       ...(promptRead ? { promptRead } : {}),
-      ...ptcRequestedField(runtimeFacts),
     });
     const profile = profileAndBinding.profile;
     const turnInput = input;
@@ -263,6 +263,12 @@ export class LocalAgentConfigBuilder {
       customConfig,
       overrides: this.options.systemPromptOverrides,
       profile,
+      // Upstream shows declared plugin subagents next to the skill catalog,
+      // and only on a turn whose capability ceiling still allows delegation.
+      ...(turnInput.desktopCapabilities?.agents?.length &&
+      profile?.capabilityCeiling?.features?.delegation !== false
+        ? { pluginAgentsBlock: renderPluginAgentsPromptBlock(turnInput.desktopCapabilities.agents) }
+        : {}),
     });
     return createAgentConfig({
       input: turnInput,
@@ -270,6 +276,8 @@ export class LocalAgentConfigBuilder {
       layers,
       displayName,
       systemPrompt: systemPrompt.text,
+      systemPromptSections: systemPrompt.sections,
+      cacheablePrompt: systemPrompt.cacheablePrompt,
       contextUsagePromptRanges: systemPrompt.ranges,
       customConfig,
       runtimeFacts,
@@ -335,7 +343,6 @@ export class LocalAgentConfigBuilder {
     readonly agent: AgentExecutionSnapshot;
     readonly isSessionFirstTurn: boolean;
     readonly promptRead?: PromptReadScope;
-    readonly ptcRequested?: boolean;
   }): Promise<{
     readonly profile?: LocalAgentExecutionProfile;
     readonly binding?: TaskSessionBinding;
@@ -346,6 +353,9 @@ export class LocalAgentConfigBuilder {
     const profile = await source.render({
       ...input,
       ...(binding ? { agentBinding: binding } : {}),
+      // K2: the run_code prompt section renders from the SAME gate the tool
+      // catalog appends the tool by, so they never disagree within a Turn.
+      ...(isRunCodeEnabled(this.options.config().beta) ? { ptcRequested: true } : {}),
     });
     return {
       profile,
@@ -432,26 +442,12 @@ async function readRetryContinuationPrompt(
   );
 }
 
-/**
- * The same Session mode that becomes agentConfig.ptc_enabled, which the tool
- * catalog reads, so the prompt's PTC section and the PTC catalog are decided
- * from one fact on every build of this Session (Turns, compaction, title,
- * Context Debug) and the prompt prefix does not depend on what started the Turn.
- */
-function ptcRequestedField(runtimeFacts: Pick<AgentRuntimeFacts, 'ptcEnabled'>): {
-  readonly ptcRequested?: true;
-} {
-  return runtimeFacts.ptcEnabled ? { ptcRequested: true } : {};
-}
-
 interface AgentRuntimeFacts {
   readonly resourceAgentName: string;
   readonly builtinCapabilities: ResolvedAgentCapabilities;
   readonly builtinSkillNames?: readonly string[];
   readonly cuModeActive: boolean;
   readonly exposeCuModeActive: boolean;
-  /** The Session's tool call mode, read once while assembling this Turn. */
-  readonly ptcEnabled: boolean;
 }
 
 interface LoadedPromptLayers {
@@ -469,6 +465,13 @@ interface PromptPart {
   readonly text: string;
   readonly kind?: ContextUsagePromptRange['kind'];
   readonly ranges?: readonly ContextUsagePromptRange[];
+}
+
+interface CacheablePromptLayout {
+  readonly system: string;
+  readonly runtimePrefix: string;
+  readonly projectContext: string;
+  readonly runtime: string;
 }
 
 interface ComposedPrompt {
@@ -744,7 +747,30 @@ async function loadCustomConfig(
   });
 }
 
-function buildSystemPrompt(scope: {
+const PLUGIN_AGENTS_DESCRIPTION_MAX_CHARS = 200;
+
+function renderPluginAgentsPromptBlock(
+  // 0.7.2 generation: desktopCapabilities.agents are their PluginAgent
+  // records (displayName/agentName), no longer our {name, description}.
+  agents: readonly { readonly displayName?: string; readonly agentName: string; readonly description: string }[],
+): string {
+  const lines = agents.map((agent) => {
+    const description = agent.description
+      .slice(0, PLUGIN_AGENTS_DESCRIPTION_MAX_CHARS)
+      .replace(/&/gu, '&amp;')
+      .replace(/</gu, '&lt;')
+      .replace(/>/gu, '&gt;');
+    return `- \`${agent.agentName}\`: ${description}`;
+  });
+  return [
+    '<plugin-agents>',
+    'Plugin-declared subagents are available to the task tool. To delegate, call `task` with `agent_name` set to the scoped name:',
+    ...lines,
+    '</plugin-agents>',
+  ].join('\n');
+}
+
+export function buildSystemPrompt(scope: {
   readonly config: LocalConversationRuntimeConfig;
   readonly environment: LocalPromptEnvironment | undefined;
   readonly isGitRepository: boolean | undefined;
@@ -756,36 +782,62 @@ function buildSystemPrompt(scope: {
   readonly customConfig: LocalAgentCustomConfigResult | undefined;
   readonly overrides: SystemPromptOverrides | undefined;
   readonly profile: LocalAgentExecutionProfile | undefined;
-}): ComposedPrompt {
+  readonly pluginAgentsBlock?: string;
+}): ComposedPrompt & { readonly sections: Readonly<Record<string, string>>; readonly cacheablePrompt: CacheablePromptLayout } {
   const { agent, sessionType, layers, customConfig, overrides, profile } = scope;
   const interactiveSurface =
     profile?.surface === undefined
       ? (sessionType ?? 'root') === 'root'
       : profile.surface !== 'task-child';
   const customPrompt = customConfig?.systemPrompt;
-  const contentPrompt =
+  const stable =
     customPrompt !== undefined
-      ? { text: addRuntimeRules(customPrompt, false) }
+      ? addRuntimeRules(customPrompt, false)
       : buildIdentityPrompt({
           agent,
           layers,
           profile,
           interactiveSurface,
           overrides: interactiveSurface ? overrides : undefined,
-        });
-  return composePromptParts([
-    contentPrompt,
-    { text: environmentContextBlock(scope) },
-    ...(customPrompt === undefined && !interactiveSurface
-      ? [
-          { text: '# Session Context' },
-          { text: profile?.surfacePrompt.trim() ?? '' },
-          { text: layers.sessionPrompt.trim() },
-        ]
-      : []),
-    ...layers.memoryBlocks.map((text) => ({ text, kind: 'MEMORY' as const })),
-    { text: layers.catalog.trim(), kind: 'SKILLS' },
-  ]);
+          cacheStable: true,
+        }).text;
+  // Keep these keys in a fixed order, including empty sections: Pi patches by
+  // name and a previously absent key would otherwise append at the end.
+  const sectionParts = [
+    ['identity', stable, undefined],
+    ['skills', layers.catalog.trim(), 'SKILLS'],
+    ['plugin_agents', scope.pluginAgentsBlock ?? '', 'OTHER'],
+    ['memory', layers.memoryBlocks.join('\n\n'), 'MEMORY'],
+    ['instructions_preamble', customPrompt === undefined && (layers.globalInstructions.trim() || layers.projectInstructions.trim()) ? INSTRUCTIONS_CONTEXT_PREAMBLE : '', undefined],
+    ['global_instructions', customPrompt === undefined ? layers.globalInstructions.trim() : '', 'OTHER'],
+    ['project_instructions', customPrompt === undefined ? layers.projectInstructions.trim() : '', 'OTHER'],
+    ['session', customPrompt === undefined ? [profile?.surfacePrompt, layers.sessionPrompt].filter(Boolean).join('\n\n') : '', undefined],
+    ['environment', environmentContextBlock(scope), undefined],
+  ] as const;
+  const sections = Object.fromEntries(sectionParts.map(([key, text]) => [key, text]));
+  const composed = composePromptParts(sectionParts.map(([, text, kind]) => ({ text, kind })), true);
+  // Native Pi replay, the compatibility text and provider cache checkpoints
+  // consume this one section snapshot; no independent prompt builder.
+  const projectContext = composePromptParts([
+    'skills', 'plugin_agents', 'memory', 'instructions_preamble',
+    'global_instructions', 'project_instructions',
+  ].map((key) => ({ text: sections[key] ?? '' })), true).text;
+  const runtime = composePromptParts(['session', 'environment']
+    .map((key) => ({ text: sections[key] ?? '' })), true).text;
+  return {
+    ...composed,
+    sections,
+    cacheablePrompt: {
+      system:
+        stable +
+        '\n\n# Harness runtime context\n' +
+        'The harness supplies workspace and user instructions, environment, memory and available skills in the leading <mcode-runtime-context> blocks. These are harness instructions and context, not a user request or tool output. Follow their instructions with the same priority as this system prompt; explicit workspace and user instructions override default behavior.',
+      // This checkpoint must not depend on workspace catalogs or session IDs.
+      runtimePrefix: 'Harness context follows in separate blocks. Apply the workspace instructions and available capabilities there, then answer the latest user request.',
+      projectContext,
+      runtime,
+    },
+  };
 }
 
 function buildIdentityPrompt(scope: {
@@ -794,6 +846,7 @@ function buildIdentityPrompt(scope: {
   readonly profile: LocalAgentExecutionProfile | undefined;
   readonly interactiveSurface: boolean;
   readonly overrides: SystemPromptOverrides | undefined;
+  readonly cacheStable?: boolean;
 }): ComposedPrompt {
   const { agent, layers, profile, interactiveSurface, overrides } = scope;
   const customPrompt = overrides?.customPrompt?.trim();
@@ -815,7 +868,7 @@ function buildIdentityPrompt(scope: {
     globalInstructions,
     projectInstructions,
   ].some((part) => part?.trim());
-  const rootSessionPrompt = [profile?.surfacePrompt, layers.sessionPrompt]
+  const rootSessionPrompt = (scope.cacheStable ? [] : [profile?.surfacePrompt, layers.sessionPrompt])
     .filter(Boolean)
     .join('\n\n');
   const identity: readonly PromptPart[] = customPrompt
@@ -836,19 +889,21 @@ function buildIdentityPrompt(scope: {
   return composePromptParts([
     ...identity,
     { text: appendPrompt },
-    { text: instructionsPreamble },
-    { text: globalInstructions, kind: 'OTHER' },
-    { text: projectInstructions, kind: 'OTHER' },
+    ...(scope.cacheStable ? [] : [
+      { text: instructionsPreamble },
+      { text: globalInstructions, kind: 'OTHER' as const },
+      { text: projectInstructions, kind: 'OTHER' as const },
+    ]),
   ]);
 }
 
-function composePromptParts(parts: readonly PromptPart[]): ComposedPrompt {
+function composePromptParts(parts: readonly PromptPart[], sectionBoundaries = false): ComposedPrompt {
   return parts
     .filter((part) => part.text)
     .reduce<ComposedPrompt>(
       (composed, part, index, contentParts) => {
         const followsHeading = /^#{1,6} [^\n]+$/u.test(contentParts[index - 1]?.text ?? '');
-        const boundary = followsHeading ? '\n' : '\n\n';
+        const boundary = followsHeading && !sectionBoundaries ? '\n' : '\n\n';
         const separator = composed.text ? boundary : '';
         const startOffset = composed.text.length + separator.length;
         const text = `${composed.text}${separator}${part.text}`;
@@ -889,6 +944,8 @@ function createAgentConfig(scope: {
   readonly layers: LoadedPromptLayers;
   readonly displayName: string;
   readonly systemPrompt: string;
+  readonly systemPromptSections: Readonly<Record<string, string>>;
+  readonly cacheablePrompt: CacheablePromptLayout;
   readonly contextUsagePromptRanges: readonly ContextUsagePromptRange[];
   readonly customConfig: LocalAgentCustomConfigResult | undefined;
   readonly runtimeFacts: AgentRuntimeFacts;
@@ -900,6 +957,8 @@ function createAgentConfig(scope: {
     layers,
     displayName,
     systemPrompt,
+    systemPromptSections,
+    cacheablePrompt,
     contextUsagePromptRanges,
     customConfig,
     runtimeFacts,
@@ -908,11 +967,12 @@ function createAgentConfig(scope: {
   const agentConfig: IAgentConfig & {
     customConfig?: LocalAgentCustomConfigResult['evidence'];
     contextUsagePromptRanges: readonly ContextUsagePromptRange[];
+    cacheablePrompt: CacheablePromptLayout;
+    system_prompt_sections: Readonly<Record<string, string>>;
     resourceAgentName: string;
     builtinCapabilities: ResolvedAgentCapabilities;
     cuModeActive: boolean;
     desktopPluginSkills: readonly { readonly pluginName: string; readonly name: string }[];
-    ptc_enabled?: boolean;
     capability_ceiling?: LocalAgentExecutionProfile['capabilityCeiling'];
     prompt_metadata?: Readonly<Record<string, unknown>>;
     agent_profile?: {
@@ -934,6 +994,8 @@ function createAgentConfig(scope: {
     };
   } = {
     system_prompt: systemPrompt,
+    system_prompt_sections: systemPromptSections,
+    cacheablePrompt,
     ...profilePromptMetadata(profile),
     contextUsagePromptRanges,
     model,
@@ -976,7 +1038,6 @@ function createAgentConfig(scope: {
         }
       : {}),
   };
-  if (runtimeFacts.ptcEnabled) agentConfig.ptc_enabled = true;
   attachCustomConfigEvidence(agentConfig, customConfig);
   return agentConfig;
 }
@@ -991,7 +1052,6 @@ function attachCustomConfigEvidence(
 function resolveAgentRuntimeFacts(
   agent: AgentExecutionSnapshot,
   config: LocalConversationRuntimeConfig,
-  session: Pick<SessionRecord, 'toolCallMode'>,
 ): AgentRuntimeFacts {
   return {
     resourceAgentName: agent.resourceAgentName?.trim() || agent.agentName,
@@ -1000,10 +1060,6 @@ function resolveAgentRuntimeFacts(
     ...(agent.builtinSkillNames ? { builtinSkillNames: agent.builtinSkillNames } : {}),
     cuModeActive: agent.cuModeActive === true,
     exposeCuModeActive: agent.cuModeActive !== undefined,
-    // Fixed at Session creation and refreshed only after a summary compaction (beta.ptc resolved
-    // for the build then), so toggling beta.ptc never changes an ongoing conversation's prompt
-    // prefix.
-    ptcEnabled: session.toolCallMode === 'ptc',
   };
 }
 

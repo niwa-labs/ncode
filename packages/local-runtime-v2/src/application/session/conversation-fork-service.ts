@@ -64,6 +64,10 @@ interface ForkServiceDependencies {
   readonly operations: ForkOperationPort;
   readonly assets?: ForkAssetPort;
   readonly state?: ForkSessionStatePort;
+  /** §2.5: side Sessions inherit the parent's permission mode (locked). */
+  readonly sessionPermissionModes?: {
+    inherit(childSessionId: string, parentSessionId: string): void;
+  };
   readonly worktree?: Pick<ForkWorktreePort, 'prepare' | 'probe' | 'cleanup'>;
   readonly sessionDataVersion: number;
 }
@@ -506,6 +510,10 @@ export class ForkService {
         purpose: input.purpose,
       },
     });
+    this.deps.sessionPermissionModes?.inherit(
+      result.child.sessionId,
+      input.parentSessionId,
+    );
     return result.child;
   }
 

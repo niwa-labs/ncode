@@ -17,7 +17,6 @@ import {
 } from "@mavis/agent-core/pi-turn-runner";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
-  defineRuntimeTool,
   toRuntimeTool,
   type RuntimeTool,
   type ToolExecutionContext,
@@ -82,6 +81,8 @@ import {
   type LocalRuntimeTurnRunnerInput,
   type LocalRuntimeTurnRunnerResult,
 } from "./executor.js";
+import { turnCheckpointBarrier } from "./turn-checkpoint-policy.js";
+import type { StorageWorker } from "@mavis/storage-worker";
 import { localPluginHookCoordinator } from "../assembly/local-turn-plugin-hooks.js";
 import { NativeLocalTurnExecutionPreparationSource } from "../assembly/local-turn-execution-preparation.js";
 import { LocalTurnInputPreparer } from "../assembly/local-turn-input-preparation.js";
@@ -1059,31 +1060,6 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
     },
   );
 
-  it('updates deletion guidance on the next Turn without mutating an active Turn', async () => {
-    let nativeDelete = false;
-    const descriptions: string[] = [];
-    const executor = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        const bash = runInput.tools?.find((tool) => tool.def.name === 'bash');
-        const description = bash?.def.description ?? '';
-        descriptions.push(description);
-        nativeDelete = !nativeDelete;
-        expect(bash?.def.description).toBe(description);
-        await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
-      }),
-      nativeDelete: () => nativeDelete,
-    });
-    const bash = toRuntimeTool(new LocalBashTool('/tmp/workspace', undefined, { mode: 'off' }));
-    for (let turn = 0; turn < 3; turn += 1) {
-      const input = executionInput();
-      await executor.execute({ ...input, assembly: { ...input.assembly, tools: [bash] } });
-    }
-    expect(descriptions[0]).toContain('falling back to permanent deletion');
-    expect(descriptions[1]).not.toMatch(/mavis-trash|deletion/i);
-    expect(descriptions[0]).toContain(descriptions[1]);
-    expect(descriptions[2]).toBe(descriptions[0]);
-  });
-
   it.each([
     { source: undefined, allowed: true },
     { source: "builtin" as const, allowed: true },
@@ -1164,113 +1140,8 @@ describe("LocalRuntimeTurnExecutor Bash output capability", () => {
   );
 });
 
-describe('LocalRuntimeTurnExecutor PTC program Bash promotion', () => {
-  it.each([
-    { name: 'a native task_output', source: 'builtin' as const, allowed: true },
-    { name: 'a native task_output without source', source: undefined, allowed: true },
-    { name: 'a configured task_output namesake', source: 'configured' as const, allowed: false },
-    { name: 'no task_output', source: null, allowed: false },
-  ])(
-    'sets the Turn fact on a PTC Turn with $name and keeps the foreground Bash wording in run_code',
-    async ({ source, allowed }) => {
-      const bash = toRuntimeTool(
-        new LocalBashTool('/tmp/workspace', { startBackground: vi.fn() }, { mode: 'off' }),
-      );
-      const output = {
-        impl: runtimeMatrixTool().impl,
-        def: { ...runtimeMatrixTool().def, name: 'task_output' },
-        ...(source ? { source } : {}),
-      };
-      const catalog = buildLocalTurnToolCatalog({
-        sessionId: 'session-1',
-        sources: {
-          nativeTools: source === null ? [bash] : [bash, output],
-          mcpEntries: [],
-          threadGoalTools: [],
-          cuRuntimeAvailable: false,
-        },
-        agentProfile: {
-          trustedBuiltin: true,
-          canonicalRole: 'mavis',
-          surface: 'interactive',
-          capabilityCeiling: {
-            personaEnabled: true,
-            features: { mavis: true, delegation: true, webSearch: true },
-          },
-        },
-        llmModel: { provider: 'p', id: 'm', contextWindow: 100_000 },
-        env: {},
-        ptcEnabled: true,
-      });
-      const input = executionInput();
-      await new LocalRuntimeTurnExecutor(
-        options(async (runInput) => {
-          // The Turn's own fact, as for a direct call. Agent Core still gives
-          // every run_code child false (ptc-tool-executor.ts).
-          expect(runInput.toolContext).toHaveProperty('allowBashAutoPromotion', allowed);
-          expect(runInput.ptcTools?.map(({ def }) => def.name)).toEqual(
-            source === null ? ['bash'] : ['bash', 'task_output'],
-          );
-          // task_output and bash are run_code children only, never top-level.
-          // tool_search joins them only when MCP disclosure actually deferred
-          // something, which this Turn has nothing to defer.
-          expect(runInput.tools?.map(({ def }) => def.name)).toEqual(['run_code']);
-          const description = runInput.tools?.[0]?.def.description ?? '';
-          expect(description).not.toContain('moves to the background');
-          expect(description).toContain('extends the program to fit it');
-          await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
-        }),
-      ).execute({ ...input, assembly: { ...input.assembly, tools: catalog.tools } });
-    },
-  );
-});
-
-describe('LocalRuntimeTurnExecutor Plugin Agent roster', () => {
-  it('injects the Turn lease roster into the tool context only when Plugin Agents exist', async () => {
-    const agent = {
-      scopedName: 'review:security',
-      pluginName: 'review',
-      agentName: 'security',
-      sourceFormat: 'minimax' as const,
-      origin: 'local' as const,
-      packageDigest: 'sha256:review',
-      pluginRoot: '/plugins/review',
-      description: 'Reviews security.',
-      systemPrompt: 'Body',
-    };
-    const contexts: unknown[] = [];
-    const run = async (desktopCapabilities?: LocalTurnExecutionInput['desktopCapabilities']) => {
-      const input = executionInput(desktopCapabilities ? { desktopCapabilities } : {});
-      await new LocalRuntimeTurnExecutor(
-        options(async (runInput) => {
-          contexts.push(runInput.toolContext);
-          await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
-        }),
-      ).execute(input);
-    };
-    const view = {
-      revision: 'rev-1',
-      plugins: [],
-      skills: [],
-      runtimeTools: [],
-      runtimeToolBindings: [],
-    };
-
-    await run({ ...view, agents: [agent] });
-    await run({ ...view, agents: [] });
-
-    const roster = Reflect.get(contexts[0] as object, 'pluginAgents') as {
-      resolve(name: string): unknown;
-      list(): unknown[];
-    };
-    expect(roster.list()).toEqual([agent]);
-    expect(roster.resolve('REVIEW:SECURITY')).toBe(agent);
-    expect(contexts[1]).not.toHaveProperty('pluginAgents');
-  });
-});
-
-describe('LocalRuntimeTurnExecutor lightweight context mode', () => {
-  it('keeps the standard provider context byte-for-byte and trims only explicit lightweight roots', async () => {
+describe("LocalRuntimeTurnExecutor", () => {
+  it("keeps the standard provider context byte-for-byte and trims only explicit lightweight roots", async () => {
     const tool = {
       def: {
         name: "fixture_tool",
@@ -1501,6 +1372,7 @@ describe('LocalRuntimeTurnExecutor lightweight context mode', () => {
     expect(captured?.userMessage.attachments).toHaveLength(1);
     expect(captured?.hooks?.beforeLlmCallHook).toEqual([
       ...(input.assembly.hooks.beforeLlmCallHook ?? []),
+      expect.any(Function),
       expect.any(Function),
     ]);
     expect(captured?.hooks?.onHistoryChangedHook).toHaveLength(2);
@@ -2071,256 +1943,6 @@ describe("LocalRuntimeTurnExecutor context publication", () => {
       status: "completed",
       waitingForUser: true,
     });
-  });
-});
-
-/** Builds a Turn input on a platform (managed) or custom (BYOK) model. */
-function suggestionInput(
-  managedProvider: boolean,
-  overrides: Parameters<typeof executionInput>[0] = {},
-): LocalTurnExecutionInput {
-  const input = executionInput(overrides);
-  return {
-    ...input,
-    preparation: { ...input.preparation, llm: { ...input.preparation.llm, managedProvider } },
-  } as LocalTurnExecutionInput;
-}
-
-const managedInput = (overrides: Parameters<typeof executionInput>[0] = {}) =>
-  suggestionInput(true, overrides);
-
-async function suggestionHooks(
-  runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>,
-  status = RuntimeEventStatus.COMPLETED,
-): Promise<void> {
-  await runInput.hooks?.onLlmCallPreparedHook?.at(-1)?.({
-    sessionId: "session-1",
-    turnId: "turn-1",
-    phase: "initial",
-    scope: "agent",
-    messages: [{ role: "user", content: "hello", timestamp: 0 }],
-    model: runInput.llm.model,
-    systemPrompt: "base system",
-    tools: [],
-    thinkingLevel: "off",
-  } as never);
-  await runInput.hooks?.afterLlmCallHook?.at(-1)?.({
-    message: {
-      role: "assistant",
-      content: [{ type: "text", text: "done" }],
-      api: "anthropic-messages",
-      provider: "provider",
-      model: "model",
-      usage: {
-        input: 20,
-        output: 12,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 32,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: "stop",
-      timestamp: 1,
-    },
-  } as never);
-  await runInput.eventWriter.pushRuntime(terminalEvent(status));
-}
-
-describe("LocalRuntimeTurnExecutor prompt suggestion", () => {
-  it.each([true, false])(
-    "collects the same way for a platform model and a custom model (managed: %s)",
-    async (managedProvider) => {
-      // No model is special-cased: a custom (BYOK) model collects like a platform one.
-      const committed = vi.fn();
-      const runner = new LocalRuntimeTurnExecutor({
-        ...options(async (runInput) => {
-          await suggestionHooks(runInput);
-        }),
-        promptSuggestion: {
-          enabled: () => true,
-          turnStarted: () => undefined,
-          committed,
-        },
-      });
-      const outcome = await runner.execute(suggestionInput(managedProvider));
-      runner.afterSuccessfulCommit(outcome);
-      expect(committed).toHaveBeenCalledOnce();
-      // Collection is identical; only review follows the model: a platform model
-      // reviews its suggestion, a BYOK model does not.
-      expect(committed.mock.calls[0]![1]).toMatchObject({
-        contentReviewRequired: managedProvider,
-      });
-    },
-  );
-
-  it("forwards one committed capture only after the Host commits the Turn", async () => {
-    const committed = vi.fn();
-    let hookCount: number | undefined;
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        hookCount = runInput.hooks?.onLlmCallPreparedHook?.length;
-        await suggestionHooks(runInput);
-      }),
-      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-    });
-
-    const outcome = await runner.execute(managedInput());
-    // execute() returning is not durability: the suggestion must not have run yet.
-    expect(outcome).toEqual({ status: "completed" });
-    expect(hookCount).toBeGreaterThan(0);
-    expect(committed).not.toHaveBeenCalled();
-
-    runner.afterSuccessfulCommit(outcome);
-    expect(committed).toHaveBeenCalledOnce();
-    const [scope, capture] = committed.mock.calls[0]!;
-    expect(scope).toEqual({
-      sessionId: "session-1",
-      turnId: "turn-1",
-      caller: "chat",
-      session: { parentSessionId: undefined, interactionMode: undefined },
-    });
-    expect(capture.finalAssistant.content).toEqual([{ type: "text", text: "done" }]);
-  });
-
-  it("installs no capture Hook and commits nothing while the feature is disabled", async () => {
-    const counts: number[] = [];
-    const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
-      counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
-      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
-    };
-    const committed = vi.fn();
-    // Same executor options with and without the optional port.
-    await new LocalRuntimeTurnExecutor(options(observe)).execute(managedInput());
-    await new LocalRuntimeTurnExecutor({
-      ...options(observe),
-      promptSuggestion: { enabled: () => false, turnStarted: () => undefined, committed },
-    }).execute(managedInput());
-
-    expect(counts[1]).toBe(counts[0]);
-    expect(committed).not.toHaveBeenCalled();
-  });
-
-  it("collects a suggestion for the turn that a questionnaire answer resumes", async () => {
-    // A questionnaire answer is the user's own input, but it carries no
-    // user-authored query text; the turn it resumes still ends at the composer.
-    const base = managedInput();
-    const input = managedInput({
-      request: {
-        ...base.request,
-        genuineUserQueryText: "",
-        provenance: { ...base.request.provenance, source: "questionnaire" },
-      },
-    });
-    const committed = vi.fn();
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        await suggestionHooks(runInput);
-      }),
-      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-    });
-    const outcome = await runner.execute(input);
-    runner.afterSuccessfulCommit(outcome);
-    expect(committed).toHaveBeenCalledOnce();
-  });
-
-  it.each(["goal-continuation", "goal-summary", "plan", "hidden-input"] as const)(
-    "does not collect or generate a suggestion for %s",
-    async (kind) => {
-      const base = managedInput();
-      const makeInput = () =>
-        managedInput({
-          request: {
-            ...base.request,
-            ...(kind === "goal-continuation"
-              ? { provenance: { source: "thread-goal", routingFingerprint: "goal:continuation" } }
-              : {}),
-            ...(kind === "hidden-input" ? { genuineUserQueryText: "" } : {}),
-          },
-          assemblyContext: {
-            ...base.assemblyContext,
-            ...(kind === "goal-summary" ? { turnIntent: { kind: "goal-budget-summary" } } : {}),
-            ...(kind === "plan"
-              ? { plan: { active: true as const, canonicalPath: "/plan.md" } }
-              : {}),
-          },
-        });
-      const counts: number[] = [];
-      const observe = async (runInput: LocalRuntimeTurnRunnerInput<LocalToolContext>) => {
-        counts.push(runInput.hooks?.onLlmCallPreparedHook?.length ?? 0);
-        await suggestionHooks(runInput);
-      };
-      await new LocalRuntimeTurnExecutor(options(observe)).execute(makeInput());
-      const committed = vi.fn();
-      const runner = new LocalRuntimeTurnExecutor({
-        ...options(observe),
-        promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-      });
-      const outcome = await runner.execute(makeInput());
-      runner.afterSuccessfulCommit(outcome);
-      expect(outcome.status).toBe("completed");
-      expect(counts[1]).toBe(counts[0]);
-      expect(committed).not.toHaveBeenCalled();
-    },
-  );
-
-  it("ignores a post-commit hook for an outcome it never produced", async () => {
-    const committed = vi.fn();
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        await suggestionHooks(runInput);
-      }),
-      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-    });
-
-    await runner.execute(managedInput());
-    runner.afterSuccessfulCommit({ status: "completed" });
-    expect(committed).not.toHaveBeenCalled();
-
-    // The capture is consumed once, so a repeated hook cannot double-spend.
-    const next = await runner.execute(managedInput());
-    runner.afterSuccessfulCommit(next);
-    runner.afterSuccessfulCommit(next);
-    expect(committed).toHaveBeenCalledOnce();
-  });
-
-  it("never fails the Turn when the post-commit suggestion throws", async () => {
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        await suggestionHooks(runInput);
-      }),
-      promptSuggestion: {
-        enabled: () => true,
-        turnStarted: () => undefined,
-        committed: () => {
-          throw new Error("optional suggestion failed");
-        },
-      },
-    });
-
-    const outcome = await runner.execute(managedInput());
-    expect(() => runner.afterSuccessfulCommit(outcome)).not.toThrow();
-  });
-
-  it.each([
-    ["a failed Turn", RuntimeEventStatus.FAILED, undefined],
-    [
-      "a wait-for-user Turn",
-      RuntimeEventStatus.COMPLETED,
-      { status: "completed", waitingForUser: true },
-    ],
-  ] as const)("commits nothing after %s", async (_name, status, outcome) => {
-    const committed = vi.fn();
-    const runner = new LocalRuntimeTurnExecutor({
-      ...options(async (runInput) => {
-        await suggestionHooks(runInput, status);
-        return outcome ? { outcome } : undefined;
-      }),
-      promptSuggestion: { enabled: () => true, turnStarted: () => undefined, committed },
-    });
-
-    const settled = await runner.execute(managedInput());
-    runner.afterSuccessfulCommit(settled);
-    expect(committed).not.toHaveBeenCalled();
   });
 });
 
@@ -4316,32 +3938,7 @@ describe("LocalRuntimeTurnExecutor after-tool context and ordering", () => {
 });
 
 describe("LocalRuntimeTurnExecutor content review routing", () => {
-  it("keeps Desktop managed-model content review ownership unchanged", async () => {
-    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
-    const base = executionInput();
-    const executor = new LocalRuntimeTurnExecutor(
-      options(async (runInput) => {
-        captured = runInput;
-        await runInput.eventWriter.pushRuntime(
-          terminalEvent(RuntimeEventStatus.COMPLETED),
-        );
-      }),
-    );
-
-    await executor.execute(
-      executionInput({
-        preparation: {
-          ...base.preparation,
-          llm: { ...base.preparation.llm, managedProvider: true } as never,
-        },
-      }),
-    );
-
-    expect(captured).not.toHaveProperty("contentReviewRequired");
-    expect(captured).not.toHaveProperty("streamUnreviewedOutput");
-  });
-
-  it("skips MiniMax content review for Desktop BYOK turns", async () => {
+  it("keeps Desktop content review ownership unchanged when no product policy is set", async () => {
     let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
     const base = executionInput();
     const executor = new LocalRuntimeTurnExecutor(
@@ -4362,8 +3959,8 @@ describe("LocalRuntimeTurnExecutor content review routing", () => {
       }),
     );
 
-    expect(captured?.contentReviewRequired).toBe(false);
-    expect(captured?.streamUnreviewedOutput).toBe(true);
+    expect(captured).not.toHaveProperty("contentReviewRequired");
+    expect(captured).not.toHaveProperty("streamUnreviewedOutput");
   });
 
   it.each([
@@ -5046,11 +4643,12 @@ describe("LocalRuntimeTurnExecutor execution budget reminders", () => {
     }
   });
 
-  it('registers the request-only budget reminder before the appending background reminder', async () => {
-    // runBeforeLLM now accumulates appendMessage instead of ending the
-    // pipeline, so this order is no longer what keeps the budget reminder
-    // observable. It is still locked because it fixes the request position of
-    // the request-only marker relative to the durable background marker.
+  it("registers the request-only budget reminder before the appending background reminder", async () => {
+    // runBeforeLLM ends the before-LLM decision pipeline as soon as a hook
+    // returns appendMessage. The background cadence reminder appends, so a
+    // budget reminder registered after it would be silently skipped for every
+    // request where the background reminder fires. The relative order is the
+    // only thing keeping the request-only reminder observable.
     const backgroundHook = vi.fn(() => undefined);
     const executorOptions = options(async (runInput) => {
       const messages = [
@@ -5147,17 +4745,7 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
           };
         },
       });
-      // runBeforeLLM accumulates appends, so this later hook now runs in every
-      // mode (it used to be skipped once the background reminder appended).
-      // It must see the registered marker; it replaces durable history only
-      // when nothing is pending, because a durable replacement after a
-      // registered append fails closed (production never orders them so).
-      const laterSawMarker: boolean[] = [];
-      const laterHook = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
-        const pending = hookInput.messages.some((message) => message === marker);
-        laterSawMarker.push(pending);
-        return pending ? { type: 'continue' as const } : replacement(hookInput);
-      });
+      const laterHook = vi.fn(replacement);
       const canAppend = vi.fn((hookInput: PiBeforeLlmCallHookInput) => {
         // The request-only reminder runs before the appending background
         // reminder and before any post-commit callback, so it samples the
@@ -5249,8 +4837,7 @@ describe("LocalRuntimeTurnExecutor budget with durable reminders", () => {
       }
       expect(canAppend).toHaveBeenCalledOnce();
       expect(backgroundHook).toHaveBeenCalledOnce();
-      expect(laterHook).toHaveBeenCalledOnce();
-      expect(laterSawMarker).toEqual([mode !== "defer"]);
+      expect(laterHook).toHaveBeenCalledTimes(mode === "defer" ? 1 : 0);
       const historyChanges = vi.mocked(input.onHistoryChanged).mock.calls;
       expect(historyChanges.length).toBeGreaterThan(0);
       const history = historyChanges.flatMap(([change]) => change.messages);
@@ -5494,7 +5081,7 @@ describe("LocalRuntimeTurnExecutor beforeLlmCall and reconcile", () => {
     });
 
     await new LocalRuntimeTurnExecutor(executorOptions).execute(input);
-    const wrappedCompaction = captured?.hooks?.beforeLlmCallHook?.[1];
+    const wrappedCompaction = captured?.hooks?.beforeLlmCallHook?.[2];
     const decision = await wrappedCompaction?.({} as never);
     if (!decision || decision.type !== "replaceMessages") {
       throw new Error("expected wrapped compaction replacement");
@@ -5626,9 +5213,10 @@ describe("LocalRuntimeTurnExecutor beforeLlmCall compaction hooks", () => {
       hostHook,
       expect.any(Function),
       expect.any(Function),
+      expect.any(Function),
       afterCompactionHook,
     ]);
-    expect(captured?.hooks?.beforeLlmCallHook?.[2]).not.toBe(compactionHook);
+    expect(captured?.hooks?.beforeLlmCallHook?.[3]).not.toBe(compactionHook);
     expect(executorOptions.resolveBeforeLlmCallHooks).toHaveBeenCalledTimes(1);
   });
 
@@ -6065,7 +5653,7 @@ describe("LocalRuntimeTurnExecutor lifecycle failure handling", () => {
     expect(executorOptions.fileChanges.markFailed).not.toHaveBeenCalled();
   });
 
-  it("suppresses a due reminder during the tool loop after a successful task_output read", async () => {
+  it("excludes a read task while refreshing current background task facts", async () => {
     const loadBackgroundReminder = vi.fn(async () => ({
       tasks: [
         { taskId: "task-1", status: "succeeded" as const, endedAtMs: 10 },
@@ -6089,6 +5677,7 @@ describe("LocalRuntimeTurnExecutor lifecycle failure handling", () => {
       );
       const messages = Array.from({ length: 15 }, (_, index) => ({
         role: "assistant" as const,
+        provider: "test-provider",
         content: [],
         timestamp: index + 1,
       })) as never[];
@@ -6134,7 +5723,9 @@ describe("LocalRuntimeTurnExecutor lifecycle failure handling", () => {
       status: "completed",
       committedFacts: { backgroundTaskReadCandidates: ["task-1"] },
     });
-    expect(loadBackgroundReminder).toHaveBeenCalledOnce();
+    // Identity-based suppression still reloads facts so unread task B is not hidden
+    // merely because task A was read earlier in this turn.
+    expect(loadBackgroundReminder).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -6755,5 +6346,151 @@ describe("incremental runtime event outcomes", () => {
     const executor = new LocalRuntimeTurnExecutor({ ...runnerOptions,
       runtime: { ...runnerOptions.runtime, acceptsEventSummary } });
     await expect(executor.execute(executionInput())).resolves.toEqual({ status: "completed" });
+  });
+});
+
+function checkpointWorker(
+  checkpointCalls: string[],
+  readCheckpointError?: () => Error | undefined,
+): StorageWorker {
+  return {
+    enqueue: async () => undefined,
+    flush: async () => null,
+    checkpoint: async () => {
+      checkpointCalls.push("checkpoint");
+      const error = readCheckpointError?.();
+      if (error) throw error;
+    },
+    quarantined: [],
+    dispose: async () => undefined,
+  };
+}
+
+describe("LocalRuntimeTurnExecutor checkpoint policy wiring (SE-SW-002)", () => {
+  it("puts the fail-closed durability flush first in beforeLlmCallHook", async () => {
+    const checkpointCalls: string[] = [];
+    const failure: { error?: Error } = {};
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const executorOptions = options(async (runInput) => {
+      captured = runInput;
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+    });
+    const runner = new LocalRuntimeTurnExecutor({
+      ...executorOptions,
+      checkpointBarrier: turnCheckpointBarrier(
+        checkpointWorker(checkpointCalls, () => failure.error),
+      ),
+    });
+    const input = executionInput();
+    await expect(runner.execute(input)).resolves.toEqual({ status: "completed" });
+
+    const hooks = captured?.hooks?.beforeLlmCallHook ?? [];
+    // First position: durability is confirmed before any other before-LLM
+    // decision, ahead of the assembled runtime hooks.
+    expect(hooks[0]).toEqual(expect.any(Function));
+    expect(hooks[1]).toBe(input.assembly.hooks.beforeLlmCallHook?.[0]);
+    const hookInput = {
+      sessionId: "session-1",
+      turnId: "turn-1",
+      phase: "initial",
+    } as PiBeforeLlmCallHookInput;
+    // A confirmed barrier emits no decision: the request proceeds.
+    expect(await hooks[0]?.(hookInput)).toBeUndefined();
+    expect(checkpointCalls).toEqual(["checkpoint"]);
+    // Fail-closed: a barrier failure aborts the request before it is issued.
+    failure.error = new Error("worker sealed");
+    expect(await hooks[0]?.(hookInput)).toMatchObject({
+      type: "abort",
+      reason: expect.stringContaining("checkpoint policy"),
+    });
+  });
+
+  it("runs every admitted tool effect under the barrier", async () => {
+    const checkpointCalls: string[] = [];
+    const tool: RuntimeTool = {
+      def: {
+        name: "echo",
+        description: "echo tool",
+        schema: { type: "object" } as never,
+      },
+      impl: {
+        execute: async () => ({
+          tool_name: "echo",
+          text: "ok",
+          content: [{ type: "text", text: "ok" }],
+        }),
+      },
+    };
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const executorOptions = options(async (runInput) => {
+      captured = runInput;
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+    });
+    const runner = new LocalRuntimeTurnExecutor({
+      ...executorOptions,
+      checkpointBarrier: turnCheckpointBarrier(checkpointWorker(checkpointCalls)),
+    });
+    await runner.execute(
+      executionInput({ assembly: { ...assembly(), tools: [tool] } }),
+    );
+
+    const wrapped = captured?.tools?.find((candidate) => candidate.def.name === "echo");
+    expect(wrapped).toBeDefined();
+    expect(wrapped?.impl).not.toBe(tool.impl);
+    const result = await wrapped!.impl.execute(
+      { sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1" },
+      {},
+    );
+    expect(result.text).toBe("ok");
+    // The flush strictly precedes the effect (one checkpoint for the call).
+    expect(checkpointCalls).toEqual(["checkpoint"]);
+  });
+
+  it("gates late tool effects on the turn signal without a barrier (SE-SW-002)", async () => {
+    const tool: RuntimeTool = {
+      def: {
+        name: "echo",
+        description: "echo tool",
+        schema: { type: "object" } as never,
+      },
+      impl: { execute: vi.fn(async () => ({
+        tool_name: "echo",
+        text: "ok",
+        content: [{ type: "text", text: "ok" }],
+      })) },
+    };
+    let captured: LocalRuntimeTurnRunnerInput<LocalToolContext> | undefined;
+    const executorOptions = options(async (runInput) => {
+      captured = runInput;
+      await runInput.eventWriter.pushRuntime(terminalEvent(RuntimeEventStatus.COMPLETED));
+    });
+    const controller = new AbortController();
+    const base = executionInput({ assembly: { ...assembly(), tools: [tool] } });
+    await new LocalRuntimeTurnExecutor(executorOptions).execute({
+      ...base,
+      lease: { ...base.lease, signal: controller.signal },
+    });
+    const wrapped = captured?.tools?.find((candidate) => candidate.def.name === "echo");
+    expect(wrapped).toBeDefined();
+    // No durable barrier, but the turn's abort signal still composes the
+    // policy gate around every admitted tool.
+    expect(wrapped?.impl).not.toBe(tool.impl);
+    // A live turn's effect delegates exactly once, unchanged.
+    const result = await wrapped!.impl.execute(
+      { sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1" },
+      {},
+    );
+    expect(result.text).toBe("ok");
+    expect(tool.impl.execute).toHaveBeenCalledTimes(1);
+    // A late effect of a dying Turn (the lease signal already aborted) is
+    // refused as unconfirmable WITHOUT running the tool — no side effect.
+    controller.abort();
+    const refused = await wrapped!.impl.execute(
+      { sessionId: "session-1", turnId: "turn-1", toolCallId: "call-2" },
+      {},
+    );
+    expect(refused.isError).toBe(true);
+    expect(JSON.stringify(refused.details)).toContain("tool-outcome-unknown");
+    expect(tool.impl.execute).toHaveBeenCalledTimes(1);
   });
 });

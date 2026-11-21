@@ -13,9 +13,50 @@ import type { TurnRepository } from '../../persistence/contracts.js';
 import { resolveGenuineUserQueryText } from '../message-query-authorship.js';
 import { steeringMessageKey, steeringReceiptId } from '../../steering-identity.js';
 import { createUserMessageId } from '../../../session-system/shared/user-message-id.js';
+import { createLogger } from '@mavis/logging';
+
+/** §5.5: the owner-input release reactivity timeline sink. */
+const reactiveTimelineLog = createLogger('mcode:reactive');
 
 interface TurnActivation {
   execute(input: TurnActivationSubmission): Promise<ActivateTurnResult>;
+}
+
+/**
+ * The wave-3 delegation-steering ingress (steering-design-sol.md §2.2–§2.3),
+ * structurally satisfied by `DelegationSteeringComposition`. Optional on the
+ * steer path: without it the service keeps exactly today's behaviour; with
+ * it, a steer delivered to an ACTIVE Turn is first committed through the
+ * durable seam (the saved-ack, §6.1) and its committed-steer release
+ * (§2.3) is performed BEFORE the Turn continues — so the runtime's next
+ * provider request starts against the already-released state (§6.2 gate).
+ */
+export interface SteerDelegationSteering {
+  acceptOwnerInput(input: {
+    readonly conversationId: string;
+    readonly requestId: string;
+    readonly content: unknown;
+    readonly whenBusy: 'steer' | 'followUp';
+  }): Promise<{
+    readonly status: string;
+    readonly inputEntryId: string;
+    readonly commitSeq: number;
+    readonly submissionId: string;
+  }>;
+  onCommittedSteer(steer: {
+    readonly parentConversationId: string;
+    readonly requestId?: string;
+    readonly parentRunId?: string;
+  }): Promise<unknown>;
+  /**
+   * Native task-wait replay support (verdict 09 §1.6): records that a trusted
+   * owner input was accepted for `(conversationId, turnId)` and its release
+   * pass is being committed. A task wait that registers for the same round
+   * AFTER this fact is released by the replay instead of re-parking the
+   * parent behind an already-accepted input. Optional: absent when the
+   * composition has no native binding.
+   */
+  noteOwnerReleaseIntent?(conversationId: string, turnId: string): void | Promise<void>;
 }
 
 interface SteerSessionServiceOptions {
@@ -25,6 +66,7 @@ interface SteerSessionServiceOptions {
     TurnRepository,
     'findSteeringReceipt' | 'reserveSteeringReceipt' | 'releaseSteeringReceipt'
   >;
+  readonly delegationSteering?: SteerDelegationSteering;
 }
 
 type ActiveDeliveryReservation =
@@ -72,13 +114,51 @@ async function deliver(
       sessionId: input.sessionId,
       clientRequestId,
     });
-    if (receipt) return { delivered: true, mode: 'duplicate', turnId: receipt.turnId };
+    if (receipt) {
+      // §1.2: a repeat of the same accepted replica is idempotent — it never
+      // re-delivers content, but it DOES re-run the owner release pass so a
+      // release that failed after the first delivery is retried (the seam
+      // accept replays, the release is keyed by the wait). Read-only probes
+      // and machine deliveries never release.
+      if (!input.receiptLookupOnly && isOwnerSteeringDelivery(input)) {
+        try {
+          await acceptDelegationSteering(options, {
+            input,
+            clientRequestId,
+            activeTurnId: receipt.turnId,
+            reservation: { kind: 'deliver', receiptReserved: false },
+          });
+          await options.delegationSteering?.noteOwnerReleaseIntent?.(input.sessionId, receipt.turnId);
+          await options.delegationSteering?.onCommittedSteer({
+            parentConversationId: input.sessionId,
+            ...(clientRequestId !== undefined ? { requestId: clientRequestId } : {}),
+          });
+        } catch {
+          // The duplicate answer is still authoritative; a failed retry leaves
+          // the wait foreground and visible for the next owner input.
+        }
+      }
+      return { delivered: true, mode: 'duplicate', turnId: receipt.turnId };
+    }
+  }
+  if (input.receiptLookupOnly) {
+    // A read-only repeat probe never admits content: without a durable
+    // receipt there is nothing to answer the replay with, so it refuses like
+    // a pinned miss. It must not reach the active-Turn delivery below (an
+    // unrelated Turn may well be running) and must never activate one.
+    return { delivered: false, reason: 'active-turn' };
   }
   const activeDelivery =
     input.clientIntent === 'cloud-handoff'
       ? undefined
       : await deliverToActive(options, input, clientRequestId);
   if (activeDelivery) return activeDelivery;
+  if (input.expectActiveTurnId !== undefined) {
+    // A caller that pinned the Turn it wants to join never activates a fresh
+    // one: the pin is the wire-safe form of preDelivery's Turn check, so a
+    // miss is a definitive refusal, not a race to re-run as a new Turn.
+    return { delivered: false, reason: 'active-turn' };
+  }
   return activateOrSteerRace(options, input, clientRequestId);
 }
 
@@ -91,6 +171,9 @@ async function deliverToActive(
   const turns = options.turns;
   const activeTurnId = observedTurnId ?? turns.activeTurnId(input.sessionId);
   if (!activeTurnId) return undefined;
+  if (input.expectActiveTurnId !== undefined && input.expectActiveTurnId !== activeTurnId) {
+    return { delivered: false, reason: 'active-turn' };
+  }
   if (hasModelOverride(input.input.model) && input.modelSelectionScope !== 'activation-only') {
     return { delivered: false, reason: 'active-model-override-unsupported' };
   }
@@ -105,7 +188,7 @@ async function deliverToKnownActive(
 ): Promise<SteerSessionResult | undefined> {
   const reservation = await reserveActiveDeliveryReceipt(
     options,
-    input,
+    input.sessionId,
     clientRequestId,
     activeTurnId,
   );
@@ -123,16 +206,15 @@ async function deliverToKnownActive(
 
 async function reserveActiveDeliveryReceipt(
   options: SteerSessionServiceOptions,
-  input: SteerSessionInput,
+  sessionId: string,
   clientRequestId: string | undefined,
   turnId: string,
 ): Promise<ActiveDeliveryReservation> {
   if (!clientRequestId) return { kind: 'deliver', receiptReserved: false };
   const receipt = await options.receipts.reserveSteeringReceipt({
-    sessionId: input.sessionId,
+    sessionId,
     clientRequestId,
     turnId,
-    ...(input.receiptAliases?.length ? { receiptAliases: input.receiptAliases } : {}),
   });
   if (receipt.status === 'duplicate') return { kind: 'duplicate', turnId: receipt.turnId };
   if (receipt.status === 'not-accepted') return { kind: 'not-accepted' };
@@ -144,19 +226,69 @@ async function deliverToReservedActive(
   delivery: ReservedActiveDelivery,
 ): Promise<SteerSessionResult | undefined> {
   const { activeTurnId, input } = delivery;
+  // §5.5: the reactivity timeline of the owner-input release. The boundaries
+  // are the existing observable facts (owner input accepted / release
+  // committed); the next provider request start follows in the same executor
+  // that parked the tool and is logged at `turn start` on the mcode:turn sink.
+  const releaseTimelineOwner = isOwnerSteeringDelivery(input);
+  const acceptedAtMs = Date.now();
   try {
+    // §2.2: the durable committed accept (saved-ack) FIRST — it is the fact
+    // the input was accepted, independent of any release outcome. §6.1: a
+    // storage failure here is a VISIBLE steer failure (the receipt is
+    // compensated, nothing is delivered) — never a silent drop.
+    await acceptDelegationSteering(options, delivery);
     await input.preDelivery?.accept({ mode: 'steered', turnId: activeTurnId });
   } catch (error) {
     await releaseReservedReceipt(options, delivery);
     throw error;
+  }
+  if (releaseTimelineOwner) {
+    logReactiveTimeline(input.sessionId, activeTurnId, 'reactive_owner_input_accepted', {
+      producerId: input.producerId,
+    });
   }
   const result = await steer(options.turns, input, activeTurnId);
   if (!result.delivered) {
     // Controller returned a definitive non-acceptance, so no content reached
     // the active Turn and this receipt is safe to compensate.
     await releaseReservedReceipt(options, delivery);
+    return result.delivered || result.reason === 'delivery-closed' ? result : undefined;
   }
-  return result.delivered || result.reason === 'delivery-closed' ? result : undefined;
+  // §1.6 input-before-provider barrier: the owner input is enqueued FIRST
+  // (guaranteed available to the next steering drain), THEN the release
+  // commits. The parked task tool cannot return before the release, so the
+  // next provider request necessarily carries both the user message and the
+  // background note — never a released parent continuing the OLD instruction.
+  // A failed release keeps the delivered input and the reserved receipt (the
+  // replay answers duplicate AND re-runs this idempotent pass — §1.2), with
+  // the control-plane failure surfaced to the caller.
+  await releaseDelegationSteering(options, delivery, activeTurnId);
+  if (releaseTimelineOwner) {
+    logReactiveTimeline(input.sessionId, activeTurnId, 'reactive_release_committed', {
+      acceptedToReleaseMs: Date.now() - acceptedAtMs,
+    });
+  }
+  return result;
+}
+
+/** §5.5 reactivity timeline: structured facts on mcode:reactive, never a turn outcome. */
+function logReactiveTimeline(
+  sessionId: string,
+  turnId: string,
+  event: 'reactive_owner_input_accepted' | 'reactive_release_committed',
+  fields: Record<string, unknown>,
+): void {
+  try {
+    reactiveTimelineLog.info(`Reactive release timeline: ${event}`, {
+      sessionId,
+      turnId,
+      event,
+      ...fields,
+    });
+  } catch {
+    // Diagnostic sinks cannot change a committed release.
+  }
 }
 
 async function releaseReservedReceipt(
@@ -164,14 +296,91 @@ async function releaseReservedReceipt(
   delivery: ReservedActiveDelivery,
 ): Promise<void> {
   if (!delivery.reservation.receiptReserved || !delivery.clientRequestId) return;
-  await releaseKnownUndeliveredReceipt(options, {
-    sessionId: delivery.input.sessionId,
-    clientRequestId: delivery.clientRequestId,
-    turnId: delivery.activeTurnId,
-    ...(delivery.input.receiptAliases?.length
-      ? { receiptAliases: delivery.input.receiptAliases }
-      : {}),
+  await releaseKnownUndeliveredReceipt(
+    options,
+    delivery.input.sessionId,
+    delivery.clientRequestId,
+    delivery.activeTurnId,
+  );
+}
+
+/**
+ * The durable committed accept (§2.2) of one steer delivered to an ACTIVE
+ * Turn. A replayed accept is the SAME committed input returning (redelivery),
+ * not a new one — idempotent per `(conversationId, requestId)`.
+ */
+async function acceptDelegationSteering(
+  options: SteerSessionServiceOptions,
+  delivery: ReservedActiveDelivery,
+): Promise<void> {
+  const delegation = options.delegationSteering;
+  if (!delegation) return;
+  const { input, clientRequestId } = delivery;
+  const requestId = clientRequestId ?? input.idempotencyKey;
+  // JSON-safe projection of the steer into the seam store (it stores and
+  // hashes JsonValue): the committed text of the input, per §2.2.
+  const accepted = await delegation.acceptOwnerInput({
+    conversationId: input.sessionId,
+    requestId,
+    content: { text: input.input.text },
+    whenBusy: 'steer',
   });
+  if (accepted.status !== 'committed' && accepted.status !== 'replayed') {
+    throw new Error(`delegation steering accept rejected the steer (${accepted.status})`);
+  }
+}
+
+/**
+ * The committed-steer release reaction (§2.3) — OWNER-ONLY (verdict 09 §1.2).
+ * Machine deliveries through this ingress (background-task completion,
+ * reminders, cron) are NOT a new owner replica and must never release a
+ * foreground task wait; the followUp exception never reaches this path.
+ */
+async function releaseDelegationSteering(
+  options: SteerSessionServiceOptions,
+  delivery: ReservedActiveDelivery,
+  activeTurnId: string,
+): Promise<void> {
+  const delegation = options.delegationSteering;
+  if (!delegation) return;
+  const { input, clientRequestId } = delivery;
+  if (!isOwnerSteeringDelivery(input)) return;
+  const requestId = clientRequestId ?? input.idempotencyKey;
+  // The intent is recorded BEFORE the pass so a task wait that registers for
+  // this round while the pass runs is replay-released instead of re-parking.
+  // Wave 3: the note is also the DURABLE fact (the seam's deterministic
+  // release-intent entry), so the await puts the durable fact ahead of the
+  // committed release decision.
+  await delegation.noteOwnerReleaseIntent?.(input.sessionId, activeTurnId);
+  await delegation.onCommittedSteer({
+    parentConversationId: input.sessionId,
+    ...(requestId !== undefined ? { requestId } : {}),
+  });
+}
+
+/**
+ * Trusted owner-input classification (§1.2): the producer is either one of
+ * the turn-system's user steering producers, or a producer whose source is a
+ * user-facing surface. Machine deliveries are recognized by their TRUSTED
+ * route, never by message text: the background-task completion
+ * (`background-task` source, delivered by `background-task-delivery`), cron
+ * wakes, thread-goal and greeting deliveries. Everything else reaching this
+ * ingress is runtime (TUI/RPC/channel) user steering — the runtime assigns
+ * `producerId`/`source` itself at the ingress boundary, so a producer string
+ * from unverified external input never classifies the delivery here.
+ */
+export function isOwnerSteeringDelivery(input: SteerSessionInput): boolean {
+  if (isUserSteeringProducer(input.producerId)) return true;
+  const source = input.provenance.source;
+  if (
+    source === 'background-task' ||
+    source === 'cron' ||
+    source === 'thread-goal' ||
+    source === 'greeting'
+  ) {
+    return false;
+  }
+  return true;
 }
 
 async function activateOrSteerRace(
@@ -193,7 +402,7 @@ function steerActivationInput(
   return {
     sessionId: input.sessionId,
     input: input.input,
-    ...activationReceipt(input, clientRequestId),
+    clientRequestId: clientRequestId ?? input.idempotencyKey,
     provenance: input.provenance,
     ...(input.clientIntent ? { clientIntent: input.clientIntent } : {}),
     ...(input.resumePausedQueue
@@ -206,19 +415,6 @@ function steerActivationInput(
     ...(input.requestedTurnId ? { requestedTurnId: input.requestedTurnId } : {}),
     delivery: activationDelivery(input),
     immediateSendBatch: input.immediateSendBatch,
-  };
-}
-
-/** Per-item aliases are only admitted alongside the durable producer receipt. */
-function activationReceipt(
-  input: SteerSessionInput,
-  clientRequestId: string | undefined,
-): Pick<TurnActivationSubmission, 'clientRequestId' | 'receiptAliases'> {
-  return {
-    clientRequestId: clientRequestId ?? input.idempotencyKey,
-    ...(clientRequestId && input.receiptAliases?.length
-      ? { receiptAliases: input.receiptAliases }
-      : {}),
   };
 }
 
@@ -248,6 +444,15 @@ function activationSteerOutcome(activated: ActivateTurnResult): ActivationSteerO
       kind: 'result',
       result: { delivered: true, mode: 'duplicate', turnId: activated.turnId },
     };
+  }
+  // Wave-0 item 0.6: a compaction lease is NOT a joinable race — the
+  // controller refuses steering for a compaction turn by contract
+  // (`unsupported-delivery`), so racing the observed active turn would only
+  // re-run the accept cycle against a turn that can never consume it. The
+  // refusal surfaces honestly as `compaction-active` (the caller — the
+  // runtime queue fallback included — accumulates the input instead).
+  if (activated.reason === 'compaction-active') {
+    return { kind: 'result', result: { delivered: false, reason: 'compaction-active' } };
   }
   if (isActiveRaceReason(activated.reason)) {
     return { kind: 'race', reason: activated.reason };
@@ -293,10 +498,12 @@ function activeSteeringInput(input: SteerSessionInput): SteerSessionInput {
 
 async function releaseKnownUndeliveredReceipt(
   options: SteerSessionServiceOptions,
-  receipt: Parameters<TurnRepository['releaseSteeringReceipt']>[0],
+  sessionId: string,
+  clientRequestId: string,
+  turnId: string,
 ): Promise<void> {
   try {
-    await options.receipts.releaseSteeringReceipt(receipt);
+    await options.receipts.releaseSteeringReceipt({ sessionId, clientRequestId, turnId });
   } catch {
     // The receipt stays durable on a compensation write failure. Replaying it
     // is less safe than accepting the documented at-most-once loss boundary.
@@ -417,7 +624,14 @@ function isForegroundSteerSend(clientIntent: string | undefined): boolean {
 }
 
 function durableSteeringReceiptId(input: SteerSessionInput): string | undefined {
-  return input.preDelivery || input.receiptAliases?.length ? steeringReceiptId(input) : undefined;
+  // The wire-safe Turn pin carries the same at-most-once contract as the
+  // in-process callback: a producer that constrains admission keeps receipts.
+  // The read-only probe rides the same receipts without ever reserving one.
+  return input.preDelivery ||
+    input.expectActiveTurnId !== undefined ||
+    input.receiptLookupOnly
+    ? steeringReceiptId(input)
+    : undefined;
 }
 
 function identifyVisibleSteering(input: SteerSessionInput): SteerSessionInput {

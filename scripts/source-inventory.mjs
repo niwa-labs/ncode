@@ -3,7 +3,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { inventoryPath, readExtraction } from "./lib/release-metadata.mjs";
+import { resolveExportSource } from "./lib/package-exports.mjs";
 import { retiredSourceRoots } from "./lib/retired-sources.mjs";
 import { readSuites, suiteInventoryViolations } from "./lib/vitest-suites.mjs";
 import {
@@ -20,6 +22,9 @@ const skipped = new Set([
   ".pnpm-store",
   ".turbo",
   ".DS_Store",
+  // Agent-tooling state (workflow-run scratch files); gitignored by the
+  // tool itself and never reviewed source.
+  ".zcode",
   // Local Python SDK environment and tool caches (packages/code-sdk-python).
   ".venv",
   "__pycache__",
@@ -39,7 +44,47 @@ function filesIn(directory, prefix = "") {
       : [relative];
   });
 }
-const files = filesIn(root).sort();
+const walked = filesIn(root);
+// W10 (U30 build/release paths): the reviewed source set is what a reviewed
+// tree exports — git-tracked files plus untracked-but-not-ignored ones (the
+// review trigger for new sources). Gitignored build artifacts that merely sit
+// on disk (e.g. a cargo `target/` directory from a local daemon build) are
+// NOT reviewed source and must not enter the inventory: the export gate
+// archives the committed tree and would fail its own inventory re-check.
+// Outside a git repository (the exported-archive profile) the raw walk is
+// kept — an archive has no ignores left to apply.
+let reviewedFiles;
+try {
+  const listed = execFileSync(
+    "git",
+    ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd: root, encoding: "utf8", maxBuffer: 512 * 1024 * 1024 },
+  );
+  reviewedFiles = new Set(listed.split("\0").filter(Boolean));
+} catch {
+  reviewedFiles = undefined;
+}
+const files = (reviewedFiles ? walked.filter((file) => reviewedFiles.has(file)) : walked).sort();
+// Wildcard export subpaths (`./providers/*` -> `src/providers/*.ts`) are valid
+// as long as the pattern directory contains at least one matching TypeScript
+// file; plain paths are checked with existsSync.
+function exportSourceExists(root, directory, source) {
+  const absolute = path.join(root, directory, source);
+  if (!source.includes("*")) return existsSync(absolute);
+  const head = source.slice(0, source.indexOf("*"));
+  const tail = source.slice(source.indexOf("*") + 1);
+  const prefix = head.endsWith("/") ? "" : path.posix.basename(head);
+  let entries;
+  try {
+    entries = readdirSync(path.dirname(absolute));
+  } catch {
+    return false;
+  }
+  return entries.some(
+    (name) =>
+      name.startsWith(prefix) && name.endsWith(tail) && name.endsWith(".ts"),
+  );
+}
 const violations = suiteInventoryViolations(files, readSuites(root));
 // Standard MIT text with the reviewed first-party attribution.
 // Source: https://opensource.org/license/mit
@@ -93,11 +138,14 @@ for (const { directory, manifest } of packages) {
         ? entry
         : (entry.types ?? entry.import ?? entry.default);
     if (!target) continue;
-    const source = target
-      .replace(/^\.\/dist\//u, "./src/")
-      .replace(/\.d\.ts$/u, ".ts")
-      .replace(/\.js$/u, ".ts");
-    if (!existsSync(path.resolve(root, directory, source)))
+    let source;
+    try {
+      source = resolveExportSource(root, directory, target);
+    } catch {
+      violations.push(`${directory}: missing export ${name}`);
+      continue;
+    }
+    if (!exportSourceExists(root, directory, source))
       violations.push(`${directory}: missing export ${name}`);
   }
 }

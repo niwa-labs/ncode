@@ -45,7 +45,6 @@ export interface AgentHostProductionDependenciesOptions<
   readonly turnControl: AgentHostTurnControl;
   readonly turnCapabilities?: AgentHostDependencies<TAgent>['turnCapabilities'];
   readonly assemblyObserver?: AgentHostDependencies<TAgent>['assemblyObserver'];
-  readonly promptSuggestion?: AgentHostDependencies<TAgent>['promptSuggestion'];
   readonly canonicalHistory: DurableCanonicalHistoryProvider;
   readonly usage?: AgentHostUsageProjection;
   readonly logger?: AgentHostDependencies<TAgent>['logger'];
@@ -53,6 +52,7 @@ export interface AgentHostProductionDependenciesOptions<
     readonly historyFailures: AgentHistoryFailureProjector;
   };
   readonly executor: LocalRuntimeTurnExecutorOptions<TAgent, TContext>;
+  readonly promptSuggestion?: AgentHostDependencies<TAgent>['promptSuggestion'];
   readonly isRuntimeErrorRetryable?: AgentHostDependencies<TAgent>['isRuntimeErrorRetryable'];
 }
 
@@ -125,11 +125,16 @@ function createDependencyRecord<
       : {}),
     ...(options.turnCapabilities ? { turnCapabilities: options.turnCapabilities } : {}),
     ...(options.assemblyObserver ? { assemblyObserver: options.assemblyObserver } : {}),
-    promptSuggestion: options.promptSuggestion,
     history,
+    // Ш3: mirrored from the executor composition so Turn preparation shares
+    // the ownership-transfer hand-off with the executor's own turn input.
+    ...(options.executor.piCompatibleHistorySnapshots
+      ? { piCompatibleHistorySnapshots: true }
+      : {}),
     events,
     ...(options.logger ? { logger: options.logger } : {}),
     ...(options.usage ? { usage: options.usage } : {}),
+    ...(options.promptSuggestion ? { promptSuggestion: options.promptSuggestion } : {}),
     executor,
     buildRequestPayloadTransform: createRequestPayloadTransform(options.executor),
     compaction: {
@@ -187,10 +192,17 @@ function validateBaseOwners<
     'compaction-preparation',
     typeof options.preparation?.prepareCompaction === 'function',
   );
+  // Wave 2 (canon 05 §2.2): wire mode composes NO legacy compactor — the
+  // unified barrier (the manual route) or the text-offload axis is the
+  // wire-mode evidence; the jsonl compatibility composition keeps both
+  // legacy compactors.
+  const legacyCompactorsWired =
+    typeof options.compaction?.automatic?.compactBeforeLlm === 'function' &&
+    typeof options.compaction?.manual?.compactManual === 'function';
+  const unifiedManualRouteWired = typeof options.compaction?.wireCompactionBarrier === 'function';
   assertAgentHostCapabilityAvailable(
     'context-compactor',
-    typeof options.compaction?.automatic?.compactBeforeLlm === 'function' &&
-      typeof options.compaction.manual?.compactManual === 'function',
+    legacyCompactorsWired || unifiedManualRouteWired,
   );
   assertAgentHostCapabilityAvailable(
     'compaction-control',

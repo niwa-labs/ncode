@@ -7,30 +7,21 @@ import {
   type CompactionSubagentState,
   type CompactionUserQuery,
 } from '../compat.js';
-import {
-  ContextCompactionError,
-  type CheckpointEarlierFiles,
-  type CheckpointGenerationMetadata,
-} from '../contracts.js';
-import { CHECKPOINT_SYSTEM_PROMPT, parseCheckpointHeadings } from './checkpoint-protocol.js';
+import { ContextCompactionError, type CheckpointGenerationMetadata } from '../contracts.js';
+import type { ContextDomainState } from './domain-state.js';
 import { projectTodoHistory } from './todo-cadence.js';
 import { projectBackgroundHistory } from './background-cadence.js';
 
-/** Derived from the prompt's own heading list so the protocol cannot drift. */
-const CHECKPOINT_HEADINGS = parseCheckpointHeadings(CHECKPOINT_SYSTEM_PROMPT);
-
-/**
- * Backstop for a checkpoint that drops the newest typed ask. The note only
- * states what the host can verify: questionnaire answers and automated
- * messages carry no genuine-query provenance, so the last listed query is not
- * necessarily the user's latest decision and must not override the sections
- * above. Withdrawn and superseded asks also leave Pending, so the prompt
- * records them under Key Decisions and the note checks that section before
- * reviving a query. The note sits outside the versioned appendix, whose
- * format is unchanged.
- */
-const RECENT_QUERY_PRECEDENCE_NOTE =
-  'Host note: `Recent user queries` below are the latest typed user messages the host could verify, copied verbatim, oldest first. Questionnaire answers and automated messages are not listed, so a later user decision may appear only in the sections above, and any such decision takes precedence over this list. Before acting, check `Completed Work`, `Current State`, `Key Decisions`, and `Pending User Asks`; treat the last query as the current request only if none of them shows it done, withdrawn, superseded, or already pending.';
+const CHECKPOINT_HEADINGS = [
+  'Goal',
+  'Constraints & Preferences',
+  'Completed Work',
+  'Current State',
+  'Blockers',
+  'Key Decisions',
+  'Pending User Asks',
+  'Critical Context & Relevant Files',
+] as const;
 
 export interface CheckpointGeneration extends CheckpointGenerationMetadata {
   readonly text: string;
@@ -44,7 +35,6 @@ export interface ValidCheckpointGeneration {
 export interface CheckpointMessageOptions {
   readonly timestamp: number;
   readonly subagents?: CompactionSubagentState;
-  readonly earlierFiles?: CheckpointEarlierFiles;
 }
 
 export function validateCheckpointGeneration(
@@ -110,27 +100,14 @@ export function buildCheckpointMessage(
     previous?.recentUserQueries ?? [],
     options.subagents,
   );
-  const body = [
-    summary,
-    ...(options.earlierFiles ? [earlierFilesText(options.earlierFiles)] : []),
-    ...(state.recentUserQueries.length > 0 ? [RECENT_QUERY_PRECEDENCE_NOTE] : []),
-  ].join('\n\n');
   const checkpoint: AgentMessage = {
     role: 'compactionSummary',
-    summary: appendCompactionState(body, state),
+    summary: appendCompactionState(summary, state),
     tokensBefore,
     timestamp: options.timestamp,
-  };
+    contextState: captureContextDomainState(h0),
+  } as AgentMessage;
   return checkpoint;
-}
-
-function earlierFilesText(files: CheckpointEarlierFiles): string {
-  return [
-    'Files from before this compaction:',
-    `- Full conversation history before each compaction, one JSONL file per compaction (the highest g<generation> is the latest): ${files.snapshots}`,
-    `- Tool images and oversized tool outputs: ${files.toolOutputs}`,
-    'Read them when you need exact details that the summary above leaves out.',
-  ].join('\n');
 }
 
 function buildVerifiedCheckpointState(
@@ -219,4 +196,9 @@ function readFiniteNumber(value: object, key: string): number | undefined {
 
 function invalidCheckpoint(message: string): ContextCompactionError {
   return new ContextCompactionError('INVALID_CHECKPOINT', 'llm_checkpoint', message);
+}
+
+/** Independent of model-generated summary text; the retained tail is replayed on top. */
+export function captureContextDomainState(messages: readonly AgentMessage[]): ContextDomainState {
+  return { version: 1, todo: projectTodoHistory(messages), background: projectBackgroundHistory(messages) };
 }

@@ -1297,18 +1297,43 @@ function evaluateSingleSubcommand(
     });
   }
 
+  // -------- DEFAULT / AUTO / BYPASS-IMMUNE LAYER --------
+
+  // Step 4: HARD sensitive-read → ask (default) / undecided (auto → LLM) /
+  // bypass-immune ask (bypass). Runs in EVERY mode: the non-final-deny HARD
+  // categories (sensitive-read, ssh-credential reads, encoding-bypass,
+  // reverse-shell, …) are in BYPASS_IMMUNE_SAFETY_CATEGORIES, so under
+  // bypassPermissions they surface an ask the bash-checker flags
+  // bypass-immune instead of silently auto-allowing (§3).
+  // Same heredoc / echo-printf stripping as Step 3 — otherwise a
+  // documentation example like `cat /etc/shadow` inside an MR description
+  // heredoc trips sensitive-read even though the body is data, not shell.
+  for (const surface of getPermissionSurfaces()) {
+    const hardHit = matchHardBlockedBash(surface, {
+      nativeDelete: bashCtx?.nativeDelete,
+      recoverableWindowsDelete: Boolean(recoverableWindowsDelete),
+    });
+    if (!hardHit) continue;
+    // final-deny already handled in step 3; non-final-deny falls here.
+    return logLayer('hard-sensitive-read', {
+      verdict: mode === 'auto' ? 'undecided' : 'ask',
+      reason: {
+        type: 'safetyCheck',
+        description: formatHardBlockedBashReason(command, hardHit.category, hardHit.description),
+        category: hardHit.category,
+      },
+    });
+  }
+
   // -------- BYPASS EARLY-EXIT --------
-  // Common layer passed → bypass mode allows. Per the design, bypass does
-  // NOT apply the HARD sensitive-read gate (user accepts the risk).
-  //
-  // EXCEPT: rm → mavis-trash rewrite (step 8 below) is a transformation,
-  // not a confirmation gate. bypass relaxes confirmation, NOT
-  // recoverability — without this short-circuit, plain `rm -rf <path>`
-  // under bypass routes to real disk deletion instead of the recoverable
-  // trash, defeating the trash contract documented in step 8.
-  // Catastrophic forms (rm -rf /, rm -rf ~, rm -rf *) are already caught
-  // by step 3 hard-final-deny above, so by here only non-catastrophic rm
-  // reaches us and is safe to rewrite.
+  // Common layer + step 4 passed → bypass mode allows. The rm → mavis-trash
+  // rewrite below is a transformation, not a confirmation gate: bypass
+  // relaxes confirmation, NOT recoverability — without this short-circuit,
+  // plain `rm -rf <path>` under bypass routes to real disk deletion instead
+  // of the recoverable trash, defeating the trash contract documented in
+  // step 8. Catastrophic forms (rm -rf /, rm -rf ~, rm -rf *) are already
+  // caught by step 3 hard-final-deny above, so by here only non-catastrophic
+  // rm reaches us and is safe to rewrite.
   if (mode === 'bypass') {
     if (recoverableWindowsDelete) {
       return logLayer('recoverable-delete-rewrite', {
@@ -1367,29 +1392,6 @@ function evaluateSingleSubcommand(
         type: 'safetyCheck',
         description: 'bypass mode: passed user deny + user ask + HARD final-deny common layer',
         category: 'bypassAllow',
-      },
-    });
-  }
-
-  // -------- DEFAULT / AUTO LAYER --------
-
-  // Step 4: HARD sensitive-read → ask (default) / undecided (auto → LLM)
-  // Same heredoc / echo-printf stripping as Step 3 — otherwise a
-  // documentation example like `cat /etc/shadow` inside an MR description
-  // heredoc trips sensitive-read even though the body is data, not shell.
-  for (const surface of getPermissionSurfaces()) {
-    const hardHit = matchHardBlockedBash(surface, {
-      nativeDelete: bashCtx?.nativeDelete,
-      recoverableWindowsDelete: Boolean(recoverableWindowsDelete),
-    });
-    if (!hardHit) continue;
-    // final-deny already handled in step 3; non-final-deny falls here.
-    return logLayer('hard-sensitive-read', {
-      verdict: mode === 'auto' ? 'undecided' : 'ask',
-      reason: {
-        type: 'safetyCheck',
-        description: formatHardBlockedBashReason(command, hardHit.category, hardHit.description),
-        category: hardHit.category,
       },
     });
   }

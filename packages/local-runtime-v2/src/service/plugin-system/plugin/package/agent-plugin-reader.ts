@@ -1,6 +1,8 @@
 import { isIP } from 'node:net';
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
+
+import { parseDocument } from 'yaml';
 
 import type { ResolvedMcpServer, TransportConfig } from '@mavis/mcp';
 
@@ -11,12 +13,14 @@ import {
   listDirectChildDirectories,
   pluginPathExists,
   readPluginJsonObject,
+  readPluginTextFile,
   resolvePluginDirectory,
   resolvePluginFile,
   type CanonicalPluginRoot,
 } from './filesystem.js';
 import { PluginReaderError, readerFail } from './reader-errors.js';
 import type {
+  PluginAgentDefinition,
   PluginMcpServer,
   PluginReaderDiagnostic,
   PluginSkill,
@@ -25,6 +29,9 @@ import type {
 
 const PLUGIN_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
 const MCP_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
+const MAX_AGENT_PLUGIN_AGENTS = 64;
+/** Strict agent-name segments our local reader enforces; shared with the compatible reader. */
+export const AGENT_NAME = /^(?!.*--)[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const PLUGIN_FIELDS = new Set([
   '$schema',
   'name',
@@ -80,6 +87,7 @@ export async function readAgentPluginPackage(
     Boolean(options.createPluginData),
     diagnostics,
   );
+  const agents = await readAgentDefinitions(root, manifest.name, diagnostics);
   return {
     source: 'LOCAL_AGENT_PLUGIN',
     manifestKind: 'AGENT_PLUGINS_V1',
@@ -95,6 +103,7 @@ export async function readAgentPluginPackage(
     apps: [],
     mcpServers,
     skills,
+    ...(agents.length > 0 ? { agents } : {}),
     hooks: [],
     diagnostics,
   };
@@ -482,4 +491,153 @@ function readHeaders(value: unknown, serverName: string): Record<string, string>
     readerFail('MCP_SCHEMA_INVALID', `${serverName}.headers contains an invalid field`);
   }
   return headers;
+}
+
+/**
+ * Read declared subagents: `agents/<name>/AGENT.md` (or a flat
+ * `agents/<name>.md`), each a YAML-frontmatter document whose body is the
+ * subagent prompt. Names are plugin-scoped so two plugins can declare the
+ * same agent name without colliding. OUR decision restored after the sync
+ * took their skeleton: this scan is ours (35e32998), upstream has none for
+ * AGENT_PLUGINS_V1 packages.
+ */
+async function readAgentDefinitions(
+  root: CanonicalPluginRoot,
+  pluginName: string,
+  diagnostics: PluginReaderDiagnostic[],
+): Promise<PluginAgentDefinition[]> {
+  if (!(await pluginPathExists(root, 'agents', 'directory'))) return [];
+  const agentsDir = path.join(root.path, 'agents');
+  const entries = await readdir(agentsDir, { withFileTypes: true }).catch(() => []);
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() || (entry.isFile() && entry.name.endsWith('.md')))
+    .map((entry) =>
+      entry.isDirectory()
+        ? { name: entry.name, file: `agents/${entry.name}/AGENT.md` }
+        : { name: entry.name.slice(0, -3), file: `agents/${entry.name}` },
+    );
+  if (candidates.length > MAX_AGENT_PLUGIN_AGENTS) {
+    readerFail(
+      'PLUGIN_CAPABILITY_LIMIT_EXCEEDED',
+      `Agent Plugin contains more than ${MAX_AGENT_PLUGIN_AGENTS} agent declarations`,
+    );
+  }
+  const agents: PluginAgentDefinition[] = [];
+  for (const candidate of candidates) {
+    if (!(await pluginPathExists(root, candidate.file, 'file'))) continue;
+    try {
+      agents.push(await readAgentDefinition(root, candidate.file, candidate.name, pluginName));
+    } catch (error) {
+      if (!(error instanceof PluginReaderError)) throw error;
+      diagnostics.push({ code: error.code, capability: 'AGENT', name: candidate.name });
+    }
+  }
+  return agents;
+}
+
+async function readAgentDefinition(
+  root: CanonicalPluginRoot,
+  relativePath: string,
+  directoryName: string,
+  pluginName: string,
+): Promise<PluginAgentDefinition> {
+  const { content } = await readPluginTextFile(root, relativePath, {
+    rejectBom: true,
+  });
+  const { frontmatter, systemPrompt } = parseAgentFrontmatter(content, relativePath);
+  const name = optionalString(frontmatter.name, 'name');
+  if (!name) readerFail('AGENT_SCHEMA_INVALID', `${relativePath} has no agent name`);
+  if (name !== directoryName || name.length > 64 || !AGENT_NAME.test(name)) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativePath} agent name is invalid`);
+  }
+  const description = optionalString(frontmatter.description, 'description');
+  if (!description || description.length > 1_024) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativePath} agent description is invalid`);
+  }
+  const model = optionalAgentStringField(frontmatter.model, relativePath);
+  const effort = optionalAgentStringField(frontmatter.effort, relativePath);
+  const tools = optionalAgentStringArrayField(frontmatter.tools, 'tools', relativePath);
+  const disallowedTools = optionalAgentStringArrayField(
+    frontmatter.disallowedTools,
+    'disallowedTools',
+    relativePath,
+  );
+  const mcpServers = optionalAgentStringArrayField(
+    frontmatter.mcpServers,
+    'mcpServers',
+    relativePath,
+  );
+  const skills = optionalAgentStringArrayField(frontmatter.skills, 'skills', relativePath);
+  return {
+    name,
+    scopedName: `${pluginName}:${name}`,
+    description,
+    content,
+    sourcePath: relativePath,
+    systemPrompt,
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+    ...(tools ? { tools } : {}),
+    ...(disallowedTools ? { disallowedTools } : {}),
+    ...(mcpServers ? { mcpServers } : {}),
+    ...(skills ? { skills } : {}),
+  };
+}
+
+function optionalAgentStringField(value: unknown, relativePath: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativePath} frontmatter field must be a non-empty string`);
+  }
+  return value;
+}
+
+function optionalAgentStringArrayField(
+  value: unknown,
+  label: string,
+  relativePath: string,
+): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || item.length === 0)) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativePath} ${label} must contain non-empty strings`);
+  }
+  return value as readonly string[];
+}
+
+function parseAgentFrontmatter(
+  content: string,
+  relativeAgentFile: string,
+): { frontmatter: Record<string, unknown>; systemPrompt: string } {
+  const opening = /^---\r?\n/u.exec(content);
+  if (!opening) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} must start with YAML frontmatter`);
+  }
+  const remainder = content.slice(opening[0].length);
+  const closing = /(?:^|\r?\n)---(?:\r?\n|$)/u.exec(remainder);
+  if (!closing || closing.index === undefined) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} has unclosed YAML frontmatter`);
+  }
+  const yamlText = remainder.slice(0, closing.index);
+  const systemPrompt = remainder
+    .slice(closing.index + closing[0].length)
+    .trim();
+  let document: ReturnType<typeof parseDocument>;
+  try {
+    document = parseDocument(yamlText, { uniqueKeys: true });
+  } catch {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} has invalid YAML frontmatter`);
+  }
+  if (document.errors.length > 0) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} has invalid YAML frontmatter`);
+  }
+  let value: unknown;
+  try {
+    value = document.toJS({ maxAliasCount: 20 });
+  } catch {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} has invalid YAML frontmatter`);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    readerFail('AGENT_SCHEMA_INVALID', `${relativeAgentFile} frontmatter must be a mapping`);
+  }
+  return { frontmatter: value as Record<string, unknown>, systemPrompt };
 }

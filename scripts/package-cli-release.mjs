@@ -27,7 +27,7 @@ function copyLicenses(stage) {
   mkdirSync(licenses);
   for (const name of ['LICENSE', 'NOTICE', 'LICENSE-STATUS.md', 'THIRD_PARTY_NOTICES.md']) copyFileSync(path.join(root, name), path.join(stage, name));
   copyFileSync(path.join(root, dependencyLicensesPath), path.join(licenses, 'dependency-licenses.json'));
-  for (const directory of ['third_party/pi-mono', 'third_party/sandbox-runtime']) {
+  for (const directory of ['third_party/chord', 'third_party/pi-durable', 'third_party/pi-mono', 'third_party/sandbox-runtime']) {
     copyFileSync(path.join(root, directory, 'LICENSE'), path.join(licenses, `${path.basename(directory)}-LICENSE`));
   }
   const metafile = json(path.join(root, 'dist/metafile.json'));
@@ -88,12 +88,12 @@ export async function packageCliRelease({ tag, out }) {
     writeFileSync(path.join(stage, 'release.json'), JSON.stringify({ version, tag, revision, buildNode: process.version }, null, 2) + '\n');
     writeFileSync(path.join(stage, 'README.md'), `# MiniMax Code ${version}
 
-Built from https://github.com/MiniMax-AI/minimax-code/tree/${revision}.
+Built locally from source commit ${revision}.
 Install this tar.gz with npm. Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
-Update by installing a newer GitHub release archive; the built-in updater follows npm.
-The archive uses the same package name, mcode command and user data as the official npm CLI.
-See https://github.com/MiniMax-AI/minimax-code/blob/${revision}/docs/installation.md.
+The archive uses the upstream package name, mcode command and default data directory.
+Use a separate npm prefix and profile to keep local testing isolated.
+Rebuild from source to update the Niwa Labs fork.
 `);
     mkdirSync(out, { recursive: true });
     const archive = path.join(out, `minimax-code-${version}.tar.gz`);

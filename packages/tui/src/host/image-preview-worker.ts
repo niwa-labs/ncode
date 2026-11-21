@@ -1,5 +1,5 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { resizeImage } from '@earendil-works/pi-coding-agent/image-resize';
+import { resizeImage } from '@earendil-works/pi-coding-agent';
 
 const input: unknown = workerData;
 if (

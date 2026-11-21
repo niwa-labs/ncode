@@ -1,4 +1,5 @@
-import { getModels, getProviders, type Api } from '@earendil-works/pi-ai';
+// pi 48c8f322: the static catalog helpers moved to the pi-ai `./compat` entry.
+import { getModels, getProviders, type Api } from '@earendil-works/pi-ai/compat';
 
 // Conversion keeps provider catalog lookup next to the native message mapper.
 

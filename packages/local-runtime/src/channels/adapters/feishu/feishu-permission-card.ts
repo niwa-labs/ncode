@@ -30,7 +30,7 @@ export const PERMISSION_ACTION_KIND = 'permission_action' as const;
 
 /**
  * Permission-card button value. `behavior` is the decision the click encodes:
- *   - `allow`  — Allow once (session-scoped allowOnce)
+ *   - `allow`  — Allow once (allowOnce, this call only)
  *   - `always` — Always allow (global allowAlways)
  *   - `deny`   — Deny (deny)
  */

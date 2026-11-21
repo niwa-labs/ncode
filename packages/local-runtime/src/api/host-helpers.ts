@@ -17,7 +17,7 @@ import type { ToolDiagnosticLogger as MatrixToolLogger } from "../observability/
 import type { LocalMavisCronAdapter } from "@mavis/agent-tools/desktop";
 import type { RuntimeConversation } from "@mavis/conversation-contract";
 import type { CronStorePort } from "@mavis/cron";
-import type { PermissionRuleMatcher, ShellFamily } from "@mavis/permission";
+import type { PermissionRuleMatcher } from "@mavis/permission";
 import type { GlobalEventPayloadMap } from "@mavis/shared/global-events";
 import type { AgentReferenceResolver } from "../agent/port.js";
 import type { LocalAgentRuntimePort } from "../agent/runtime-port.js";
@@ -98,7 +98,7 @@ export interface LocalRuntimeApiHostOptions {
   capabilityProfile?: "cli";
   capabilities?: Partial<LocalRuntimeCapabilities>;
   /** Explicit shell provenance supplied by the local executor; unknown remains fail-closed on Windows native delete. */
-  shellFamily?: ShellFamily;
+  shellFamily?: "cmd" | "powershell";
   /** Composition overrides injected by the Cron v2 owner for legacy Local Mavis commands. */
   mavisCronAdapterProvider?: () => LocalMavisCronAdapter | undefined;
   /** Host boundary for cleaning up Cron definitions when an Agent is deleted. */
@@ -142,6 +142,14 @@ export interface LocalRuntimeApiHostOptions {
     rejectedAccessToken?: string,
     loginEpoch?: string,
   ) => void | Promise<void>;
+  /**
+   * Profile label the owning daemon pinned for this host's data plane
+   * (`null` = the default profile; opus 2026-11-01, правка 5). Reported
+   * verbatim in `getProcessLocalAccountStatus` so the thin client can show
+   * which profile/store the daemon serves. Absent = the embedder did not
+   * pin one and the field stays out of the status response.
+   */
+  daemonProfile?: string | null;
   routingContextGetter?: () => LocalRuntimeRoutingContext | undefined;
   /** Live host-owned gate; absent means Context Usage estimation is disabled. */
   isContextWindowUsageEnabled?: () => boolean;
@@ -270,7 +278,11 @@ export type LocalPermissionMode =
   | "auto"
   | "off";
 
-export type LocalPermissionDecision = "allowAlways" | "allowOnce" | "deny";
+export type LocalPermissionDecision =
+  | "allowAlways"
+  | "allowOnce"
+  | "deny"
+  | "denyAlways";
 
 export interface LocalResumeRequest {
   msgId?: string;
@@ -290,12 +302,13 @@ export interface LocalPermissionRequest {
   persistWholeToolRuleOnReply?: boolean;
   toolInput?: string;
   toolDescription?: string;
-  /** PTC only: the run_code child call this approval belongs to. */
-  parentToolCallId?: string;
-  parentToolDescription?: string;
-  /** PTC only: denying this child call stops the whole program instead of failing one call. */
-  stopPtcOnDeny?: boolean;
   reason: string;
+  /**
+   * Bypass-immune ask ("неотключаемый", §3): the surfaced question offers
+   * one-time allow/deny only — no allow-always / deny-always options and no
+   * persisted rule from the reply.
+   */
+  bypassImmune?: boolean;
   createdAt: number;
   /**
    * In-process waiters sharing this pending request (fingerprint dedupe). A
@@ -392,25 +405,12 @@ export function buildLegacyDaemonProxyPath(
 }
 
 // ─── Response factories ────────────────────────────────────────────────
-/**
- * JSON HTTP response. Drops `stack` keys and turns Error values into
- * `{ name, message }` so a caller cannot leak stack frames through this sink
- * (CodeQL js/stack-trace-exposure).
- */
 export function json(data: unknown, init?: ResponseInit): Response {
-  return new Response(JSON.stringify(data, publicJsonReplacer), {
+  return new Response(JSON.stringify(data), {
     status: init?.status ?? 200,
     statusText: init?.statusText,
     headers: { ...JSON_HEADERS, ...(init?.headers ?? {}) },
   });
-}
-
-function publicJsonReplacer(key: string, value: unknown): unknown {
-  if (key === 'stack') return undefined;
-  if (value instanceof Error) {
-    return { name: value.name, message: value.message };
-  }
-  return value;
 }
 
 export function notFound(pathname: string): Response {
@@ -507,6 +507,7 @@ export function readPermissionDecision(
     allowAlways: "allowAlways",
     allowOnce: "allowOnce",
     deny: "deny",
+    denyAlways: "denyAlways",
   };
   return aliases[value];
 }
@@ -741,8 +742,11 @@ export function serializePermissionRequest(
     ...(item.toolInput ? { toolInput: item.toolInput } : {}),
     ...(item.toolDescription ? { toolDescription: item.toolDescription } : {}),
     reason: item.reason,
+    // A bypass-immune ask never offers allow-always / deny-always: the
+    // decision must stay per-call (§3). allow-once / deny remain.
     allowAlwaysSupported:
-      item.ruleContents.length > 0 || item.persistWholeToolRuleOnReply === true,
+      item.bypassImmune !== true &&
+      (item.ruleContents.length > 0 || item.persistWholeToolRuleOnReply === true),
     createdAt: item.createdAt,
   };
 }

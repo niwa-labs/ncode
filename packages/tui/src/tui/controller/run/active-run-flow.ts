@@ -169,6 +169,13 @@ export class TuiActiveRunFlow {
       closeInteraction(panel?: Component): boolean;
       onChanged(): void;
       adoptRuntimeTurn?(sessionId: string, turnId: string, acceptedAtMs: number): void;
+      /**
+       * Input wave 2 (FIFO): drains the pending Queue heads into the live
+       * Turn BEFORE this steer delivers the new message, so earlier-typed
+       * items are never overtaken. Best-effort; a missing hook (tests,
+       * queue-less runtimes) skips the drain.
+       */
+      drainQueueBeforeSteer?: () => Promise<number>;
       commandCatalog?: TuiCommandCatalog;
       keybindings?: TuiKeybindingRegistry;
       queueEnabled: boolean;
@@ -465,6 +472,15 @@ export class TuiActiveRunFlow {
       return false;
     }
     let receipt: Awaited<ReturnType<TuiConversationPort['steer']>>;
+    // Input wave 2 (owner bug 2026-11-07, FIFO starvation): everything the
+    // owner typed into the Queue before this message joins the live Turn
+    // first — a steer must never overtake earlier-typed items. Best-effort:
+    // a drain failure must not fail the owner's own message.
+    try {
+      await this.options.drainQueueBeforeSteer?.();
+    } catch {
+      // The post-turn queue wake still owns whatever did not join.
+    }
     try {
       receipt = await this.options.runtime.steer({
         sessionId: session.sessionId,
@@ -509,7 +525,11 @@ export class TuiActiveRunFlow {
       Date.now(),
       receipt.mode === 'steered' ? 'runtime-message' : 'immediate',
     );
-    if (receipt.mode === 'activated' || receipt.turnId !== snapshot.turnId) {
+    if (
+      receipt.mode === 'activated' ||
+      receipt.turnId !== snapshot.turnId ||
+      this.options.liveRunId() !== receipt.turnId
+    ) {
       this.options.adoptRuntimeTurn?.(session.sessionId, receipt.turnId, Date.now());
     }
     if (receipt.mode === 'activated') void receipt.completion.catch(() => undefined);

@@ -1,13 +1,7 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/wordmark-light.svg">
-    <img src="docs/assets/wordmark-light.svg" alt="MiniMax Code" width="760">
-  </picture>
-</p>
+# MCode · Niwa Labs
 
-<h1 align="center">MiniMax Code</h1>
-<p align="center">把一句话，做成能运行的东西。用 MiniMax 或自己的模型，在终端里构建、验证、继续改进。</p>
+Niwa Labs 维护的 MiniMax Code 分支，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
+
 <p align="center">
   <a href="#快速开始">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·
@@ -31,40 +25,20 @@
 
 ## 快速开始
 
-### 1. 安装 MCode
+### 1. 构建 Niwa Labs 分支
 
-按操作系统选择官方安装器。安装器会安装最新版 CLI，并在需要时准备兼容的 Node.js，无需 `sudo` 或管理员权限；目前不支持 Alpine / musl Linux。
+在本分支的工作目录中使用受支持的 Node.js 和 pnpm 9.12.0。
 
-**macOS / Linux / WSL**
-
-```bash
-curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
+```sh
+node scripts/check-windows-source-location.mjs
+pnpm install --frozen-lockfile
+pnpm build
+pnpm mcode --version
 ```
 
-**Windows（PowerShell）**
-
-```powershell
-irm https://filecdn.minimax.chat/public/install.ps1 | iex
-```
-
-脚本在 macOS / Linux / WSL 上默认安装到 `~/.minimax-code`，在 Windows 上默认安装到 `%USERPROFILE%\.minimax-code`。POSIX 启动器为 `bin/mcode` 和 `bin/mcode-tools`；Windows 启动器为 `mcode.cmd` / `mcode.ps1` 和 `mcode-tools.cmd` / `mcode-tools.ps1`。安装前设置 `MCODE_INSTALL_DIR` 可更改安装位置。移除 CLI 的方法见[卸载](#卸载)。
-
-**npm**：适用于已安装 **Node.js 22.19+（22.x）、24.2+（24.x）、25 或 26** 的环境。
-
-```bash
-npm install -g @minimax-ai/code@latest --registry=https://registry.npmjs.org/ --ignore-scripts=false --include=optional --allow-scripts=@minimax-ai/code,better-sqlite3
-```
-
-该 npm 命令使用公共 registry，包含可选的 SQLite 依赖，并允许执行主包和 SQLite 的安装脚本。固定版本和 Node.js 兼容范围见[安装指南](docs/installation.md)。
-
-重新打开终端后检查安装：
-
-```bash
-mcode --version
-mcode --help
-```
-
-参阅官网的[快速开始](https://agent.minimaxi.com/docs/cli/quick-start)、[功能与配置](https://agent.minimaxi.com/docs/cli/features)和[故障排查](https://agent.minimaxi.com/docs/cli/faq)。
+在工作目录中运行 `pnpm mcode`，或在其他目录中用 Node.js 运行构建后的
+`dist/cli.js`。下文用 `mcode` 指代构建后的 CLI。MiniMax 官方安装器、软件包和更新渠道属于
+[上游项目](https://github.com/MiniMax-AI/minimax-code)。要更新此分支，请切换到较新的源码版本并重新构建。
 
 ### 2. 登录账号或配置 API Key
 
@@ -109,8 +83,6 @@ mcode
 克隆仓库，把起始工程复制到独立目录：
 
 ```bash
-git clone https://github.com/MiniMax-AI/minimax-code.git
-cd minimax-code
 node examples/pocket-pet/setup.mjs ../my-pocket-pet
 cd ../my-pocket-pet
 node serve.mjs
@@ -257,8 +229,6 @@ profile 使用 `~/.minimax-<profile>`；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 
 
 开发 MCode 或运行本仓库源码需要 Git、Node.js **22.19+（22 系列）、24.2+（24 系列）、25 或 26**，以及 **pnpm 9.12.0**。在 Windows 上，请将源码放在本地 NTFS 卷上，并避开云同步目录；下面的预检命令会在 pnpm 创建 workspace link 前检查卷类型。
 ```bash
-git clone https://github.com/MiniMax-AI/minimax-code.git
-cd minimax-code
 node scripts/check-windows-source-location.mjs
 pnpm install --frozen-lockfile
 pnpm build
@@ -277,35 +247,12 @@ node /absolute/path/to/minimax-code/dist/cli.js
 
 ## 文档与贡献
 
-- [安装与更新](docs/installation.md) · [使用示例](docs/examples.md) · [TUI 状态栏](packages/tui/docs/status-line-config.md)
-- [贡献指南](CONTRIBUTING.md) · [报告 Bug / 提出建议](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) · [报告安全问题](SECURITY.md)
-- [全部文档](docs/README.md)：架构、能力对照、验证记录、源码同步和发布流程。
+- [安装与账号配置档](docs/installation.md)
+- [架构](docs/architecture.md)与[组件文档](docs/components)
+- [贡献指南](CONTRIBUTING.md)、[安全报告](SECURITY.md)和[第三方声明](THIRD_PARTY_NOTICES.md)
 
-项目文档以英文为主，本页为首页的简体中文译文。
-
-目前仅接受仓库协作者提交代码和文档 Pull Request。如果你不是协作者，但有想法或方案，欢迎先通过 [Issue](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) 讨论。请在报告中移除密钥、账号信息和私人项目内容。
-
-## 桌面版与问题反馈
-
-<a href="https://agent.minimaxi.com/download" title="下载 MiniMax Code">
-  <img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code 桌面版 — 点击下载" width="100%" />
-</a>
-
-[下载 macOS 或 Windows 桌面版](https://agent.minimaxi.com/download) · [报告问题或提问](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
-
-本仓库也承接 MiniMax Code 桌面版的问题反馈。公开源码范围为终端 TUI、Headless CLI 和 ACP，不包含桌面应用源码。提交 Issue 时请选择对应产品。桌面版问题请注明应用版本、操作系统，以及「设置 → 通用 → 上传日志」生成的日志上传 ID（如可用）；CLI 问题请注明 `mcode --version`、运行入口与最小复现。报告中请移除凭据和私人项目内容。
-
-## 反馈与联系我们
-
-| 渠道 | 适用场景 |
-| --- | --- |
-| [GitHub Issues](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) | 公开报告 CLI 或桌面版的 Bug、提出功能建议与使用问题。 |
-| [MiniMaxCode@minimax.io](mailto:MiniMaxCode@minimax.io) | 一般反馈与支持咨询。 |
-| [security.mcode@minimax.io](mailto:security.mcode@minimax.io) | 私密报告安全漏洞。请通过此邮箱发送复现步骤和脱敏证据，详见[安全报告指南](SECURITY.md)。 |
-| [Discord](https://minimax.io/discord) | 社区交流与反馈。 |
-| [飞书反馈群二维码](https://cdn.hailuoai.com/hailuo-video-web/public_assets/minimax_code_feishu_group_url.png) | 中文社区反馈。使用飞书扫码，或在中文版桌面应用的用户菜单 → **联系我们 → 飞书** 中查看二维码。 |
-
-也可关注 [MiniMax 的 X 账号](https://x.com/MiniMaxAgent) 获取动态。请勿在公开 Issue 或社区聊天中发布漏洞细节、凭据和私人项目内容。
+如需反馈分支问题，请使用 Niwa Labs 分支的 Issues。MiniMax 账号、官方安装器和桌面应用请参阅
+[上游 MiniMax Code](https://github.com/MiniMax-AI/minimax-code)。
 
 ## 许可
 

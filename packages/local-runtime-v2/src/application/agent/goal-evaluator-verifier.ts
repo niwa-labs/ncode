@@ -11,7 +11,14 @@ import {
   type VerifierPort,
 } from '@mavis/goal';
 import { GOAL_CONFIG_DEFAULTS, resolveModelCallRoute } from '@mavis/config';
-import { isContextOverflow, streamSimple, type AssistantMessage } from '@earendil-works/pi-ai';
+// pi 48c8f322: `streamSimple` moved to the pi-ai `./compat` entry (which
+// re-exports the root surface, so `isContextOverflow` resolves from there too).
+import {
+  isContextOverflow,
+  normalizeContext,
+  streamSimple,
+  type AssistantMessage,
+} from '@earendil-works/pi-ai/compat';
 
 import {
   parseSourceQualifiedModelKey,
@@ -170,7 +177,10 @@ async function requestEvaluatorModel(
 ): Promise<AssistantMessage> {
   const response = await (input.llm.streamFn ?? streamSimple)(
     input.llm.model,
-    {
+    // pi 48c8f322: `normalizeContext` produces the branded TranscriptContext —
+    // assignable both to the pi StreamFn and to compat `streamSimple` (whose
+    // re-normalization is idempotent on a normalized transcript).
+    normalizeContext({
       systemPrompt: input.input.systemPrompt,
       messages: [
         {
@@ -185,7 +195,7 @@ async function requestEvaluatorModel(
         },
       ],
       tools: [...input.input.tools],
-    },
+    }),
     {
       ...(input.llm.apiKey ? { apiKey: input.llm.apiKey } : {}),
       ...(input.llm.headers ? { headers: { ...input.llm.headers } } : {}),

@@ -1,6 +1,10 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Context, Message, Model, Tool } from '@earendil-works/pi-ai';
-import { convertResponsesMessages, convertResponsesTools } from '@earendil-works/pi-ai';
+// pi 48c8f322: the Responses conversion helpers moved to the
+// `./api/openai-responses-shared` subpath (registry row №34, replaced-by-upstream);
+// they take the normalized TranscriptContext.
+import { normalizeContext } from '@earendil-works/pi-ai';
+import { convertResponsesMessages, convertResponsesTools } from '@earendil-works/pi-ai/api/openai-responses-shared';
 import { thinkingToPortableText, toProviderMessages } from './messages-count-tokens-messages.js';
 
 export interface ResponsesInputTokensRequestBody {
@@ -26,7 +30,7 @@ export function buildResponsesInputTokensRequestBody(
   if (model.provider) allowedToolCallProviders.add(model.provider);
   const body: ResponsesInputTokensRequestBody = {
     model: model.id,
-    input: convertResponsesMessages(model, context, allowedToolCallProviders),
+    input: convertResponsesMessages(model, normalizeContext(context), allowedToolCallProviders),
   };
   if (tools && tools.length > 0) {
     body.tools = convertResponsesTools(tools);

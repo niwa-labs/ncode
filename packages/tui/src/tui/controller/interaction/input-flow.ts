@@ -1,5 +1,5 @@
 import type { TuiComposerDraft } from '../../features/composer/draft.js';
-import { isTuiTerminalImagePaste } from '../../features/composer/terminal-image-paste.js';
+import { resolveTuiTerminalPasteReferences } from '../../features/composer/terminal-image-paste.js';
 import type { Editor, EditorDraftSnapshot } from '../../widgets/editor/editor.js';
 import type { TuiInlinePanelHost } from '../../shell/inline-panel.js';
 import type { TuiComposerState } from '../../shell/composer.js';
@@ -9,7 +9,7 @@ import {
   getDefaultTuiKeybindingRegistry,
   type TuiKeybindingRegistry,
 } from '../../shell/keybindings.js';
-import { getKeybindings, isKeyRelease, matchesKey } from '../../engine/public.js';
+import { isKeyRelease, matchesKey } from '../../engine/public.js';
 import type { TUI } from '../../engine/public.js';
 import type { EditTuiDraftInExternalEditor } from '../../../host/external-editor.js';
 import { TuiExternalEditorFlow } from './external-editor-flow.js';
@@ -77,12 +77,12 @@ export interface TuiInputFlowOptions {
     submission: TuiSubmissionSnapshot,
   ) => void;
   readonly onSubmissionSettled?: (submissionToken?: string) => void;
-  readonly requestInteractionRender: () => void;
   /**
-   * Fills the composer with the visible next-message suggestion. Returns false
-   * when none is visible, so Tab keeps its normal completion behaviour.
+   * Tab on a visible next-message suggestion fills the composer; false keeps
+   * the default autocomplete behaviour.
    */
   readonly acceptPromptSuggestion?: () => boolean;
+  readonly requestInteractionRender: () => void;
 }
 
 export class TuiInputFlow {
@@ -129,18 +129,24 @@ export class TuiInputFlow {
     };
     this.options.editor.onAutocompleteSelect = onAutocompleteSelect;
     this.options.editor.onPaste = (value) => {
-      if (!isTuiTerminalImagePaste(value)) return false;
-      void this.options.composerDraft
-        .queueAttachment(value, { source: 'terminal-paste' })
-        .catch((error: unknown) =>
-          this.options.append(
-            formatTuiActionFailure(error, {
-              summary: "Couldn't attach that file.",
-              nextStep: 'Check the path and try again.',
-            }),
-            'error',
-          ),
-        );
+      // A Finder drop of N files arrives as ONE line of space-separated
+      // absolute paths — the resolver decides attachment-vs-text and returns
+      // every reference; attach each, never the concatenation.
+      const references = resolveTuiTerminalPasteReferences(value);
+      if (!references) return false;
+      for (const reference of references) {
+        void this.options.composerDraft
+          .queueAttachment(reference, { source: 'terminal-paste' })
+          .catch((error: unknown) =>
+            this.options.append(
+              formatTuiActionFailure(error, {
+                summary: "Couldn't attach that file.",
+                nextStep: 'Check the path and try again.',
+              }),
+              'error',
+            ),
+          );
+      }
       return true;
     };
     this.options.editor.onAttachmentPlaceholderDeleted = (id) => {
@@ -193,7 +199,7 @@ export class TuiInputFlow {
       this.options.editor.setText('');
       void this.options.commandFlow
         .submit(input, submission, {
-          ...(busySubmission ?? {}),
+          ...(busySubmission ?? { busyAction: 'steer' as const }),
           onRuntimeAccepted: () => this.options.onSubmissionAdmitted?.(submissionToken),
           onSubmissionPrepared: (prepared) =>
             this.options.onSubmissionPrepared?.(submissionToken, prepared),
@@ -279,11 +285,6 @@ export class TuiInputFlow {
     }
     if (interactionActive) {
       this.lastEscapeAtMs = 0;
-      if (keyAction === 'view-plan') {
-        if (!this.options.interaction.toggleFullView()) return undefined;
-        this.options.tui.requestRender();
-        return { consume: true };
-      }
       if (keyAction !== 'scroll-up' && keyAction !== 'scroll-down') return undefined;
       const direction = keyAction === 'scroll-up' ? -1 : 1;
       const interactionScroll = this.options.interaction.scrollByPage(direction);
@@ -305,7 +306,7 @@ export class TuiInputFlow {
     }
     if (
       this.options.acceptPromptSuggestion &&
-      getKeybindings().matches(data, 'tui.input.tab') &&
+      matchesKey(data, 'tab') &&
       this.options.editor.getText().length === 0 &&
       !this.options.composerDraft.hasContent() &&
       this.options.acceptPromptSuggestion()
@@ -434,13 +435,18 @@ export class TuiInputFlow {
       return { consume: true };
     }
     if (keyAction === 'exit') {
-      if (this.options.editor.getText().length > 0 || this.options.composerDraft.hasContent()) {
-        return undefined;
-      }
       if (this.options.isSideModeActive?.()) {
+        // A side conversation keeps its own lifecycle: an empty Ctrl+D closes
+        // the temporary conversation; with a draft the Editor keeps the key.
+        if (this.options.editor.getText().length > 0 || this.options.composerDraft.hasContent()) {
+          return undefined;
+        }
         void this.options.closeSideConversation?.('ctrl_d');
         return { consume: true };
       }
+      // Owner bug 2026-11-07 (blocked owner had to leave the session):
+      // Ctrl+D is the unconditional exit — it never depends on the Composer
+      // state; the draft survives through the regular shutdown recovery.
       void this.options.leaveUi();
       return { consume: true };
     }
@@ -514,6 +520,25 @@ export class TuiInputFlow {
         () => this.options.onChanged(),
         () => this.options.onChanged(),
       );
+      this.options.tui.requestRender();
+      return { consume: true };
+    }
+
+    if (isCtrlC && this.options.liveRunId()) {
+      // Owner bug 2026-11-07 (claude-cli key scheme): on an ACTIVE Turn the
+      // first Ctrl+C interrupts the response — same as Esc — instead of only
+      // arming the exit latch; an owner blocked on a silent response must
+      // never need to leave the session to regain control. The latch still
+      // arms so a second Ctrl+C on the interrupted (possibly still settling)
+      // chat exits, and the "Press Ctrl+C again" hint stays reserved for an
+      // idle chat.
+      if (this.ctrlCExitArmed) {
+        this.ctrlCExitArmed = false;
+        void this.options.leaveUi();
+        return { consume: true };
+      }
+      this.ctrlCExitArmed = true;
+      void this.options.abortLiveTurn();
       this.options.tui.requestRender();
       return { consume: true };
     }

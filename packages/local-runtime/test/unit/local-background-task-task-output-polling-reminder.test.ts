@@ -9,6 +9,7 @@ import {
 } from '@earendil-works/pi-ai';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import { toRuntimeTool, type RuntimeTool } from '@mavis/agent-core/tools';
+import { RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE } from '@mavis/agent-extension';
 import { LocalTaskOutputTool } from '@mavis/agent-tools/desktop';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -173,7 +174,6 @@ function createDisplayProjection(session: SessionRecord) {
     },
     sessions: { update: vi.fn(async () => session) },
     messages: {
-      get: vi.fn(async () => undefined),
       upsert: vi.fn(async (input: MessageUpsertInput): Promise<NormalizedDisplayMessage> => {
         upserts.push(input);
         return normalizeDisplayMessage(input, upserts.length);
@@ -543,8 +543,13 @@ describe('task_output polling reminder through Local Runtime background delivery
       );
       expect(remindersAfterPolling).toHaveLength(1);
       const reminder = remindersAfterPolling[0];
+      // W1-C: the guard reminder is durable as a hidden custom marker (the
+      // appendMessage channel), never a user-authored record — the provider
+      // payload renders it as user text on the wire, the store keeps it custom.
       expect(reminder?.message).toMatchObject({
-        role: 'user',
+        role: 'custom',
+        customType: RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE,
+        display: false,
         content: TASK_OUTPUT_POLLING_REMINDER,
       });
       expect(reloadedAfterPolling.identityVector[reminder?.index ?? -1]).not.toMatch(

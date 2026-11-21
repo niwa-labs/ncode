@@ -20,7 +20,9 @@ import type { TuiAgentInteractionReadback } from '../interaction/interaction-flo
 import { TuiAutomationStatusStore } from '../../automation/status-store.js';
 import type { TuiTip } from '../../shell/tips.js';
 import type { TuiKeybindingRegistry } from '../../shell/keybindings.js';
+import type { TuiPromptSuggestionStore } from '../../features/composer/prompt-suggestion.js';
 import type { TuiComposerState } from '../../shell/composer.js';
+import type { TuiShellState } from '../../shell/contracts.js';
 import {
   isTuiCommandDiscoverable,
   MINIMAX_CODE_COMMANDS,
@@ -29,7 +31,6 @@ import {
 import { resolveTuiComposerInputIntent } from '../../commands/input-intent.js';
 import { formatTuiTerminalTitle } from '../../platform/terminal-title.js';
 import type { TuiProgramStatus } from '../../platform/terminal-program-status.js';
-import type { TuiPromptSuggestionStore } from '../../features/composer/prompt-suggestion.js';
 
 type PresentationSink<K extends keyof TuiVisiblePresentation> = {
   setState(state: TuiVisiblePresentation[K]): void;
@@ -74,6 +75,8 @@ export class TuiChromeFlow {
       readonly selectedEffort?: () => string | undefined;
       readonly permissionMode: () => TuiPermissionModeSnapshot | undefined;
       readonly planMode?: () => TuiPlanModeSnapshot;
+      /** W4 (§4.6): the daemon connection state getter (server mode only). */
+      readonly daemonConnection?: () => TuiShellState['daemonConnection'];
       /** Paired BTW side conversation, when one exists. */
       readonly sideConversation?: () => TuiSideConversationSnapshot | undefined;
       /** Multi-Session state kernel, including the background parent Turn. */
@@ -161,6 +164,7 @@ export class TuiChromeFlow {
       this.setHint(undefined);
     }
     const currentLiveRunId = this.options.liveRunId(snapshot);
+    const promptSuggestion = this.options.promptSuggestion?.candidate(snapshot.session?.sessionId);
     const runtimeProjection = this.options.runProjection();
     const connection = this.options.connection();
     const agentInteraction = this.options.agentInteraction();
@@ -173,7 +177,6 @@ export class TuiChromeFlow {
       this.options.shouldResumeDraftAfterLogin()
         ? 'conversation'
         : 'welcome';
-    const promptSuggestion = this.options.promptSuggestion?.candidate(snapshot.session?.sessionId);
     const presentation = resolveTuiVisiblePresentation({
       snapshot,
       connection,
@@ -203,6 +206,7 @@ export class TuiChromeFlow {
       planMode: this.options.planMode?.() ?? {
         displayMode: snapshot.session?.interactionMode === 'plan' ? 'plan' : 'default',
       },
+      daemonConnection: this.options.daemonConnection?.(),
       ...(() => {
         const sideConversation = this.resolveSideConversationPresentation(snapshot);
         return sideConversation ? { sideConversation } : {};

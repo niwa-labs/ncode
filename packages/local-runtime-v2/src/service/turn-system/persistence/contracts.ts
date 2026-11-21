@@ -98,6 +98,12 @@ export type AdmitTurnResult =
   | {
       readonly status: 'rejected';
       readonly reason: TurnAdmissionRejectionReason;
+      /**
+       * The id of the turn that holds the session (`active-turn` only), read
+       * from the accepted ingress row in the same transaction — so a refused
+       * caller can say WHAT holds the session, not just THAT it does.
+       */
+      readonly activeTurnId?: string;
       /** Recovery facts committed in the same admission transaction. */
       readonly recoveredTerminalFacts?: readonly TurnRecoveryTerminalFact[];
     };

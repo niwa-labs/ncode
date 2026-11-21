@@ -1,4 +1,8 @@
-import { generateSummary, type AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+// pi 48c8f322: `generateSummary` moved from pi-agent-core's 0.79 harness into
+// pi-coding-agent's compaction module and returns the summary text directly —
+// the `Result<string, CompactionError>` wrapper is gone, failures throw.
+import { generateSummary } from '@earendil-works/pi-coding-agent';
 import type {
   PiBeforeLlmCallHook,
   PiBeforeLlmCallHookDecision,
@@ -288,23 +292,23 @@ export class ContextManager {
     if (!input.apiKey) {
       throw new Error('context_manager_summary_unavailable: missing apiKey for current model');
     }
-    const result = await generateSummary(
-      plan.compactedMessages,
-      input.model,
-      this.settings.reserveTokens,
-      input.apiKey,
-      undefined,
-      input.signal,
-      undefined,
-      plan.previousSummary,
-      input.thinkingLevel,
-    );
-    if (!result.ok) {
-      throw new Error(
-        `context_manager_summary_failed: ${result.error.code}: ${result.error.message}`,
+    try {
+      // Pin contract: resolves to the summary text; rejects on failure.
+      return await generateSummary(
+        plan.compactedMessages,
+        input.model,
+        this.settings.reserveTokens,
+        input.apiKey,
+        undefined,
+        input.signal,
+        undefined,
+        plan.previousSummary,
+        input.thinkingLevel,
       );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`context_manager_summary_failed: ${message}`);
     }
-    return result.value;
   }
 
   private async skip(

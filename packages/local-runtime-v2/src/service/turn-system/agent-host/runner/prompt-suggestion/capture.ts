@@ -1,4 +1,7 @@
+import { createLogger } from '@mavis/logging';
 import type { LLMModelConfig, PiTurnHooks, RunTurnCaller } from '@mavis/agent-core/pi-turn-runner';
+
+const log = createLogger('mcode:prompt-suggestion');
 import type { AgentHostTurnOutcome } from '../../contracts.js';
 import type { LocalTurnExecutionInput } from '../contracts.js';
 import { buildPromptSuggestionPayloadTransform } from '../../assembly/local-turn-payload-transform.js';
@@ -11,6 +14,13 @@ import {
 /**
  * Installs the capture Hooks only when the port is present and enabled, so a
  * disabled feature adds no Hook and keeps the main request untouched.
+ *
+ * OUR surface gate (the upstream equivalent is `promptSuggestionSurface`,
+ * which cannot work on a shared daemon runtime): the TURN must carry the
+ * interactive marker its TUI sender attached (`provenance.sourceContext
+ * .surface === 'interactive'`). An ACP/exec/queue turn never carries it, so
+ * headless clients pay ZERO extra model requests and receive zero events —
+ * the feature is invisible to them even when enabled for the daemon.
  */
 export function createTurnPromptSuggestionCapture(
   input: LocalTurnExecutionInput,
@@ -20,15 +30,28 @@ export function createTurnPromptSuggestionCapture(
   },
 ): { readonly capture: ReturnType<typeof createPromptSuggestionCapture> } | undefined {
   const port = options.promptSuggestion;
-  if (
-    !port ||
-    !port.enabled() ||
-    prepared.caller !== 'chat' ||
-    input.session.parentSessionId ||
-    (input.session.interactionMode ?? 'default') !== 'default' ||
-    isAutomaticOrPlannedTurn(input)
-  )
+  const gate = (() => {
+    if (!port) return 'no_port';
+    if (!port.enabled()) return 'disabled';
+    if (prepared.caller !== 'chat') return 'caller';
+    if (input.session.parentSessionId) return 'child_session';
+    if ((input.session.interactionMode ?? 'default') !== 'default') return 'interaction_mode';
+    if (input.request.provenance.sourceContext?.surface !== 'interactive') return 'surface';
+    if (isAutomaticOrPlannedTurn(input)) return 'automatic_or_planned';
     return undefined;
+  })();
+  if (gate) {
+    // Diagnose only when the feature is on: a disabled/headless refusal is
+    // the designed quiet path and must not log anything.
+    if (port && port.enabled() && gate !== 'disabled') {
+      log.warn('prompt suggestion capture refused', {
+        session_id: input.lease.sessionId,
+        turn_id: input.lease.turnId,
+        gate,
+      });
+    }
+    return undefined;
+  }
   return {
     capture: createPromptSuggestionCapture(
       prepared.llm,

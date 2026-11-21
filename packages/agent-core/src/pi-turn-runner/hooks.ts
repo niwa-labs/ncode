@@ -5,7 +5,6 @@ import type {
   AgentMessage,
   BeforeToolCallContext,
   BeforeToolCallResult,
-  CustomMessage,
   ThinkingLevel,
   StreamFn,
 } from '@earendil-works/pi-agent-core';
@@ -18,10 +17,12 @@ import type {
   Tool,
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
+import type { McodeCustomMessage } from './custom-messages.js';
 import type { PiEventWriter } from './types.js';
 
 export type PiBeforeLlmCallPhase = 'initial' | 'iteration';
 
+/** What an afterLlmCall `recover` decision already dropped, for the repeated call. */
 export interface PiLlmCallRecovery {
   readonly reason: string;
   /** Provider error text of the response that was dropped. */
@@ -74,6 +75,8 @@ export interface PiBeforeLlmCallHookInput {
 
 export interface PiBeforeLlmCallReplaceMetadata {
   replacementId: string;
+  /** The host already installed this checkpoint; delivery must preserve its canonical IDs. */
+  committedReplacementId?: string;
   strategyVersion: string;
   summary: string;
   compactedMessages: AgentMessage[];
@@ -84,22 +87,36 @@ export interface PiBeforeLlmCallReplaceMetadata {
   messagesBefore?: number;
   messagesAfter?: number;
   /**
+   * Wave 3 (canon 05 §2.6, item 3.3): the post-compaction Context Usage
+   * snapshot of the unified measure — LOCAL_ESTIMATE (a fresh cut has no
+   * usage anchor of its generation). The compaction fact carries it so the
+   * owner's Context Usage surface drops to the SAME number the triggers
+   * evaluated, without waiting for the next provider-anchored turn.
+   */
+  contextUsage?: {
+    readonly contextWindowTokens: number;
+    readonly usedTokens: number;
+    readonly totalCountSource: 'LOCAL_ESTIMATE';
+    readonly components: readonly {
+      readonly kind: 'SYSTEM_PROMPT' | 'MEMORY' | 'TOOLS' | 'SKILLS' | 'MESSAGES' | 'OTHER';
+      readonly tokens: number;
+    }[];
+  };
+  /**
    * Explicit output-to-input lineage for technical replacements. Each output
    * message points at the index whose canonical identity it preserves.
    */
   replacementSourceIndexes?: number[];
   /** Reserved lineage for a placement-owned exact current-user tail. */
   currentUserSourceIndex?: number;
-  /**
-   * Reserved count of hidden markers placed immediately before the
-   * placement-owned current-user tail. Maintained by the runner alongside
-   * `currentUserSourceIndex`; hooks must not set it. Absent means 1 when
-   * `currentUserSourceIndex` is present, keeping older persisted metadata valid.
-   */
-  placedMarkerCount?: number;
 }
 
-export type PiBeforeLlmCallAppendMessage = Omit<CustomMessage, 'content' | 'display'> & {
+/**
+ * Host append message: the durable hidden-marker form of {@link McodeCustomMessage}
+ * (string content, never displayed). Kept structurally identical to the 0.79
+ * `PiBeforeLlmCallAppendMessage` so canonical history validators are unchanged.
+ */
+export type PiBeforeLlmCallAppendMessage = Omit<McodeCustomMessage, 'content' | 'display'> & {
   content: string;
   display: false;
 };
@@ -129,11 +146,7 @@ export type PiBeforeLlmCallHookDecision =
   | {
       /**
        * Durably appends one hidden typed context message before the Provider request.
-       * Appends accumulate: later hooks still run and receive the registered
-       * markers in `messages` and `canonicalMessages`. All markers are committed
-       * once after the pipeline (placed markers inside the durable replacement,
-       * tail markers in registration order with one history flush). A durable
-       * `replaceMessages` after a registered append aborts the request.
+       * A successful append ends the before-LLM decision pipeline.
        */
       type: 'appendMessage';
       message: PiBeforeLlmCallAppendMessage;
@@ -204,14 +217,6 @@ export type PiAfterLlmCallHookDecision =
    */
   | { type: 'replaceText'; text: string }
   | { type: 'retry'; reason: string; prompt: string }
-  /**
-   * Drops a provider error response and repeats the same provider request
-   * once per LLM call. Only honoured for `stopReason: 'error'`; the repeated
-   * call's beforeLlmCall input carries `recovery` so a hook can shrink the
-   * context first. Ignored for other responses or when the repeated request
-   * fails again.
-   */
-  | { type: 'recover'; reason: string }
   | { type: 'fail'; reason: string };
 
 export type PiAfterLlmCallHook = (

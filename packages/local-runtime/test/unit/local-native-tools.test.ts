@@ -1,6 +1,6 @@
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -12,6 +12,7 @@ import {
   buildLocalTurnToolSources,
 } from '../../src/api/local-native-tools.js';
 import { withoutLocalMavisCronGuidance } from '../../src/api/local-mavis-cron-guidance.js';
+import { filterLocalTurnCapabilityInventory } from '../../../local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-tool-catalog.js';
 import { LocalEventSink } from '../../src/events/sink.js';
 import { LocalMcpService } from '../../../local-runtime-v2/src/service/mcp/index.js';
 import { LocalMemoryFacade } from '../../src/memory/local-memory-facade.js';
@@ -20,48 +21,6 @@ import { initSkillService } from '../../src/skills/skill-service.js';
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 describe('local native turn tools', () => {
-  it.skipIf(process.platform === 'win32')('reads nativeDelete from the live config for an existing Bash tool', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'native-bash-policy-'));
-    let nativeDelete = false;
-    const environments: NodeJS.ProcessEnv[] = [];
-    const configGetter = vi.fn(() => ({ dataDir, provider: {}, permission: { nativeDelete } }));
-    const tools = buildLocalNativeRuntimeTools({
-      dataDir,
-      workspaceRoot: dataDir,
-      agentName: 'mavis',
-      configGetter,
-      sandboxOperationsFactory: {
-        create: () => ({
-          exec: async (_command, _cwd, options) => {
-            environments.push(options.env!);
-            return { exitCode: 0 };
-          },
-        }),
-      },
-    });
-    const bash = tools.find((tool) => tool.def.name === 'bash')!;
-    const shim = join(dataDir, 'shims');
-    vi.stubEnv('PATH', [shim, process.env.PATH].join(delimiter));
-    try {
-      expect(configGetter).not.toHaveBeenCalled();
-      for (const enabled of [false, true, false]) {
-        nativeDelete = enabled;
-        const result = await bash.impl.execute(
-          { sessionId: 'bash-session', turnId: 'bash-turn' },
-          { command: 'true' },
-        );
-        expect(result.isError).toBeFalsy();
-      }
-      expect(environments[0]!.PATH?.split(delimiter)).toContain(shim);
-      expect(environments[1]!.PATH?.split(delimiter)).not.toContain(shim);
-      expect(environments[2]!.PATH).toBe(environments[0]!.PATH);
-      expect(configGetter).toHaveBeenCalledTimes(3);
-    } finally {
-      vi.unstubAllEnvs();
-      await rm(dataDir, { recursive: true, force: true });
-    }
-  });
-
   it('exposes native web_search only when the local product owner gate is enabled', () => {
     const base = {
       workspaceRoot: '/workspace',
@@ -621,7 +580,7 @@ describe('local native turn tools', () => {
             },
           },
         },
-        { todos: [{ content: 'keep working', status: 'in_progress' }] },
+        { todos: [{ content: 'retry the append', status: 'in_progress' }] },
       );
 
       expect(result.details).toMatchObject({ event_emitted: false });
@@ -812,7 +771,7 @@ describe('local native turn tools', () => {
           deleteSession: async () => ({ success: true }),
           listMessages: async (req) => {
             sessionCalls.push(req);
-            return { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] };
+            return { messages: [{ msg_id: 'message-1', role: 'user', msg_content: 'ok' }] };
           },
         },
       });
@@ -856,9 +815,9 @@ describe('local native turn tools', () => {
       expect(JSON.parse(sessionResult.text)).toMatchObject({
         ok: true,
         command: 'session messages',
-        response: { messages: [{ msg_id: 'msg-1', msg_content: 'ok' }] },
+        response: { format: 'text', messages: [{ msg_id: 'message-1', role: 'user', msg_content: 'ok' }] },
       });
-      expect(sessionCalls).toEqual([{ sessionId: 'session-current' }]);
+      expect(sessionCalls).toEqual([{ sessionId: 'session-current', limit: 20 }]);
 
       const mcpResult = await mavis!.impl.execute(
         { sessionId: 'session-current', turnId: 'turn-1', agentName: 'mavis' },
@@ -1311,6 +1270,34 @@ describe('local native turn tools', () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+  it('retains only current-session history when the CLI host disables Mavis management', async () => {
+    const listMessages = vi.fn(async () => ({ messages: [{ msg_id: 'm1', role: 'user', msg_content: 'Decision' }], hasMore: false }));
+    const base = {
+      workspaceRoot: '/workspace', agentName: 'mavis', mavisHistoryOnly: true,
+      builtinCapabilities: resolveAgentCapabilities({ features: { mavis: false } }),
+      mavisAgentAdapter: {} as never,
+      mavisSessionAdapter: { listMessages } as never,
+    };
+    const tools = buildLocalNativeRuntimeTools(base);
+    const history = tools.find((tool) => tool.def.name === 'mavis');
+    expect(history).toBeDefined();
+    const result = await history!.impl.execute({ sessionId: 'own-session', turnId: 'turn' }, { command: 'session messages' });
+    expect(result.isError).not.toBe(true);
+    expect(listMessages).toHaveBeenCalledWith({ sessionId: 'own-session', limit: 20 }, undefined);
+    const sources = { nativeTools: [history!], mcpEntries: [], threadGoalTools: [], cuRuntimeAvailable: false };
+    const profile = { surface: 'cli', trustedBuiltin: true, canonicalRole: 'mavis',
+      capabilityCeiling: { tools: ['read'], features: { mavis: false, delegation: false, webSearch: false } },
+      configSelection: { tools: ['read'] },
+    } as const;
+    const inventory = (overrides = {}) => filterLocalTurnCapabilityInventory({ sources, agentProfile: { ...profile, ...overrides } as never }).nativeTools;
+    expect(inventory()).toHaveLength(1);
+    expect(inventory({ configSelection: { disallowedTools: ['mavis'] } })).toHaveLength(0);
+    expect(inventory({ configSelection: { tools: ['bash'] } })).toHaveLength(0);
+    expect(inventory({ capabilityCeiling: { ...profile.capabilityCeiling, tools: ['bash'] } })).toHaveLength(0);
+    expect(buildLocalNativeRuntimeTools({ ...base, mavisHistoryOnly: false }).map((tool) => tool.def.name)).not.toContain('mavis');
+    expect(buildLocalNativeRuntimeTools({ ...base, builtinCapabilities: resolveAgentCapabilities({ tools: ['bash'], features: { mavis: false } }) }).map((tool) => tool.def.name)).not.toContain('mavis');
+  });
+
 });
 
 // Exercise generic skill ownership with synthetic assets; desktop-only builtins

@@ -1,4 +1,5 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { todoSnapshotKey } from '@mavis/system-reminder';
 
 import {
   normalizeTodoItems,
@@ -7,6 +8,7 @@ import {
   type CompactionTodoCadence,
   type CompactionTodoItem,
 } from '../compat.js';
+import { readContextDomainState } from './domain-state.js';
 import { advanceAssistantIterationCadence } from './assistant-iteration-cadence.js';
 
 export const TODO_CADENCE_REMINDER_CUSTOM_TYPE = 'todo_cadence_reminder';
@@ -14,16 +16,20 @@ export const TODO_CADENCE_REMINDER_CUSTOM_TYPE = 'todo_cadence_reminder';
 export interface TodoHistoryProjection {
   readonly todoState?: readonly CompactionTodoItem[];
   readonly todoCadence?: CompactionTodoCadence;
+  /** Scheduling state follows the todo snapshot across compression/replay. */
+  readonly reminderSinceTodoWrite: boolean;
 }
 
 /** Rebuilds Todo reminder state from the durable transcript. */
 export function projectTodoHistory(messages: readonly AgentMessage[]): TodoHistoryProjection {
   const inherited = readCompactionCompatibility(messages[0]);
-  let todoState = inherited?.todoState;
-  let todoCadence: CompactionTodoCadence = inherited?.todoCadence ?? {
+  const checkpoint = readContextDomainState(messages[0])?.todo;
+  let todoState = checkpoint?.todoState ?? inherited?.todoState;
+  let todoCadence: CompactionTodoCadence = checkpoint?.todoCadence ?? inherited?.todoCadence ?? {
     assistantIterationsSinceTodoWrite: TODO_CADENCE_INTERVAL,
     assistantIterationsSinceReminder: TODO_CADENCE_INTERVAL,
   };
+  let reminderSinceTodoWrite = checkpoint?.reminderSinceTodoWrite ?? false;
   const toolNames = new Map<string, string>();
 
   messages.forEach((message) => {
@@ -40,16 +46,25 @@ export function projectTodoHistory(messages: readonly AgentMessage[]): TodoHisto
     }
 
     const next = readSuccessfulTodo(message, toolNames);
-    if (next !== undefined) {
+    // M3.1 dupe wave: a write whose snapshot is identical to the current
+    // state (shared comparator) is a no-op — it must not reset the cadence
+    // counters or re-arm the reminder gate. The comparison is redone here
+    // instead of trusting `details.unchanged`: records written before the
+    // fix do not carry the flag.
+    if (next !== undefined && todoSnapshotKey(todoState) !== todoSnapshotKey(next)) {
       todoState = next;
       todoCadence = { ...todoCadence, assistantIterationsSinceTodoWrite: 0 };
+      reminderSinceTodoWrite = false;
     }
     if (isTodoCadenceReminder(message)) {
       todoCadence = { ...todoCadence, assistantIterationsSinceReminder: 0 };
+      reminderSinceTodoWrite = true;
     }
   });
 
-  return todoState === undefined ? {} : { todoState, todoCadence };
+  return todoState === undefined
+    ? { reminderSinceTodoWrite }
+    : { todoState, todoCadence, reminderSinceTodoWrite };
 }
 
 function isTodoCadenceReminder(message: AgentMessage): boolean {

@@ -152,6 +152,10 @@ export interface ConversationMutationWorkflowDependencies {
     ): Promise<ConversationEditAdmissionResult>;
   };
   readonly questionnaires: RewindEditQuestionnairePort;
+  /** §2.5: side Sessions inherit the parent's permission mode. */
+  readonly sessionPermissionModes?: {
+    inherit(childSessionId: string, parentSessionId: string): void;
+  };
   readonly worktree: ForkWorktreePort;
   readonly attachmentRegistration: LocalAttachmentRegistrationPort;
   readonly publishGlobalEvent: GlobalEventPublisher;
@@ -233,6 +237,7 @@ function createForkService(
     assets: input.sessionFork.assets,
     state: input.forkState,
     operations,
+    sessionPermissionModes: input.sessionPermissionModes,
     worktree: input.worktree,
     sessionDataVersion: input.sessionFork.sessionDataVersion,
     history: {

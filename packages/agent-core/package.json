@@ -3,6 +3,10 @@
   "version": "0.2.1",
   "description": "Shared agent runtime contracts and PiTurnRunner assembly layer for Mavis local/cloud hosts.",
   "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
   "types": "./src/index.ts",
   "exports": {
     ".": {
@@ -78,7 +82,7 @@
   },
   "devDependencies": {
     "@mavis/config": "workspace:^",
-    "@types/node": "^20",
+    "@types/node": "^22",
     "tsx": "^4",
     "typescript": "^5",
     "vitest": "^2"

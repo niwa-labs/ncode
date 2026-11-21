@@ -183,6 +183,7 @@ export const PermissionReply = {
   AllowOnce: 0,
   AllowAlways: 1,
   Deny: 2,
+  DenyAlways: 3,
 } as const;
 
 export type PermissionReply =
@@ -588,6 +589,8 @@ export interface SendMessageInput {
   attachments?: AttachmentInput[];
   turnId?: string;
   clientIntent?: string;
+  /** The sender owns an interactive composer (TUI); gates optional UI-only work. */
+  interactiveSurface?: boolean;
   enableTeam?: boolean;
   reviewRequest?: ReviewRequest;
 }
@@ -950,6 +953,8 @@ export interface EnqueueMessageInput {
   expiresAt?: number;
   reviewRequest?: ReviewRequest;
   clientIntent?: string;
+  /** The sender owns an interactive composer (TUI); gates optional UI-only work. */
+  interactiveSurface?: boolean;
 }
 
 export interface EnqueueMessageResult {

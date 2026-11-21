@@ -10,7 +10,11 @@ type GuardEventSource = Pick<EventEmitter, 'on' | 'off'>;
 export interface TuiProcessLike extends GuardEventSource {
   readonly stdout: GuardEventSource;
   readonly stderr: GuardEventSource;
-  exitCode?: string | number;
+  // `null` is part of Node's own `Process.exitCode` surface (@types/node 22);
+  // keeping it in the union lets the real `process` object satisfy this
+  // structural contract under both the root (@types/node 22) and per-package
+  // (@types/node 20) tsc programs. Guards only ever write `1` here.
+  exitCode?: string | number | null;
 }
 
 export interface TuiProcessGuardOptions {

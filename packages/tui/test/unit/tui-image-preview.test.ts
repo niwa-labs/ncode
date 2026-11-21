@@ -2,8 +2,12 @@ import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // Test-only packaging infrastructure belongs to the repository root, not a runtime package.
-// eslint-disable-next-line import/no-relative-packages
-import { packageExportEntries } from '../../../../scripts/lib/package-exports.mjs';
+/* eslint-disable import/no-relative-packages */
+import {
+  packageExportEntries,
+  resolveExportSpecifier,
+} from '../../../../scripts/lib/package-exports.mjs';
+/* eslint-enable import/no-relative-packages */
 // eslint-disable-next-line import/no-relative-packages -- read the source-only bundle scope
 import { readExtraction } from '../../../../scripts/lib/release-metadata.mjs';
 // eslint-disable-next-line import/no-relative-packages -- reuse the real bundle module-location contract
@@ -197,10 +201,14 @@ describe('preview file loader', () => {
           name: 'preview-test-pi-source',
           setup(builder) {
             builder.onResolve({ filter: /^@earendil-works\/pi-/ }, ({ path }) => {
-              const entry = entries.find((candidate) => candidate.specifier === path);
-              if (!entry) return undefined;
+              // Wildcard subpath exports (for example `@earendil-works/pi-ai/providers/all`)
+              // expand through the shared derivation, matching the TypeScript path
+              // mapping; an unresolved specifier falls through to normal resolution
+              // and is caught by the dist-leak assertion below.
+              const file = resolveExportSpecifier(root, entries, path);
+              if (!file) return undefined;
               return {
-                path: join(root, entry.file),
+                path: join(root, file),
               };
             });
           },

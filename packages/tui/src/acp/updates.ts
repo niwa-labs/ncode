@@ -77,6 +77,21 @@ export class TuiAcpUpdateProjector {
 
   private projectTool(tool: TuiToolCall): acp.SessionUpdate | undefined {
     if (tool.id && this.completedToolIds.has(tool.id)) return undefined;
+    // A streaming delta arrives BEFORE the tool's arguments are assembled: it
+    // carries the id but no input, so emitting it would register the call
+    // bare on the wire and the context would ride a later tool_call_update
+    // that ring-style UIs never read (incident 2026-11-15: kagero's run ring
+    // showed `bash` with no command for the whole live run). Wait for the
+    // execution start/end emissions, which always carry the assembled input;
+    // terminal outcomes without input still surface (they cannot be superseded).
+    if (
+      tool.input === undefined &&
+      tool.id !== undefined &&
+      tool.status !== 'completed' &&
+      tool.status !== 'failed'
+    ) {
+      return undefined;
+    }
     const key = tool.id ? `id:${tool.id}` : `name:${tool.name}`;
     const existingId = this.toolIds.get(key);
     const toolCallId = existingId ?? tool.id ?? `minimax-code-tool-${this.nextAnonymousToolId++}`;
@@ -84,6 +99,7 @@ export class TuiAcpUpdateProjector {
     const content = toolContent(tool);
     const locations = toolLocations(tool);
     const rawOutput = tool.output ?? (tool.error === undefined ? undefined : { error: tool.error });
+    const meta = toolMeta(tool);
 
     if (!existingId) {
       if (status === 'completed' || status === 'failed') {
@@ -102,6 +118,7 @@ export class TuiAcpUpdateProjector {
         rawOutput,
         content,
         locations,
+        ...(meta.size > 0 ? { _meta: Object.fromEntries(meta) } : {}),
       });
     }
 
@@ -117,8 +134,25 @@ export class TuiAcpUpdateProjector {
       rawOutput,
       content,
       locations,
+      ...(meta.size > 0 ? { _meta: Object.fromEntries(meta) } : {}),
     });
   }
+}
+
+/**
+ * §4 `decidedBy`: the permission mark rides the `_meta` of `tool_call` and
+ * of every `tool_call_update` that carries it (in_progress and the final
+ * completed/failed). No new session/update messages are introduced.
+ */
+function toolMeta(tool: TuiToolCall): Map<string, unknown> {
+  const meta = new Map<string, unknown>();
+  if (tool.parentToolCallId !== undefined) {
+    meta.set('minimax-code/parentToolCallId', tool.parentToolCallId);
+  }
+  if (tool.permission !== undefined) {
+    meta.set('minimax-code/permission', tool.permission);
+  }
+  return meta;
 }
 
 export function tuiAcpToolKind(name: string): acp.ToolKind {

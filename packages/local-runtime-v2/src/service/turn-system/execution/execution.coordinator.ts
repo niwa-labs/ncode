@@ -37,12 +37,20 @@ export interface ExecutionCoordinatorOptions {
       readonly sessionId: string;
       readonly turnId: string;
     }): Promise<void>;
-    /**
-     * Read-only probe for discarded steering of the Turn that is not durable
-     * yet. Missing means none; a throwing probe counts as pending.
-     */
-    hasPendingForTurn?(input: { readonly sessionId: string; readonly turnId: string }): boolean;
   };
+  /**
+   * I-PUB-1b (W1, architecture §3.2): flush the session's jsonl publisher
+   * AFTER the last durable write of the Turn (`commitDiscardedSteering`) and
+   * BEFORE the repository settlement releases the turn lease, so the next
+   * lease holder (the app 3.1.6 or another runtime) never appends onto our
+   * unpublished jsonl tail. Non-throwing by contract: a failed flush marks
+   * the session publish-stale; durable stays the source of truth and the
+   * settlement never blocks on it.
+   */
+  readonly publishBeforeRelease?: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+  }) => Promise<void>;
   readonly turnSettlement?: {
     settle(input: {
       readonly sessionId: string;
@@ -56,14 +64,6 @@ export interface ExecutionCoordinatorOptions {
      */
     abandon?(input: { readonly sessionId: string; readonly turnId: string }): Promise<void>;
   };
-  /** Best-effort diagnostics; a failing logger never changes a Turn outcome. */
-  readonly logger?: ExecutionCoordinatorLogger;
-}
-
-interface ExecutionCoordinatorLogger {
-  warn(fields: Record<string, unknown>, message: string): void;
-  error?(fields: Record<string, unknown>, message: string): void;
-  debug?(fields: Record<string, unknown>, message: string): void;
 }
 
 /**
@@ -144,10 +144,6 @@ async function settleAgentTurn(
     outcome = await pending;
   } catch (error) {
     outcome = { status: 'failed', error };
-    // Close admission cancellation before this terminal write; settleAndRelease
-    // repeats the idempotent call.
-    options.onBeginSettlement?.(turn.sessionId, turn.turnId);
-    await projectPostHostFailure(options, turn, error);
   }
   const settlementError = await settleAndRelease(options, {
     turn,
@@ -158,44 +154,6 @@ async function settleAgentTurn(
       (outcome.waitingForUser !== true || request.provenance.source === 'thread-goal'),
   });
   return settlementError ? { status: 'failed', error: settlementError } : outcome;
-}
-
-/**
- * A rejected Host run may have died before writing its own terminal Session
- * state (for example when a full disk fails that write), which would leave the
- * Session `started` forever. Project the failure once more while this Turn
- * still holds its durable lock and in-process owner. When the Host already
- * wrote its terminal, the Session state fence rejects this write as a
- * conflict: an expected no-op that never changes the Turn outcome.
- */
-async function projectPostHostFailure(
-  options: ExecutionCoordinatorOptions,
-  turn: AcceptedAgentTurn,
-  error: unknown,
-): Promise<void> {
-  try {
-    await options.failures.project({
-      sessionId: turn.sessionId,
-      turnId: turn.turnId,
-      turnSequence: turn.acceptedSequence,
-      eventId: `${turn.turnId}:post-host-failed`,
-      error,
-    });
-  } catch (projectionError) {
-    try {
-      options.logger?.debug?.(
-        {
-          event: 'turn_post_host_failure_projection_skipped',
-          session_id: turn.sessionId,
-          turn_id: turn.turnId,
-          error: describeError(projectionError),
-        },
-        '[local-runtime-v2] Post-Host failure projection skipped',
-      );
-    } catch {
-      // Diagnostics must never change the Turn outcome.
-    }
-  }
 }
 
 async function settlePreHostFailure(
@@ -298,6 +256,20 @@ async function settleAndRelease(
     // the queued item pre-host.
     await commitDiscardedSteering(options, input.turn);
   }
+  // I-PUB-1b (W0 F8): the jsonl flush lands between the last durable write
+  // of the turn and the repository settlement that releases the turn lease.
+  // The sink is non-throwing by contract; the defensive catch keeps a
+  // misbehaving sink from ever blocking the settlement.
+  if (options.publishBeforeRelease) {
+    try {
+      await options.publishBeforeRelease({
+        sessionId: input.turn.sessionId,
+        turnId: input.turn.turnId,
+      });
+    } catch {
+      // The publisher marks the session publish-stale; settlement proceeds.
+    }
+  }
   const queuePauseCause = terminalQueuePauseCause(input);
   const settlement = await settleRepository(options.repository, {
     sessionId: input.turn.sessionId,
@@ -306,10 +278,7 @@ async function settleAndRelease(
     outcome: input.outcome,
     ...(queuePauseCause ? { queuePauseCause } : {}),
   });
-  if (settlement.error) {
-    await releaseUnsettledTurn(options, input, settlement.error);
-    return settlement.error;
-  }
+  if (settlement.error) return settlement.error;
   if (input.controllerTurn) options.controller.complete(input.controllerTurn);
   const productSettlementError = shouldSettleProductTurn(settlement.value, input.turn)
     ? await settleRequiredProductTurn(options.turnSettlement, {
@@ -318,7 +287,15 @@ async function settleAndRelease(
         status: input.outcome,
       })
     : undefined;
-  if (shouldWakeQueue(settlement.value, productSettlementError, input.wakeQueue, input.outcome)) {
+  if (
+    shouldWakeQueue(
+      settlement.value,
+      productSettlementError,
+      input.wakeQueue,
+      input.outcome,
+      input.turn.busyReason,
+    )
+  ) {
     try {
       await options.released.publish(input.turn.sessionId);
     } catch {
@@ -329,81 +306,6 @@ async function settleAndRelease(
   return settlement.value?.status === 'stale-owner'
     ? new Error(`Turn settlement lost ownership: ${input.turn.sessionId}/${input.turn.turnId}`)
     : undefined;
-}
-
-/**
- * Terminal persistence failed after its retry. The repository keeps a pending
- * settlement that the next admission recovers inside its own transaction,
- * failing the Turn and applying the same Queue pause, so the durable lock heals
- * itself. The in-process owner has no such recovery: left registered, a stop
- * times out and every later send or rewind of the Session fails until the
- * Runtime restarts. Release it here unless discarded steering of this Turn is
- * still unpersisted. No Queue wake: nothing durable changed, and the next
- * admission must recover the lock and pause first.
- */
-async function releaseUnsettledTurn(
-  options: ExecutionCoordinatorOptions,
-  input: {
-    readonly turn: Pick<RegisterAcceptedTurnInput, 'sessionId' | 'turnId' | 'busyReason'>;
-    readonly outcome: TurnTerminalOutcome;
-    readonly controllerTurn?: AcceptedAgentTurn | AcceptedCompactionTurn;
-  },
-  error: unknown,
-): Promise<void> {
-  const release = !hasUnpersistedSteering(options, input.turn);
-  // The decision and the release stay synchronous: no await in between.
-  if (release && input.controllerTurn) options.controller.complete(input.controllerTurn);
-  logSettlementPersistenceFailure(options, input, error, release);
-  if (release && input.turn.busyReason === 'turn' && options.turnSettlement) {
-    await abandonProductTurn(options.turnSettlement, input.turn);
-  }
-}
-
-function hasUnpersistedSteering(
-  options: ExecutionCoordinatorOptions,
-  turn: Pick<RegisterAcceptedTurnInput, 'sessionId' | 'turnId'>,
-): boolean {
-  const steering = options.steeringTeardown;
-  if (!steering?.hasPendingForTurn) return false;
-  try {
-    return steering.hasPendingForTurn({ sessionId: turn.sessionId, turnId: turn.turnId });
-  } catch {
-    // Unknown durability: keep the owner rather than let the next Turn overtake it.
-    return true;
-  }
-}
-
-function logSettlementPersistenceFailure(
-  options: ExecutionCoordinatorOptions,
-  input: {
-    readonly turn: Pick<RegisterAcceptedTurnInput, 'sessionId' | 'turnId' | 'busyReason'>;
-    readonly outcome: TurnTerminalOutcome;
-  },
-  error: unknown,
-  ownerReleased: boolean,
-): void {
-  const logger = options.logger;
-  if (!logger) return;
-  try {
-    const fields = {
-      event: 'turn_settlement_persist_failed',
-      session_id: input.turn.sessionId,
-      turn_id: input.turn.turnId,
-      busy_reason: input.turn.busyReason,
-      outcome: input.outcome,
-      owner_released: ownerReleased,
-      error: describeError(error),
-    };
-    const message = '[local-runtime-v2] Turn settlement persistence failed';
-    if (logger.error) logger.error(fields, message);
-    else logger.warn(fields, message);
-  } catch {
-    // Diagnostics must never change the Turn outcome.
-  }
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -455,13 +357,18 @@ function shouldWakeQueue(
   productSettlementError: unknown | undefined,
   wakeQueue: boolean,
   outcome: TurnTerminalOutcome,
+  busyReason: 'turn' | 'compaction',
 ): boolean {
-  return (
-    settlement?.status !== 'stale-owner' &&
-    !productSettlementError &&
-    wakeQueue &&
-    outcome !== 'aborted'
-  );
+  if (settlement?.status === 'stale-owner' || productSettlementError || !wakeQueue) return false;
+  // Wave-0 item 0.6 (canon 05 §2.3): the queue starts after EVERY terminal
+  // event of a compaction turn, abort included — the owner's Esc stops the
+  // COMPACTION, not their attendance, and input that accumulated during the
+  // compaction (the TUI's queue fallback) must be delivered, not stranded
+  // behind a released lease. The user-stop pause semantics stay untouched
+  // for OWNER turns (a stop means "stop attending; pending instructions
+  // wait"): only the compaction lease's terminal is always a wake.
+  if (busyReason === 'compaction') return true;
+  return outcome !== 'aborted';
 }
 
 async function settleRequiredProductTurn(

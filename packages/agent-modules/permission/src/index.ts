@@ -48,6 +48,8 @@ export type {
 // ── Deterministic safety registries (verbatim regex source of truth) ──
 export {
   HARD_BLOCKED_REGISTRY,
+  HARD_BLOCKED_CATEGORIES,
+  BYPASS_IMMUNE_SAFETY_CATEGORIES,
   SOFT_RISK_REGISTRY,
   SUBCOMMAND_DANGEROUS_PATTERNS,
   ALL_DANGEROUS_COMMAND_PATTERNS,

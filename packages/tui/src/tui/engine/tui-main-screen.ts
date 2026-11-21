@@ -1,29 +1,27 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { createLogger } from "@mavis/logging";
 import { deleteKittyImage, isImageLine } from "./terminal-image.js";
 import { type Component, type TUI, TuiBase, type TuiStopOptions } from "./tui.js";
 import { stripTerminalSequences, visibleWidth } from "./utils.js";
 
+// Scrollback reconstructions and resize handling; same namespace as the
+// headless runner (registered as `mcode:tui` in the logging spec §4).
+const log = createLogger("mcode:tui");
+
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const MAX_RENDER_WRITE_CHARS = 1024 * 1024;
-// OSC 133 zone marks are internal navigation sentinels produced by transcript components.
-// They must never reach the real terminal from regular mode: terminals with semantic-history
-// UI (iTerm2 marks/command bars) render one gutter mark per zone, and repainting lines that
-// carry 133;B/133;C displaces the emulator cursor during differential updates. Fullscreen
-// rendering already strips them before every write; regular mode mirrors that contract.
+// OSC 133 zone marks are internal navigation sentinels produced by transcript components (L033).
+// They must never reach the real terminal from regular mode; fullscreen strips them separately.
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
-// Differential rendering moves the cursor by logical rows, so a rendered line must never
-// occupy two physical rows. Terminals can draw a cluster wider than visibleWidth() measures
-// (e.g. xterm.js in VS Code draws ZWJ emoji as separate glyphs); with autowrap on, a
-// full-width padded line then soft-wraps and every later frame lands one row lower.
-// Disable autowrap only inside each frame, as the fullscreen renderer already does, so
-// the terminal is back in its default state between frames and after exit.
-const BEGIN_RENDER_FRAME = "\x1b[?2026h\x1b[?7l";
-const END_RENDER_FRAME = "\x1b[?7h\x1b[?2026l";
 
 /**
- * Streams terminal output in bounded chunks so a large render never forms one
- * string large enough to exceed V8's maximum string length.
+ * Streams terminal output in 1 MiB chunks so a full render never forms one string large enough to exceed V8's limit.
+ *
+ * `append()` fills the current chunk and flushes it when full. Oversized input is split at chunk boundaries, preserving
+ * surrogate pairs so each write remains valid UTF-16. Callers append synchronized-output begin/end sequences themselves;
+ * the final `flush()` writes any remainder, including the end sequence.
  */
 class BoundedTerminalWriter {
 	private buffer = "";
@@ -34,6 +32,10 @@ class BoundedTerminalWriter {
 		this.write = write;
 	}
 
+	/**
+	 * Append terminal data, flushing full chunks as needed. Callers must call `flush()` after the final append.
+	 * @param value Terminal data to write in order; oversized values are split without splitting surrogate pairs.
+	 */
 	append(value: string): void {
 		let offset = 0;
 		while (offset < value.length) {
@@ -46,7 +48,6 @@ class BoundedTerminalWriter {
 			let end = Math.min(value.length, offset + capacity);
 			if (
 				end < value.length &&
-				end > offset &&
 				value.charCodeAt(end - 1) >= 0xd800 &&
 				value.charCodeAt(end - 1) <= 0xdbff &&
 				value.charCodeAt(end) >= 0xdc00 &&
@@ -61,10 +62,13 @@ class BoundedTerminalWriter {
 
 			this.buffer += value.slice(offset, end);
 			offset = end;
-			if (this.buffer.length === MAX_RENDER_WRITE_CHARS) this.flush();
+			if (this.buffer.length === MAX_RENDER_WRITE_CHARS) {
+				this.flush();
+			}
 		}
 	}
 
+	/** Write the current chunk, if any, and retain only its character count for debug output. */
 	flush(): void {
 		if (!this.buffer) return;
 		this.write(this.buffer);
@@ -172,6 +176,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Some hosts repeat resize notifications while scrolling or reconnecting.
 		// An unchanged geometry must not clear and replay native scrollback.
 		if (this.previousWidth === this.terminal.columns && this.previousHeight === this.terminal.rows) return;
+		log.debug("terminal.resize", {
+			width: this.terminal.columns,
+			height: this.terminal.rows,
+			previousWidth: this.previousWidth,
+			previousHeight: this.previousHeight,
+			deferredReplay: this.previousLines.length > 0 && !isTermuxSession(),
+		});
 		// Render the visible tail now; replay native scrollback only after the drag settles.
 		if (this.previousLines.length > 0 && !isTermuxSession()) {
 			if (this.resizeTimer) clearTimeout(this.resizeTimer);
@@ -230,6 +241,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 		super.stop(options);
 	}
+
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -327,7 +339,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		let expandedLastChanged = lastChanged;
 		const expandForLines = (lines: string[]): void => {
 			for (let i = 0; i < lines.length; i++) {
-				if (extractKittyImageIds(lines[i]!).length === 0) continue;
+				if (extractKittyImageIds(lines[i]).length === 0) continue;
 				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
 				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
 					expandedFirstChanged = Math.min(expandedFirstChanged, i);
@@ -374,8 +386,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		};
 
 		// Render all components to get new lines. Strip OSC 133 zone sentinels before the
-		// differential compare so they never enter previousLines or any terminal write.
-		let newLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+		// differential compare so they never enter previousLines or any terminal write (L033).
+		// Resolve fake cursors before compositing so overlays and line slicing see plain SGR codes.
+		let newLines = this.resolveFakeCursors(this.render(width)).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		// A root may drop leading rows that already sit in native scrollback. Rebase the
 		// retained state so later diffs address the shorter document without a replay.
 		const discardedRows = this.children.length === 1
@@ -415,9 +428,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 
 		// A native scrollback viewport cannot move backwards without clearing history.
-		// When only addressable rows shrink, absorb the freed rows at the top of the
-		// screen instead. The composer stays at the bottom, historical rows stay unique,
-		// and later output consumes this temporary space before scrolling again.
+		// When only addressable rows shrink, absorb the freed rows instead. The
+		// composer stays at the bottom, historical rows stay unique, and later output
+		// consumes this temporary space before scrolling again. The padding replaces
+		// the removed rows at the first row where the documents diverge, so rows above
+		// the change area — including final rows still visible at the top of the
+		// screen, such as the welcome banner — keep their positions instead of being
+		// blanked and shifted down (visual corruption during append-only streaming).
 		// L047: an output-driven layout shrink uses the same padding instead of an
 		// immediate reconstruction, and reconstructs after the next user input.
 		if (
@@ -435,8 +452,21 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				}
 			}
 			if (unchangedHistory) {
+				// Insert the padding where rows were removed, never above the previous
+				// viewport (style-only history changes must not move the padding into
+				// rows native scrollback already owns). A strict-prefix shrink pads
+				// after the remaining content, replacing its dropped tail. Compare
+				// stripped text: previousLines carry trailing resets from a prior
+				// applyLineResets while newLines are still raw here.
+				let padAt = newLines.length;
+				for (let i = 0; i < newLines.length; i++) {
+					if (stripTerminalSequences(this.previousLines[i] ?? "") !== stripTerminalSequences(newLines[i] ?? "")) {
+						padAt = Math.max(prevViewportTop, i);
+						break;
+					}
+				}
 				const padding = Array<string>(prevViewportTop + height - newLines.length).fill("");
-				newLines = [...newLines.slice(0, prevViewportTop), ...padding, ...newLines.slice(prevViewportTop)];
+				newLines = [...newLines.slice(0, padAt), ...padding, ...newLines.slice(padAt)];
 				if (!stableLayout) this.deferHistoryReplay();
 			}
 		}
@@ -466,7 +496,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				: 0;
 			this.fullRedrawCount += 1;
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-			output.append(BEGIN_RENDER_FRAME); // Begin synchronized output
+			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
 				if (viewportOnly) {
@@ -509,8 +539,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			this.previousViewportTop = Math.max(start, newLines.length - height);
 			this.positionHardwareCursor(cursorPos, newLines.length, output);
-			output.append(END_RENDER_FRAME); // Present only after restoring the input cursor.
+			output.append("\x1b[?2026l"); // Present only after restoring the input cursor.
 			output.flush();
+			// Render observability: a full render repaints every row it writes.
+			this.frameChangedLines = newLines.length - start;
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -519,7 +551,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string, detail = ""): void => {
-			if (!debugRedraw) return;
+			// Scrollback reconstruction event for the structured mcode:tui log;
+			// scalar fields only, the PI_DEBUG_REDRAW file dump below is unchanged.
+			log.debug("render.reconstruct", {
+				reason,
+				detail: detail || undefined,
+				previousLines: this.previousLines.length,
+				newLines: newLines.length,
+				height,
+			});
+			if (!debugRedraw || this.logDirectory === undefined) return;
 			const logPath = path.join(this.logDirectory, "pi-debug.log");
 			// Several sessions may share one log file; the pid tells them apart.
 			const msg = `[${new Date().toISOString()}] [pid ${process.pid}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})${detail}\n`;
@@ -613,7 +654,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Content shrunk below the working area and no overlays - re-render to clear empty rows
 		// (overlays need the padding, so only do this when no overlays are active)
-		// Configurable via setClearOnShrink() or PI_CLEAR_ON_SHRINK=0 env var
+		// Configurable via setClearOnShrink()
 		if (this.getClearOnShrink() && newLines.length < this.maxLinesRendered && !this.hasOverlayEntries) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
 			fullRender(true, true);
@@ -661,7 +702,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (firstChanged >= newLines.length) {
 			if (this.previousLines.length > newLines.length) {
 				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-				output.append(BEGIN_RENDER_FRAME);
+				output.append("\x1b[?2026h");
 				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
@@ -696,8 +737,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 				this.positionHardwareCursor(cursorPos, newLines.length, output);
-				output.append(END_RENDER_FRAME);
+				output.append("\x1b[?2026l");
 				output.flush();
+				// Render observability: only the cleared rows changed.
+				this.frameChangedLines = extraLines;
 			}
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
@@ -727,7 +770,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Render from first changed line to end
 		// Keep updates wrapped in synchronized output while writing bounded chunks.
 		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
-		output.append(BEGIN_RENDER_FRAME); // Begin synchronized output
+		output.append("\x1b[?2026h"); // Begin synchronized output
 		output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
@@ -759,13 +802,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) output.append("\r\n");
-			const line = newLines[i]!;
+			const line = newLines[i];
 			const isImage = isImageLine(line);
 			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
 				const imageStartScreenRow = i - viewportTop;
 				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {
-					logRedraw(`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`);
+					logRedraw(
+						`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
+					);
 					fullRender(true);
 					return;
 				}
@@ -784,7 +829,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			output.append("\x1b[2K"); // Clear current line
 			if (!isImage && visibleWidth(line) > width) {
 				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(this.logDirectory, "pi-crash.log");
+				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
@@ -872,9 +917,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Restore the IME anchor before presenting the frame, including cursor visibility.
 		this.positionHardwareCursor(cursorPos, newLines.length, output);
-		output.append(END_RENDER_FRAME);
+		output.append("\x1b[?2026l");
 		output.flush();
 
+		// Render observability: rewritten range plus rows cleared below the tail.
+		this.frameChangedLines =
+			finalCursorRow - firstChanged + 1 + Math.max(0, this.previousLines.length - newLines.length);
 		this.previousLines = newLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		this.previousWidth = width;

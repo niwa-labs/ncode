@@ -1,4 +1,6 @@
-# Maintainers and contribution workflow
+# Upstream maintainers and governance
+
+This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
 
 ## Responsibility
 

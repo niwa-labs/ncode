@@ -88,23 +88,43 @@ async function capture(
   // leases, rather than sampling stale configuration.
   await Promise.all([input.plugin.ready(), input.mcp.ready()]);
   const turnId = `session-agent-capture:${session.sessionId}:${profile.exactOwnerName}`;
-  const lease = await input.turnCapabilities.acquire({ sessionId: session.sessionId, turnId });
+  const lease = await input.turnCapabilities.acquire({
+    sessionId: session.sessionId,
+    turnId,
+  });
   try {
-    const builtinCapabilities = input.product.capabilities
-      ? await input.product.capabilities.resolve(profile.exactOwnerName)
-      : undefined;
+    // The rendered profile already owns the capability ceiling. Plugin
+    // delegates have no persisted Agent row to resolve a second time.
+    const ceiling = profile.capabilityCeiling;
+    const builtinCapabilities = {
+      persona: { enabled: ceiling.personaEnabled },
+      tools: ceiling.tools ? [...ceiling.tools] : undefined,
+      builtinTools: ceiling.builtinTools ? [...ceiling.builtinTools] : undefined,
+      skills: ceiling.skills ? [...ceiling.skills] : undefined,
+      features: { ...ceiling.features },
+    };
+    const resourceScope = {
+      ...(profile.excludeAgentResources ? { excludeAgentResources: true } : {}),
+      ...(profile.skipAgentResolution ? { skipAgentResolution: true } : {}),
+      ...(profile.expectedAgentInstanceId
+        ? { expectedAgentInstanceId: profile.expectedAgentInstanceId }
+        : {}),
+    };
     const sources = await input.product.toolSources.resolve({
       session,
       turnId,
       resourceAgentName: profile.resourceReadRef,
-      ...(builtinCapabilities ? { builtinCapabilities } : {}),
+      ...resourceScope,
+      builtinCapabilities,
       toolsDisabled: process.env.MAVIS_LOCAL_RUNTIME_DISABLE_TOOLS === '1',
       cuModeActive: input.product.turnRuntimeFacts.snapshot().cuModeActive,
       ...(lease.capabilities ? { desktopCapabilities: lease.capabilities } : {}),
     });
-    const runtimeSkills = await input.product.preparation.configBuilder.skills.listRuntimeSkills(
-      skillReadScope(session, profile),
-    );
+    const runtimeSkills = await input.product.preparation.configBuilder.skills.listRuntimeSkills({
+      agentName: profile.resourceReadRef,
+      ...resourceScope,
+      workspaceDir: session.workspaceDir,
+    });
     return {
       sources,
       ...(lease.capabilities ? { desktopCapabilities: lease.capabilities } : {}),
@@ -116,14 +136,4 @@ async function capture(
   } finally {
     lease.release();
   }
-}
-
-/** A frozen owner without an Agent row (Plugin Agent) must not resolve Agent resources. */
-function skillReadScope(session: SessionRecord, profile: AgentExecutionProfile) {
-  return {
-    agentName: profile.resourceReadRef,
-    workspaceDir: session.workspaceDir,
-    ...(profile.excludeAgentResources ? { excludeAgentResources: true } : {}),
-    ...(profile.skipAgentResolution ? { skipAgentResolution: true } : {}),
-  };
 }

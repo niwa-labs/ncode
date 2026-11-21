@@ -1,6 +1,5 @@
 export { isTelemetryChannelEnabled, type TelemetryChannel } from './telemetry-policy.js';
 export { isLocalSourceProvenanceEnabled } from './source-provenance.js';
-export { isPtcTurnEnabled, type PtcTurnFacts } from './ptc-turn.js';
 export { writeTuiStatusLineSetting } from './tui-status-line-write.js';
 export { parseRunawayGuardOverride, resolveRunawayGuardConfig } from './runaway-guard-config.js';
 export type { RunawayGuardSettings, RunawayGuardOverride } from './runaway-guard-config.js';
@@ -32,7 +31,6 @@ export {
   allowsManagedMinimaxProviderOverride,
   isBetaFeatureProdReady,
   resolveBetaFeature,
-  currentBetaResolutionContext,
   isInternalBuild,
   isManagedRuntime,
   getRuntimePresetKey,
@@ -40,17 +38,6 @@ export {
   isProposalEligibleAgent,
 } from './config.js';
 export { minimaxApiModels } from './byok-config.js';
-export {
-  CONVERSATION_STOP_CONFIG_DEFAULTS,
-  parseConversationStopConfig,
-  readConversationStopConfig,
-} from './conversation-config.js';
-export type {
-  ConversationStopConfig,
-  ConversationStopConfigRead,
-  ConversationStopReadFailure,
-  ConversationStopValueSource,
-} from './conversation-config.js';
 export {
   GOAL_CONFIG_DEFAULTS,
   GOAL_CONFIG_LIMITS,
@@ -97,6 +84,52 @@ export {
   resolveDataDir,
 } from './data-dir.js';
 export type { DataDirMigrationLogger, ResolveDataDirOptions } from './data-dir.js';
+export {
+  DEFAULT_PROFILE_NAME,
+  InvalidProfileNameError,
+  LEGACY_PROFILE_ENV_VAR,
+  PROFILE_ENV_VAR,
+  assertValidProfileName,
+  isValidProfileName,
+  listProfiles,
+  normalizeProfileSelector,
+  readProfileEnv,
+  resolveProfileDataDirPaths,
+} from './auth-profile.js';
+export type { DataDirProfilePaths, DiscoveredProfile } from './auth-profile.js';
+export {
+  ControlRootInsecureError,
+  DAEMON_CONTROL_ROOT_DIR_PREFIX,
+  DEFAULT_SESSIONS_GENERATION,
+  DURABLE_CAS_DIR_BASENAME,
+  DURABLE_ROOT_BASENAME,
+  DURABLE_RUNTIME_DB_BASENAME,
+  DURABLE_SESSIONS_DB_BASENAME,
+  DURABLE_SOCKET_BASENAME,
+  LEGACY_ROOT,
+  LegacyWriteError,
+  MCODED_SOCKET_PATH_MAX_BYTES,
+  MCODE_SERVER_MODE_ENV,
+  ServerModeConfigError,
+  ServerModeOffError,
+  assertDaemonStartAllowed,
+  assertNoLegacyWrite,
+  assertSecureControlRoot,
+  ensureControlRootLayout,
+  ensureDurableLayout,
+  profileOfDataDir,
+  resolveCasDirPath,
+  resolveDaemonControlRoot,
+  resolveDurableRoot,
+  resolveFallbackMcodedSocketDir,
+  resolveFallbackMcodedSocketPath,
+  resolveMcodedSocketPath,
+  resolveRealPath,
+  resolveRuntimeDbPath,
+  resolveServerMode,
+  resolveSessionsDbPath,
+} from './durable-paths.js';
+export type { DaemonControlRootOptions, DataDirProfileInference, ServerMode } from './durable-paths.js';
 export {
   isLegacyManagedMinimaxProvider,
   isManagedProviderBaseUrl,
@@ -172,8 +205,6 @@ export {
   parseToolResultCompactionConfig,
 } from './tool-result-compaction-config.js';
 export type { ToolResultCompactionSettings } from './tool-result-compaction-config.js';
-export { REQUEST_MEDIA_DEFAULTS, parseRequestMediaConfig } from './request-media-config.js';
-export type { RequestImageSettings, RequestMediaSettings } from './request-media-config.js';
 export {
   parseSandboxConfig,
   getSandboxConfigDefaults,
@@ -181,10 +212,12 @@ export {
 } from './sandbox-config.js';
 export type {
   SandboxConfig,
+  SandboxFilesystemMode,
   SandboxFilesystemPolicy,
   SandboxLocalAccess,
   SandboxNetworkPolicy,
 } from './sandbox-config.js';
+export { SANDBOX_FILESYSTEM_MODE_NAMES } from './sandbox-settings.js';
 export {
   AGENT_BUILTIN_MCP_TOOL_IDS,
   AGENT_BUILTIN_SKILL_IDS,
@@ -269,3 +302,15 @@ export type {
   ResolveProviderAuthModeInput,
   ResolvedProviderAuthMode,
 } from './provider-auth-mode.js';
+
+export {
+  CONVERSATION_STOP_CONFIG_DEFAULTS,
+  readConversationStopConfig,
+} from './conversation-config.js';
+export type {
+  ConversationStopConfig,
+  ConversationStopConfigRead,
+} from './conversation-config.js';
+
+export { REQUEST_MEDIA_DEFAULTS, parseRequestMediaConfig } from './request-media-config.js';
+export type { RequestImageSettings, RequestMediaSettings } from './request-media-config.js';

@@ -59,7 +59,7 @@ export type TuiPermissionEvent =
   | (TuiRuntimeEventBase & {
       type: 'permission.resolved';
       requestId: string;
-      decision?: 'allowOnce' | 'allowAlways' | 'deny';
+      decision?: 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways';
     });
 
 export type TuiSessionCatalogEvent =
@@ -100,7 +100,6 @@ export type TuiCompactionEvent = TuiRuntimeEventBase & {
 export type TuiContentLifecycleEvent =
   | (TuiRuntimeEventBase & {
       type: 'content.retry.exceeded';
-      turnId?: string;
       variant: 'content' | 'network' | 'auth';
       lastUserMsgId?: string;
     })
@@ -109,12 +108,42 @@ export type TuiContentLifecycleEvent =
       contextReset?: boolean;
     });
 
+/** W1 §3.4: the durable→jsonl publisher preserved a conflicting foreign rewrite. */
+export type TuiSessionPublishConflictEvent = TuiRuntimeEventBase & {
+  type: 'session.publish_conflict';
+  sessionId: string;
+  /** Path of the preserved `messages.external-<ts>.jsonl` evidence copy, when preserved. */
+  preservedTo?: string;
+  durableEntries: number;
+  publishedEntries: number;
+};
+
 export type TuiRotationEvent = TuiRuntimeEventBase & {
   type: 'rotation.completed';
   agentName: string;
   oldSessionId: string;
   newSessionId: string;
   reason: string;
+};
+
+/** Post-turn next-message suggestion, offered in the composer. */
+export type TuiPromptSuggestionEvent = TuiRuntimeEventBase & {
+  type: 'turn.prompt_suggestion.generated';
+  sessionId: string;
+  turnId: string;
+  suggestion: string;
+  promptVersion?: string;
+  elapsedMs?: number;
+};
+
+/** Advisory generation status; the TUI listens mostly for cancellation. */
+export type TuiPromptSuggestionStatusEvent = TuiRuntimeEventBase & {
+  type: 'turn.prompt_suggestion.status';
+  sessionId: string;
+  turnId: string;
+  status: 'generating' | 'unavailable' | 'cancelled';
+  reason?: string;
+  requested?: boolean;
 };
 
 export type TuiLlmRetryEvent = TuiRuntimeEventBase & {
@@ -147,16 +176,6 @@ export type TuiThreadGoalEvent =
       goalId: string;
     });
 
-/** A validated next-message suggestion for one settled Turn of `sessionId`. */
-export type TuiPromptSuggestionEvent = TuiRuntimeEventBase & {
-  type: 'turn.prompt_suggestion.generated';
-  sessionId: string;
-  turnId: string;
-  suggestion: string;
-  promptVersion?: string;
-  elapsedMs?: number;
-};
-
 export type TuiUnknownRuntimeEvent = TuiRuntimeEventBase & {
   type: 'unknown';
   originalType: string;
@@ -169,9 +188,12 @@ export type TuiRuntimeEvent =
   | TuiPermissionEvent
   | TuiSessionCatalogEvent
   | TuiCompactionEvent
+  | (TuiRuntimeEventBase & { type: 'session.compaction.progress'; progressId: string; stage: import('@mavis/shared/global-events').GlobalEventPayloadMap['session.compaction.progress']['stage'] })
   | TuiContentLifecycleEvent
   | TuiRotationEvent
   | TuiLlmRetryEvent
   | TuiThreadGoalEvent
+  | TuiSessionPublishConflictEvent
   | TuiPromptSuggestionEvent
+  | TuiPromptSuggestionStatusEvent
   | TuiUnknownRuntimeEvent;

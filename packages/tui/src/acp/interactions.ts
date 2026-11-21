@@ -557,7 +557,7 @@ async function handlePermission(
   requestId: string,
   schedulerSignal: AbortSignal,
 ): Promise<void> {
-  let decision: 'allowOnce' | 'allowAlways' | 'deny' = 'deny';
+  let decision: 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways' = 'deny';
   try {
     const response = await options.connection.client.request(
       acp.methods.client.session.requestPermission,
@@ -571,12 +571,15 @@ async function handlePermission(
       },
     );
     if (response.outcome.outcome === 'selected') {
+      const optionId = response.outcome.optionId;
       decision =
-        response.outcome.optionId === 'allow-always' && event.request.allowAlwaysSupported
+        optionId === 'allow-always' && event.request.allowAlwaysSupported
           ? 'allowAlways'
-          : response.outcome.optionId === 'allow-once'
+          : optionId === 'allow-once'
             ? 'allowOnce'
-            : 'deny';
+            : optionId === 'deny-always' && event.request.allowAlwaysSupported
+              ? 'denyAlways'
+              : 'deny';
     }
   } catch {
     decision = 'deny';
@@ -901,6 +904,9 @@ function permissionRequest(
         ? [{ optionId: 'allow-always', name: 'Always allow', kind: 'allow_always' as const }]
         : []),
       { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ...(request.allowAlwaysSupported
+        ? [{ optionId: 'deny-always', name: 'Always deny', kind: 'reject_always' as const }]
+        : []),
     ],
   };
 }

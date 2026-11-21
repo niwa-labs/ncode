@@ -410,9 +410,7 @@ describe('SOCKS5 proxy dispatch', () => {
     });
 
     expect(configuration).toEqual({ mode: 'direct' });
-    // Direct connections still install a dispatcher: Undici 8 (bundled by
-    // Node 26) would otherwise negotiate HTTP/2 through the global fetch.
-    expect(installed).toBe(true);
+    expect(installed).toBe(false);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('ALL_PROXY=socks5://***:***@127.0.0.1:1080');
     expect(warnings[0]).not.toContain('50%off');

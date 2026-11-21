@@ -53,6 +53,8 @@ export interface ConversationModelThinkingBudgets {
 /** Sparse Task-owned overrides resolved with the target Agent and parent Session model groups. */
 export interface ConversationTaskModelSelection {
   readonly model?: string;
+  /** Thinking variant requested via the `provider/model#variant` model key syntax. */
+  readonly variant?: string;
   readonly effort?: string;
 }
 
@@ -60,7 +62,11 @@ export interface ConversationTaskModelSelection {
 export function hasConversationTaskModelSelection(
   selection: ConversationTaskModelSelection | undefined,
 ): selection is ConversationTaskModelSelection {
-  return selection?.model !== undefined || selection?.effort !== undefined;
+  return (
+    selection?.model !== undefined ||
+    selection?.variant !== undefined ||
+    selection?.effort !== undefined
+  );
 }
 
 export const SESSION_TITLE_MAX_UNICODE_LENGTH = 50;
@@ -132,8 +138,33 @@ export interface ConversationSessionListOptions {
   readonly scanLimit?: number;
 }
 
+/**
+ * Plugin-declared subagent frozen into a Task Session. The session itself
+ * runs under the builtin `worker` role; this declaration supplies its
+ * system prompt and capability selection.
+ */
+export interface ConversationTaskPluginAgent {
+  readonly pluginName: string;
+  /** Plugin-scoped delegate name: "<plugin>:<agent>". */
+  readonly name: string;
+  readonly agentName: string;
+  readonly description: string;
+  readonly systemPrompt: string;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly tools?: readonly string[];
+  readonly disallowedTools?: readonly string[];
+  readonly mcpServers?: readonly string[];
+  readonly skills?: readonly string[];
+  readonly pluginRoot: string;
+  readonly packageDigest: string;
+  readonly sourceKind: 'local';
+}
+
 export interface ConversationSessionCreateInput {
   readonly agentName: string;
+  /** Set only when `agentName` is the builtin `worker` backing a plugin agent. */
+  readonly taskPluginAgent?: ConversationTaskPluginAgent;
   readonly workspaceDir?: string;
   readonly sessionType?: "root" | "branch";
   readonly sessionKind?: ConversationSessionKind;
@@ -441,8 +472,31 @@ export interface ConversationSteerInput {
    * Internal, opt-in admission hook for a producer that must verify the exact
    * Turn before its content is handed to the runtime. Ordinary steering does
    * not provide this hook and keeps its existing semantics.
+   *
+   * In-process only: the hook is a function, so it cannot survive a JSON wire
+   * (a daemon-mode thin client silently loses it). Cross-process producers
+   * declare the same constraint with {@link ConversationSteerInput.expectActiveTurnId}.
    */
   readonly preDelivery?: ConversationSteerPreDelivery;
+  /**
+   * Wire-safe form of the {@link ConversationSteerInput.preDelivery} Turn
+   * check: the steer may ONLY join this exact active Turn. When it is not the
+   * active Turn (or no Turn is active), delivery fails with reason
+   * "active-turn" instead of activating a fresh Turn.
+   */
+  readonly expectActiveTurnId?: string;
+  /**
+   * Read-only idempotency probe for a replayed {@link
+   * ConversationSteerInput.idempotencyKey}: consult the durable steering
+   * receipt and return its original duplicate answer, or refuse (reason
+   * "active-turn") when no receipt exists. A probe never delivers content,
+   * never activates a Turn, and never reserves a receipt — it exists so an
+   * admission gate outside the Runtime (the daemon-mode ACP steer handler,
+   * whose local prompt state may be gone after the Turn finished, a later
+   * Turn started, or the client reconnected) can still answer a repeat from
+   * the receipt instead of masking a delivered steer as an error.
+   */
+  readonly receiptLookupOnly?: boolean;
   /**
    * Internal per-item receipt ids that the runtime durably binds to the exact
    * Turn admitting this steer, in the same write as the producer receipt. A

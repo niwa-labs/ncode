@@ -253,6 +253,7 @@ export class PluginDesktopFacade {
         plugin: {
           summary: pluginPackageSummary(preview.plugin, false, false),
           skillCount: preview.plugin.skills.length,
+          ...(preview.plugin.agents?.length ? { agentCount: preview.plugin.agents.length } : {}),
           mcpServerCount: preview.plugin.mcpServers.length,
           hasStdioMcp: preview.plugin.mcpServers.some(
             (server) => declaredTransport(server.configJson) === 'stdio',
@@ -559,7 +560,6 @@ function officialInstalledCapabilities(plugin: OfficialPluginLocalState['plugin'
     mcpServerCount: plugin?.mcpServers.length ?? 0,
     skillCount: plugin?.skills.length ?? 0,
     hookCount: plugin?.hooks?.length ?? 0,
-    agentCount: plugin?.agents?.length ?? 0,
   };
 }
 
@@ -627,7 +627,7 @@ function localMarketplaceSummary(
       mcpServerCount: plugin.plugin.mcpServers.length,
       skillCount: plugin.plugin.skills.length,
       hookCount: plugin.plugin.hooks?.length ?? 0,
-      agentCount: plugin.plugin.agents?.length ?? 0,
+      ...(plugin.plugin.agents?.length ? { agentCount: plugin.plugin.agents.length } : {}),
     },
     installExists: true,
     enabled: plugin.enabled,
@@ -666,15 +666,6 @@ function pluginPackageDetail(
       content: skill.content,
     })),
     exampleQueries: [...plugin.exampleQueries],
-    ...(plugin.agents?.length
-      ? {
-          agents: plugin.agents.map((agent) => ({
-            name: agent.scopedName,
-            description: agent.description,
-            content: agent.content,
-          })),
-        }
-      : {}),
   };
 }
 
@@ -695,7 +686,7 @@ function pluginPackageSummary(
       mcpServerCount: plugin.mcpServers.length,
       skillCount: plugin.skills.length,
       hookCount: plugin.hooks?.length ?? 0,
-      agentCount: plugin.agents?.length ?? 0,
+      ...(plugin.agents?.length ? { agentCount: plugin.agents.length } : {}),
     },
     installExists,
     enabled,

@@ -16,7 +16,12 @@ export function mapV2TurnStreamResult(
   result: DirectSendResult | TurnContinuationDeliveryResult,
 ): ProcessLocalStreamResult<SessionStreamFrameView, SessionStreamErrorBody> {
   if (!result.accepted) {
-    const error = directSendAdmissionError(result.reason);
+    const error = directSendAdmissionError(
+      result.reason,
+      result.reason === 'active-turn' && 'activeTurnId' in result
+        ? (result.activeTurnId as string | undefined)
+        : undefined,
+    );
     return streamError(error);
   }
   return { ok: true, source: mapV2SessionFrames(result.frames) };
@@ -455,6 +460,7 @@ function directSendAdmissionError(
     DirectSendResult | TurnContinuationDeliveryResult,
     { readonly accepted: true }
   >["reason"],
+  activeTurnId?: string,
 ) {
   const admissionError = turnAdmissionError(reason);
   if (admissionError) return admissionError;
@@ -463,14 +469,23 @@ function directSendAdmissionError(
   }
   const policyError = planAdmissionError(reason);
   if (policyError) return policyError;
-  return (
-    DIRECT_SEND_ADMISSION_ERRORS[reason] ?? {
-      status: 409,
-      key: "local_session_busy",
-      message:
-        "Session already has an active Turn. Use queue send to deliver the message after it.",
-    }
-  );
+  const busyFallback = {
+    status: 409,
+    key: "local_session_busy",
+    message:
+      "Session already has an active Turn. Use queue send to deliver the message after it.",
+  };
+  const fallback =
+    reason === "active-turn" && activeTurnId !== undefined
+      ? {
+          ...busyFallback,
+          // Name the holder so an orchestrator can tell a transient delivery
+          // turn (turn_task_delivery_*) from a long user turn, and retry or
+          // queue accordingly instead of treating the session as dead.
+          message: `${busyFallback.message} Active turn: ${activeTurnId}.`,
+        }
+      : busyFallback;
+  return DIRECT_SEND_ADMISSION_ERRORS[reason] ?? fallback;
 }
 
 function isTurnContinuationAdmissionReason(

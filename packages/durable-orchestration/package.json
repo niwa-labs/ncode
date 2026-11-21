@@ -1,0 +1,34 @@
+{
+  "name": "@mavis/durable-orchestration",
+  "version": "0.1.0",
+  "description": "W08 part A (PORT-PI-1.3): merged orchestration-state persistence. The pinned pi-durable Harness \u2014 opened over OUR full pi Storage adapter \u2014 is the ONE durable scheduler: task phases are owned by its TaskScheduler, product state (goal / background task / cron wakeup / roster) persists as pi documents and pi task records through this bridge. Product supervisors/policies (goal UX, background-task manager, cron config, delegation supervisor) stay on top as adapters; no competing cron/task scheduler and no second persistence path may be created beside it.",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "workspace:*",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@mavis/background-task": "workspace:^",
+    "@mavis/goal": "workspace:^",
+    "@mavis/logging": "workspace:^"
+  },
+  "devDependencies": {
+    "@mavis/durable-backend-sqlite-zstd": "workspace:*",
+    "@types/node": "22.19.19",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "private": true,
+  "license": "MIT"
+}

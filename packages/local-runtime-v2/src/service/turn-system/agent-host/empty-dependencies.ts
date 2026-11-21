@@ -160,8 +160,9 @@ export function assertAgentHostCompactionDependenciesReady<TAgent extends AgentE
   );
   assertAgentHostCapabilityAvailable(
     'context-compactor',
-    typeof compaction?.automatic?.compactBeforeLlm === 'function' &&
-      typeof compaction.manual?.compactManual === 'function',
+    typeof compaction?.wireCompactionBarrier === 'function' ||
+      (typeof compaction?.automatic?.compactBeforeLlm === 'function' &&
+        typeof compaction.manual?.compactManual === 'function'),
   );
   assertAgentHostCapabilityAvailable(
     'compaction-control',
@@ -224,6 +225,8 @@ function compactionDependencyFunctions<TAgent extends AgentExecutionSnapshot>(
     dependencies.compaction?.preparation?.prepareCompaction,
     dependencies.compaction?.automatic?.compactBeforeLlm,
     dependencies.compaction?.manual?.compactManual,
+    dependencies.compaction?.wireCompactionBarrier,
+    dependencies.compaction?.prepareManualWireCompaction,
     dependencies.compaction?.control?.beginClose,
     dependencies.compaction?.lifecycle?.completeCommittedHistory,
     dependencies.compaction?.lifecycle?.failCommittedHistory,

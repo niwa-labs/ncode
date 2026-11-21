@@ -35,10 +35,12 @@ export function emitAskReplyMetric(
   metrics?.counter('permission_ask_reply_total', 1, {
     clkType:
       decision === 'allowOnce'
-        ? 'allow_session'
+        ? 'allow_once'
         : decision === 'allowAlways'
           ? 'allow_global'
-          : 'deny',
+          : decision === 'denyAlways'
+            ? 'deny_global'
+            : 'deny',
   });
 }
 

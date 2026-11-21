@@ -16,17 +16,26 @@ interface TuiAuthCommandApplication {
 export interface RunTuiAuthCommandOptions {
   readonly region?: MavisRegion;
   readonly lane?: string;
+  /** Explicit `--profile` selector; beats the MINIMAX_PROFILE environment. */
+  readonly profile?: string;
   readonly createApplication?: (region?: MavisRegion) => TuiAuthCommandApplication;
   readonly writeError?: (value: string) => void;
   readonly prepareDataDir?: typeof prepareTuiDataDir;
   readonly openBrowser?: boolean;
   readonly openExternalTarget?: TuiExternalTargetOpener;
+  /** Fetch implementation for the post-login identity projection; test seam. */
+  readonly fetchImpl?: typeof fetch;
 }
 
 export async function runTuiLogin(options: RunTuiAuthCommandOptions = {}): Promise<string> {
   const application = options.createApplication
     ? options.createApplication(options.region)
-    : await createAuthApplication(options.region, options.prepareDataDir);
+    : await createAuthApplication(
+        options.region,
+        options.prepareDataDir,
+        options.profile,
+        options.fetchImpl,
+      );
   const writeError = options.writeError ?? ((value: string) => process.stderr.write(value));
   const result = await application.login((progress) => {
     const authorizationUrl = markTuiAuthorizationUrl(
@@ -48,7 +57,12 @@ export async function runTuiLogin(options: RunTuiAuthCommandOptions = {}): Promi
 export async function runTuiLogout(options: RunTuiAuthCommandOptions = {}): Promise<string> {
   const application = options.createApplication
     ? options.createApplication(options.region)
-    : await createAuthApplication(options.region, options.prepareDataDir);
+    : await createAuthApplication(
+        options.region,
+        options.prepareDataDir,
+        options.profile,
+        options.fetchImpl,
+      );
   const result = await application.logout();
   if (result.logoutUrl) {
     const writeError = options.writeError ?? ((value: string) => process.stderr.write(value));
@@ -71,9 +85,12 @@ export async function runTuiLogout(options: RunTuiAuthCommandOptions = {}): Prom
 async function createAuthApplication(
   region?: MavisRegion,
   prepareDataDirFn: typeof prepareTuiDataDir = prepareTuiDataDir,
+  profile?: string,
+  fetchImpl?: typeof fetch,
 ): Promise<McodeAuthApplication> {
   return createDefaultMcodeAuthApplication({
-    dataDir: await prepareDataDirFn(),
+    dataDir: await prepareDataDirFn({ profile }),
     ...(region ? { region } : {}),
+    ...(fetchImpl ? { fetchImpl } : {}),
   });
 }

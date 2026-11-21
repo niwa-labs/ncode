@@ -712,9 +712,9 @@ describe("TuiFeatureFlow", () => {
     );
   });
 
-  it("leaves provider deletion out of /model", async () => {
+  it("deletes a custom provider from /model after confirmation and refreshes the catalog", async () => {
     const harness = createHarness();
-    harness.runtime.listModels.mockResolvedValue([
+    const customModels: TuiModel[] = [
       {
         providerId: "custom_provider:openai",
         providerName: "OpenAI",
@@ -723,89 +723,47 @@ describe("TuiFeatureFlow", () => {
         modelId: "gpt-4o",
         displayName: "GPT-4o",
       },
-      model("fallback"),
-    ]);
+      {
+        providerId: "custom_provider:openai",
+        providerName: "OpenAI",
+        providerSource: "custom_provider",
+        providerKind: "custom",
+        modelId: "gpt-4o-mini",
+        displayName: "GPT-4o mini",
+      },
+    ];
+    harness.runtime.listModels
+      .mockResolvedValueOnce(customModels)
+      .mockResolvedValueOnce([model("fallback")])
+      .mockResolvedValueOnce([model("fallback")]);
 
     await harness.flow.showModelPicker("");
     const picker = harness.shown[0] as {
       handleInput(data: string): void;
       render(width: number): string[];
     };
-    expect(stripAnsi(picker.render(120).join("\n"))).not.toContain(
-      "delete provider",
-    );
     picker.handleInput("\x04");
-
-    const rendered = stripAnsi(picker.render(120).join("\n"));
-    expect(rendered).not.toContain("Delete provider?");
-    expect(rendered).toContain("GPT-4o");
-    expect(harness.runtime.deleteUserModelProvider).not.toHaveBeenCalled();
-  });
-
-  it("deletes a custom connection from /provider only after y and refreshes the list", async () => {
-    const harness = createHarness();
-    const openai = {
-      providerId: "custom_provider:openai",
-      name: "OpenAI",
-      kind: "api_key",
-      enabled: true,
-      configRevision: "rev-1",
-      baseUrl: "https://api.openai.com/v1",
-      hasApiKey: true,
-      models: [{ modelId: "gpt-4o" }, { modelId: "gpt-4o-mini" }],
-    };
-    harness.runtime.listUserModelProviders
-      .mockResolvedValueOnce([openai] as never)
-      .mockResolvedValue([]);
-    harness.runtime.listModels.mockResolvedValue([model("fallback")]);
-
-    await harness.flow.showProviderManager();
-    const manager = harness.shown[0] as {
-      handleInput(data: string): void;
-      render(width: number): string[];
-    };
-    // Rows: Codex, minimax OAuth (initial cursor), minimax API Key, OpenAI.
-    manager.handleInput("\u001b[B");
-    manager.handleInput("\u001b[B");
-    manager.handleInput("d");
-    const confirmation = stripAnsi(manager.render(100).join("\n"));
-    expect(confirmation).toContain("Delete OpenAI?");
-    expect(confirmation).toContain("all 2 configured models");
-
-    // Enter is the list's "use" key, so it must cancel instead of confirming.
-    manager.handleInput("\r");
-    expect(stripAnsi(manager.render(100).join("\n"))).not.toContain(
-      "Delete OpenAI?",
+    expect(stripAnsi(picker.render(90).join("\n"))).toContain(
+      "Delete provider?",
     );
-    expect(harness.runtime.deleteUserModelProvider).not.toHaveBeenCalled();
+    picker.handleInput("\r");
 
-    manager.handleInput("d");
-    manager.handleInput("y");
     await vi.waitFor(() =>
       expect(harness.runtime.deleteUserModelProvider).toHaveBeenCalledWith(
         "custom_provider:openai",
       ),
     );
-    await vi.waitFor(() =>
-      expect(stripAnsi(manager.render(100).join("\n"))).toContain(
-        "Deleted OpenAI",
-      ),
+    await vi.waitFor(() => expect(harness.shown).toHaveLength(2));
+    expect(harness.append).toHaveBeenCalledWith(
+      "Provider deleted: OpenAI · 2 models removed.",
     );
-    expect(stripAnsi(manager.render(100).join("\n"))).not.toContain("GPT-4o");
+    expect(
+      stripAnsi((harness.shown[1] as typeof picker).render(90).join("\n")),
+    ).toContain("fallback");
   });
 
-  it("keeps the connection used by the active Session until another model is chosen", async () => {
+  it("keeps the provider selected by the active Session until another model is chosen", async () => {
     const harness = createHarness();
-    harness.runtime.listUserModelProviders.mockResolvedValue([
-      {
-        providerId: "custom_provider:openai",
-        name: "OpenAI",
-        kind: "api_key",
-        enabled: true,
-        hasApiKey: true,
-        models: [{ modelId: "gpt-4o" }],
-      },
-    ] as never);
     harness.runtime.listModels.mockResolvedValue([
       {
         providerId: "custom_provider:openai",
@@ -819,18 +777,16 @@ describe("TuiFeatureFlow", () => {
       model("fallback"),
     ]);
 
-    await harness.flow.showProviderManager();
-    const manager = harness.shown[0] as {
+    await harness.flow.showModelPicker("");
+    const picker = harness.shown[0] as {
       handleInput(data: string): void;
       render(width: number): string[];
     };
-    manager.handleInput("\u001b[B");
-    manager.handleInput("\u001b[B");
-    manager.handleInput("d");
-    manager.handleInput("y");
+    picker.handleInput("\x04");
+    picker.handleInput("\r");
 
     await vi.waitFor(() =>
-      expect(stripAnsi(manager.render(180).join("\n"))).toContain(
+      expect(stripAnsi(picker.render(180).join("\n"))).toContain(
         "Switch to another model before deleting this provider",
       ),
     );
@@ -1136,6 +1092,45 @@ describe("TuiFeatureFlow", () => {
     expect(output).toContain("Unavailable · Unavailable");
     expect(output).toContain("MiniMax account unavailable");
     expect(output).toMatch(/Instructions:\s+Unavailable/u);
+  });
+
+  it("renders the serving daemon's profile and data directory in /status", async () => {
+    // opus 2026-11-01, правка 5: the Profile row makes a window pointed at
+    // the wrong store visible at a glance («cedar (~/.minimax-cedar)»).
+    const harness = createHarness();
+    const home = process.env["HOME"] ?? "/home/tester";
+    const dataDir = `${home}/.minimax-cedar`;
+    harness.runtime.getAccountStatus.mockResolvedValueOnce({
+      status: "ready",
+      managedTokenPresent: true,
+      identity: { email: "cedar@example.com", name: "Cedar" },
+      profile: "cedar",
+      dataDir,
+      warnings: [],
+    });
+
+    await harness.flow.showAccountStatus();
+
+    const panel = harness.shown[0] as { render(width: number): string[] };
+    const output = stripAnsi(panel.render(120).join("\n"));
+    expect(output).toMatch(/Profile:\s+cedar \(~\/\.minimax-cedar\)/u);
+  });
+
+  it("omits the Profile row when the daemon predates the identity fields", async () => {
+    const harness = createHarness();
+    harness.runtime.getAccountStatus.mockResolvedValueOnce({
+      status: "ready",
+      managedTokenPresent: true,
+      identity: { email: "legacy@example.com", name: "Legacy" },
+      warnings: [],
+    });
+
+    await harness.flow.showAccountStatus();
+
+    const panel = harness.shown[0] as { render(width: number): string[] };
+    const output = stripAnsi(panel.render(120).join("\n"));
+    expect(output).not.toContain("Profile");
+    expect(output).toContain("legacy@example.com");
   });
 
   it("shows local status while the account loads and ignores its result after closing", async () => {

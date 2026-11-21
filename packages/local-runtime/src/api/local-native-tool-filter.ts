@@ -1,4 +1,4 @@
-import { agentNameDescription, type LocalRuntimeTool } from '@mavis/agent-tools/desktop';
+import { isSessionHistoryOnlyTool, agentNameDescription, type LocalRuntimeTool } from '@mavis/agent-tools/desktop';
 import {
   AGENT_BUILTIN_TOOL_IDS,
   isAgentBuiltinToolEnabled,
@@ -12,7 +12,9 @@ export function filterLocalBuiltinCapabilityTools(
   const configurableToolNames = new Set<string>(AGENT_BUILTIN_TOOL_IDS);
   const capabilityFiltered = tools.filter(
     (tool) =>
-      (tool.def.name !== 'mavis' || capabilities.features.mavis) &&
+      (isSessionHistoryOnlyTool(tool)
+        ? isAgentBuiltinToolEnabled(capabilities, 'read')
+        : tool.def.name !== 'mavis' || capabilities.features.mavis) &&
       (!configurableToolNames.has(tool.def.name) ||
         isAgentBuiltinToolEnabled(
           capabilities,

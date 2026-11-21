@@ -4,11 +4,19 @@
   "owner": "MiniMax",
   "upstream": {
     "type": "git",
-    "url": "https://github.com/earendil-works/pi-mono.git",
-    "ref": "refs/tags/v0.79.1",
-    "commit": "28df940f0d07b65284849a483be7b06e2ca046ee"
+    "url": "https://github.com/earendil-works/pi.git",
+    "ref": "refs/tags/v1.5.2",
+    "commit": "b4afdddf44e059c67ccf5097e5317d913521b470",
+    "commitSubject": "Release v1.5.2",
+    "baseTag": "v1.5.2",
+    "previousBaseline": {
+      "url": "https://github.com/earendil-works/pi-mono.git",
+      "ref": "refs/tags/v0.79.1",
+      "commit": "28df940f0d07b65284849a483be7b06e2ca046ee",
+      "importedAt": "2026-06-16"
+    }
   },
-  "importedAt": "2026-06-16",
+  "importedAt": "2026-11-11",
   "strategy": "source-vendor",
   "localChangeLog": "MINIMAX_CHANGES.md",
   "policy": "../AGENTS.md"

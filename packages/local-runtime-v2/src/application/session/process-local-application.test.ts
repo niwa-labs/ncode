@@ -316,3 +316,45 @@ describe("createProcessLocalApplication capabilities", () => {
     expect(application.events.watch).toEqual(expect.any(Function));
   });
 });
+
+describe("createProcessLocalApplication /session warmer status (W10)", () => {
+  it("exposes the turn-system warming surface through the diagnostics port", () => {
+    const describeStatus = (sessionId: string) =>
+      sessionId === "warm-session" ? "Cache warming: active (streaming)" : undefined;
+    const application = createProcessLocalApplication({
+      eventBus: { subscribe: vi.fn(() => () => undefined) },
+      skills: {} as never,
+      plugins: {} as never,
+      workspace: {} as never,
+      plan: {} as never,
+      cacheWarming: { describeStatus },
+      peripherals: { account: { getStatus: vi.fn() } } as never,
+      modelProvider: {
+        application: {} as never,
+        providers: { getMinimaxModelSource: vi.fn() } as never,
+      } as never,
+    });
+
+    expect(application.diagnostics?.getSessionCacheWarmingStatus?.("warm-session")).toBe(
+      "Cache warming: active (streaming)",
+    );
+    expect(application.diagnostics?.getSessionCacheWarmingStatus?.("cold-session")).toBeUndefined();
+  });
+
+  it("keeps the diagnostics surface absent when no warming surface is composed", () => {
+    const application = createProcessLocalApplication({
+      eventBus: { subscribe: vi.fn(() => () => undefined) },
+      skills: {} as never,
+      plugins: {} as never,
+      workspace: {} as never,
+      plan: {} as never,
+      peripherals: { account: { getStatus: vi.fn() } } as never,
+      modelProvider: {
+        application: {} as never,
+        providers: { getMinimaxModelSource: vi.fn() } as never,
+      } as never,
+    });
+
+    expect(application.diagnostics?.getSessionCacheWarmingStatus).toBeUndefined();
+  });
+});

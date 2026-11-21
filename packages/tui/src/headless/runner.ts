@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 
+import { createLogger } from "@mavis/logging";
 import type { TuiAttachment } from "../application/invocation.js";
 import { TuiRunCoordinator } from "../application/run-coordinator.js";
 import type { TuiTurnRunOutcome } from "../application/turn-run-outcome.js";
@@ -11,6 +12,7 @@ import {
 } from "../application/response-usage.js";
 import { createTuiTurnId } from "../application/turn-id.js";
 import type {
+  TuiBackgroundTaskCapability,
   TuiConfigurationPort,
   TuiConversationPort,
   TuiActiveRunControlPort,
@@ -20,6 +22,11 @@ import type {
   TuiSessionPort,
   TuiSessionTurnPort,
 } from "../runtime/port.js";
+import {
+  BACKGROUND_DELIVERY_DRAIN_TIMEOUT_NOTE,
+  waitForBackgroundDeliveryDrain,
+  type PendingBackgroundWork,
+} from "./background-drain.js";
 import type { TuiModel, TuiSessionUsageRow } from "../types/runtime-models.js";
 import {
   exitCodeForExecError,
@@ -68,6 +75,17 @@ import { ExecDiagnostics, outputSchemaHash } from "./diagnostics.js";
 import { waitForExecSettlement } from "./settlement.js";
 import { ExecProgress } from "./progress.js";
 
+/**
+ * mcode:tui lifecycle (spec §4: `mcode:<package>`): termination of the headless
+ * exec process. The exit code is final only after the runtime shutdown settles,
+ * so the event is emitted here — at the single point where the process result
+ * exists — and nowhere else.
+ */
+const log = createLogger("mcode:tui");
+
+/** §5.4 №20: how long exec stays alive for pending completion notices. */
+const DEFAULT_BACKGROUND_DELIVERY_DRAIN_TIMEOUT_MS = 300_000;
+
 export interface TuiExecInput {
   prompt: string;
   workspaceDir: string;
@@ -85,6 +103,19 @@ export interface TuiExecInput {
   outputLastMessagePath?: string;
   reviewRequest?: { readonly scope: "local_changes" };
   diagnosticsDir?: string;
+  /**
+   * Bound for the §5.4 №20 background-delivery drain after the Turn ends.
+   * Defaults to five minutes; an expired bound exits with the explicit
+   * daemon-mode policy note (never a silently dropped completion notice).
+   */
+  backgroundDeliveryDrainTimeoutMs?: number;
+  /**
+   * Whether THIS process hosts the runtime that owes the wake. Embedded exec
+   * (the default) owns it and drains before exit; a daemon-mode thin client
+   * does NOT — the mcoded daemon keeps running and performs the wake itself,
+   * so the client must not wait for someone else's background work.
+   */
+  ownsBackgroundWake?: boolean;
 }
 
 export type TuiHeadlessRuntime = Pick<
@@ -99,7 +130,10 @@ export type TuiHeadlessRuntime = Pick<
     TuiInteractionPort,
     "getPendingQuestionnaire" | "listPendingPermissions"
   > &
-  Pick<TuiConfigurationPort, "getAccountStatus" | "listModels">;
+  Pick<TuiConfigurationPort, "getAccountStatus" | "listModels"> &
+  // Lifetime projection (§5.4 №20): the drain reads owned background work
+  // (all kinds, subagents included) before the process may exit.
+  Partial<Pick<TuiBackgroundTaskCapability, "listBackgroundTasks">>;
 
 export interface TuiExecDependencies {
   runtime: TuiHeadlessRuntime;
@@ -109,16 +143,7 @@ export interface TuiExecDependencies {
   signal?: AbortSignal;
   processRef?: Pick<NodeJS.Process, "once" | "off">;
   createTurnId?: () => string;
-  /** Overrides how long a stopped run waits for remaining output to drain. */
-  stopOutputGraceMs?: number;
 }
-
-/**
- * How long a stopped run (timeout, cancellation or step limit) keeps waiting
- * for stdout/stderr. A reader that stops reading must not keep the run from
- * returning; the CLI entry then exits with the run's exit code.
- */
-export const HEADLESS_STOP_OUTPUT_GRACE_MS = 2_000;
 
 export async function runTuiExec(
   input: TuiExecInput,
@@ -152,15 +177,8 @@ export async function runTuiExec(
       )
     : undefined;
   const startedAt = Date.now();
-  const stopOutput = createStopOutputRelease(
-    dependencies.stopOutputGraceMs ?? HEADLESS_STOP_OUTPUT_GRACE_MS,
-  );
-  let observations: Promise<void> | undefined;
-  let runStopped = false;
-  let finalOutputStarted = false;
   const supervisor = new ExecRunSupervisor(dependencies.runtime);
   const coordinator = new TuiRunCoordinator(supervisor.conversationPort(), {
-    releaseObserverOnStop: true,
     ...(input.diagnosticsDir
       ? {
           onAnswerSelection: (event: Readonly<Record<string, unknown>>) => {
@@ -177,8 +195,6 @@ export async function runTuiExec(
   let cancelled = dependencies.signal?.aborted ?? false;
   const cancel = () => {
     cancelled = true;
-    // Shutdown can legitimately take a while; only bound the final output wait.
-    if (finalOutputStarted) stopOutput.start();
     void coordinator.abort();
   };
   const assertNotCancelled = () => {
@@ -314,8 +330,6 @@ export async function runTuiExec(
         }
       },
     );
-    observations = execution.observations;
-    runStopped = isStoppedRunStatus(execution.outcome.status);
     if (streamOutputFailure) throw streamOutputFailure;
     let outcome = toHeadlessOutcome(execution.outcome);
     let reviewResult: ReviewResultV1 | undefined;
@@ -410,6 +424,27 @@ export async function runTuiExec(
           }
         : {}),
     };
+    // §5.4 №20 (headless lifetime): the Turn ended while the session may own
+    // background work whose automatic completion notice was promised. The
+    // process stays alive until that notice is delivered and the wake Turn it
+    // activated has finished; an expired bound leaves an explicit policy note
+    // instead of a silently dropped promise.
+    if (!cancelled && input.ownsBackgroundWake !== false) {
+      const drain = await waitForBackgroundDeliveryDrain({
+        runtime: dependencies.runtime,
+        sessionId: session.sessionId,
+        timeoutMs:
+          input.backgroundDeliveryDrainTimeoutMs ??
+          DEFAULT_BACKGROUND_DELIVERY_DRAIN_TIMEOUT_MS,
+        signal: dependencies.signal,
+        onPending: (pending: PendingBackgroundWork) => {
+          evidence?.record({ kind: "background_delivery_drain_started", ...pending });
+        },
+      });
+      if (drain === "timeout" || drain === "unreadable") {
+        diagnostics.push(`${BACKGROUND_DELIVERY_DRAIN_TIMEOUT_NOTE}\n`);
+      }
+    }
   } catch (error) {
     const normalized = normalizeRunError(error);
     evidence?.failure(undefined, {
@@ -423,8 +458,10 @@ export async function runTuiExec(
       );
     }
   } finally {
-    // Signal listeners stay attached until final output finishes, so a signal
-    // that arrives while stdout is blocked still bounds the remaining wait.
+    dependencies.signal?.removeEventListener("abort", cancel);
+    processRef.off("SIGINT", cancel);
+    processRef.off("SIGTERM", cancel);
+    processRef.off("SIGHUP", cancel);
     let shutdownFailure: string | undefined;
     let shutdownFailurePublished = false;
     try {
@@ -437,15 +474,6 @@ export async function runTuiExec(
         nextStep: "Verify no process is still running.",
       });
     }
-
-    finalOutputStarted = true;
-    if (runStopped || cancelled) stopOutput.start();
-    // A stopped run returns without waiting for the observer; let pending event
-    // lines finish first so the terminal result stays last.
-    const eventsDelivered = await untilOutputReleased(
-      observations ?? Promise.resolve(),
-      stopOutput.signal,
-    );
 
     if (terminal) {
       if (shutdownFailure && terminal.result.status === "succeeded") {
@@ -481,11 +509,7 @@ export async function runTuiExec(
             error: terminal.result.error,
           });
         }
-        // Skip the result when earlier event lines are still stuck: it could not
-        // be delivered ahead of them, and the exit code carries the outcome.
-        if (eventsDelivered) {
-          await untilOutputReleased(terminal.encoder.result(terminal.result), stopOutput.signal);
-        }
+        await terminal.encoder.result(terminal.result);
         exitCode = exitCodeForExecResult(terminal.result);
         if (terminal.result.status !== "succeeded") {
           diagnostics.push(
@@ -531,20 +555,25 @@ export async function runTuiExec(
       shutdownComplete: !shutdownFailure,
       recoveryReady: stoppedForRecovery && !shutdownFailure,
     });
+    // Process result is final here (spec §6): log once, right after the run.
+    log.info("exec exit", {
+      ...(typeof executionMetadata["runId"] === "string"
+        ? { runId: executionMetadata["runId"] }
+        : {}),
+      ...(typeof executionMetadata["sessionId"] === "string"
+        ? { sessionId: executionMetadata["sessionId"] }
+        : {}),
+      ...(typeof executionMetadata["turnId"] === "string"
+        ? { turnId: executionMetadata["turnId"] }
+        : {}),
+      exitCode,
+      durationMs: Date.now() - startedAt,
+      shutdownComplete: !shutdownFailure,
+    });
     if (exitCode !== MINIMAX_CODE_EXEC_EXIT_CODES.brokenPipe) {
-      for (const diagnostic of diagnostics) {
-        const delivered = await untilOutputReleased(
-          writeDiagnostic(stderr, diagnostic),
-          stopOutput.signal,
-        );
-        if (!delivered) break;
-      }
+      for (const diagnostic of diagnostics)
+        await writeDiagnostic(stderr, diagnostic);
     }
-    stopOutput.dispose();
-    dependencies.signal?.removeEventListener("abort", cancel);
-    processRef.off("SIGINT", cancel);
-    processRef.off("SIGTERM", cancel);
-    processRef.off("SIGHUP", cancel);
   }
   return exitCode;
 }
@@ -898,8 +927,7 @@ async function resolveSession(
     if (!session) {
       throw new TuiExecError(
         "runtime",
-        `No active Session exists for workspace ${input.workspaceDir}; omit --continue to start a new Session.`,
-        { retryable: false },
+        `No active Session exists for workspace ${input.workspaceDir}.`,
       );
     }
     assertSessionUsable(session, input.workspaceDir);
@@ -947,23 +975,16 @@ function assertSessionUsable(session: TuiSession, workspaceDir: string): void {
   if (session.archived) {
     throw new TuiExecError(
       "runtime",
-      `Session ${session.sessionId} is archived; unarchive it in MCode or start a new Session.`,
-      { retryable: false },
+      `Session is archived: ${session.sessionId}`,
     );
   }
-  if (!session.workspaceDir) {
+  if (
+    !session.workspaceDir ||
+    !sameWorkspace(session.workspaceDir, workspaceDir)
+  ) {
     throw new TuiExecError(
       "runtime",
-      `Session ${session.sessionId} has no recorded workspace and cannot be continued.`,
-      { retryable: false },
-    );
-  }
-  if (!sameWorkspace(session.workspaceDir, workspaceDir)) {
-    // Retrying cannot succeed: a Session only continues in the workspace it was created in.
-    throw new TuiExecError(
-      "runtime",
-      `Session ${session.sessionId} belongs to workspace ${session.workspaceDir}, not --cwd ${workspaceDir}; rerun with --cwd ${session.workspaceDir}.`,
-      { retryable: false },
+      `Session workspace does not match --cwd: ${session.sessionId}`,
     );
   }
 }
@@ -985,61 +1006,6 @@ async function writeDiagnostic(
   } catch {
     // Diagnostics are best effort and must not shadow the primary exit contract.
   }
-}
-
-function isStoppedRunStatus(status: TuiTurnRunOutcome['status']): boolean {
-  return status === 'timeout' || status === 'cancelled' || status === 'limit_exceeded';
-}
-
-interface StopOutputRelease {
-  readonly signal: AbortSignal;
-  /** Starts the grace period once; later calls keep the original deadline. */
-  start(): void;
-  dispose(): void;
-}
-
-function createStopOutputRelease(graceMs: number): StopOutputRelease {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return {
-    signal: controller.signal,
-    start() {
-      if (timer || controller.signal.aborted) return;
-      timer = setTimeout(() => controller.abort(), Math.max(0, graceMs));
-      timer.unref?.();
-    },
-    dispose() {
-      if (timer) clearTimeout(timer);
-    },
-  };
-}
-
-/**
- * Waits for `work` unless the stop-output grace period ends first. Returns
- * false when the wait was released; rejections from `work` still propagate.
- */
-function untilOutputReleased(work: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
-  if (signal.aborted) {
-    void work.catch(() => undefined);
-    return Promise.resolve(false);
-  }
-  return new Promise<boolean>((settle, fail) => {
-    const release = () => {
-      void work.catch(() => undefined);
-      settle(false);
-    };
-    signal.addEventListener('abort', release, { once: true });
-    work.then(
-      () => {
-        signal.removeEventListener('abort', release);
-        settle(true);
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', release);
-        fail(error);
-      },
-    );
-  });
 }
 
 function summarizePrompt(prompt: string, attachmentCount: number): string {

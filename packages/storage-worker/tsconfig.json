@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024"],
+    "target": "ES2024",
+    // The paths entries compile neighbor-package SOURCES (the same resolution
+    // the standalone typecheck derives), so mirror the two flags
+    // `tsconfig.standalone.json` overrides for exactly that purpose: `.ts`
+    // extension imports and override modifiers are legal in that source tree
+    // (this package's src uses explicit `.ts` imports: engine.ts, errors.ts).
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"]
+    }
+  },
+  "include": ["src", "vitest.config.ts"]
+}

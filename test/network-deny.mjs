@@ -51,6 +51,16 @@ Object.defineProperty(globalThis, 'fetch', {
 });
 Socket.prototype.connect = function (...args) {
   const options = Array.isArray(args[0]) ? args[0][0] : args[0];
+  // A unix-domain socket is local IPC, not network: the mcoded daemon socket
+  // (MCODE_SERVER_MODE=auto is the product default since 2026-10-29) must not
+  // trip the standalone network audit. Opt-in per suite — other suites
+  // (byok) pin in-process runs whose semantics the historical deny pinned.
+  if (
+    process.env.MCODE_TEST_ALLOW_UNIX_SOCKETS === '1' &&
+    options && typeof options === 'object' && typeof options.path === 'string' && !options.host
+  ) {
+    return Reflect.apply(originalConnect, this, args);
+  }
   if (allowed && options && typeof options === 'object' && options.host === allowed.hostname && String(options.port) === allowed.port) {
     return Reflect.apply(originalConnect, this, args);
   }

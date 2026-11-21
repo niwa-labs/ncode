@@ -11,12 +11,17 @@ import type { CanonicalHistoryMessages } from '../history/contracts.js';
 import type { AcceptedCompactionLease, AgentHostCloseResult } from '../runner/contracts.js';
 
 export type CheckpointResponseContentKind = 'text' | 'thinking' | 'toolCall' | 'unknown';
-export type CheckpointStopReason = 'stop' | 'length' | 'toolUse' | 'error' | 'aborted';
+// pi 48c8f322 StopReason: terminal messages carry `deferred` too (done-event
+// reasons are stop/length/toolUse/deferred); only `pending` is streaming-only
+// and never reaches a checkpoint generation. Mirrors the compaction contracts.
+export type CheckpointStopReason = 'stop' | 'length' | 'toolUse' | 'deferred' | 'error' | 'aborted';
 
 /**
  * `shared_prefix` repeats the main request's system prompt, tools and history
  * so the Provider prompt cache is read; `isolated` sends the checkpoint
- * protocol as its own system prompt without tools.
+ * protocol as its own system prompt without tools. (Their 0.7.2 generation,
+ * restored by the sync-debt fix; the pi 1.5.2 `deferred` stop reason above
+ * stays ours.)
  */
 export type CheckpointRequestShape = 'shared_prefix' | 'isolated';
 /** Why a shared-prefix attempt was re-sent in the isolated shape. */
@@ -223,7 +228,6 @@ export type AutomaticContextCompactionInput = Readonly<
     | 'tools'
     | 'thinkingLevel'
     | 'signal'
-    | 'recovery'
   > & {
     readonly maxSerializedInputBytes?: number;
     /** Host-selected checkpoint request shape; absent means `isolated`. */

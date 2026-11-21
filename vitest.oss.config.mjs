@@ -9,8 +9,8 @@ const root = fileURLToPath(new URL(".", import.meta.url));
 const { packageRoots } = readExtraction(root);
 const alias = packageExportEntries(root, packageRoots).map(
   ({ specifier, file }) => ({
-    find: new RegExp(`^${specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
-    replacement: path.join(root, file),
+    find: new RegExp(`^${specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("\\*", "(.+)")}$`),
+    replacement: path.join(root, file).replaceAll("*", "$1"),
   }),
 );
 export default defineConfig({

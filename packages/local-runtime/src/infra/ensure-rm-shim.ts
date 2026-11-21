@@ -36,6 +36,13 @@
  * deletion stays on the existing host-side launcher there.
  *
  * Idempotent: only rewrites when the on-disk content differs.
+ *
+ * The shim is a runtime toggle, not a constant. When the user disables the
+ * destructive-delete guard (`permission.dangerousCommandGateEnabled: false`)
+ * the shim must stop being installed as well, because the permission layer
+ * stopping to rewrite `rm` is not enough on its own: PATH resolution would
+ * still route the command here. Both layers move together, so "the guard is
+ * off" always means the same thing.
  */
 import { accessSync, chmodSync, constants, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -91,12 +98,11 @@ export function resolveManagedBinDir(dataDir: string): string {
  * missing or lost its execute bit (cache cleaner, restored backup, chmod), the
  * preflight first re-seeds it in place — `ensureRmShim` is idempotent — and
  * only refuses the spawn when that repair also fails (e.g. read-only dataDir).
- * Native deletion removes this profile's inherited shim path and skips the
- * preflight entirely; the recoverable scripts on disk are left unchanged.
- * Without a dataDir there is no shim to install, and Windows never injects
- * the shim (see `ensureRmShim`).
+ * A silent fall-through to `/bin/rm` is never possible. Without a dataDir
+ * there is no shim to install, so that case returns the shared resolver
+ * unchanged.
  *
- * `<dataDir>/bin` is prepended on every platform and in every delete mode, so a
+ * `<dataDir>/bin` is prepended on every platform and in every guard mode, so a
  * host-owned command always wins name resolution inside agent bash. `mcode-tools`
  * is the case that made this load-bearing: the npm CLI package `@minimax/code`
  * exports a bin of the same name, and npm's global bin directory (nvm,
@@ -104,30 +110,35 @@ export function resolveManagedBinDir(dataDir: string): string {
  * PATH. That copy is the *embedded* CLI, which aborts unless the host injected
  * `MCODE_AUTH_PROVIDER=shared-broker`, so a shadowed lookup failed every App
  * call with `error: Embedded mcode-tools requires MCODE_AUTH_PROVIDER=…`.
- * `mavis`, `minimax` and `mavis-trash` gain the same protection. `ensureBinInProcessPath`
- * prepends the same directory into `process.env.PATH`, but that happens too
- * early: a login shell re-running the user's rc files can reorder it back.
+ * `mavis`, `minimax` and `mavis-trash` gain the same protection. Unlike the rm
+ * shim, a missing launcher deliberately has NO spawn preflight: blocking every
+ * bash spawn because `<dataDir>/bin` is absent would be far worse than letting
+ * the command fail with its own `not found`.
  *
- * Unlike the rm shim, a missing launcher deliberately has NO spawn preflight.
- * Blocking every bash spawn because `<dataDir>/bin` is absent would be far worse
- * than letting the command fail with its own `not found`.
+ * `isGuardEnabled` is consulted per launch rather than captured, so toggling the
+ * destructive-delete guard takes effect on the next command instead of on the
+ * next process start. It is fail-closed: anything but an explicit `false` keeps
+ * the shim active. With the guard off, deletes run as written and the shim
+ * directory leaves the agent PATH; the managed bin directory stays.
  */
 export function resolveAgentBashEnvPolicy(
   dataDir?: string,
   platform: NodeJS.Platform = process.platform,
-  nativeDelete = false,
+  isGuardEnabled: () => boolean = () => true,
 ): BashEnvPolicy {
   if (!dataDir) return resolveBashEnvPolicy({});
   const managedBinDir = resolveManagedBinDir(dataDir);
-  const shimDir = resolveRmShimDir(dataDir);
-  if (nativeDelete) {
-    return resolveBashEnvPolicy({ prependPath: [managedBinDir], removePath: [shimDir] });
-  }
   if (platform === 'win32') return resolveBashEnvPolicy({ prependPath: [managedBinDir] });
+  const shimDir = resolveRmShimDir(dataDir);
   const shimPath = path.join(shimDir, 'rm');
   return resolveBashEnvPolicy({
-    prependPath: [managedBinDir, shimDir],
+    resolvePrependPath: () => {
+      const entries = [managedBinDir];
+      if (isGuardEnabled()) entries.push(shimDir);
+      return entries;
+    },
     spawnPreflight: () => {
+      if (!isGuardEnabled()) return;
       try {
         accessSync(shimPath, constants.X_OK);
         return;

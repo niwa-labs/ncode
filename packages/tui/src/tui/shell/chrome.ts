@@ -87,11 +87,17 @@ export class TuiStatusLine implements Component {
     const safeWidth = normalizeWidth(width);
     if (safeWidth === 0) return [];
 
+    // W4 (§4.6): the daemon connection exception line renders BEFORE the
+    // item machinery and even over a deliberately blanked status line — a
+    // connecting/reconnecting/offline daemon is an honest exception state,
+    // not a configurable item, and it is plain text (never a spinner).
+    const daemonLine = renderDaemonConnection(this.state.daemonConnection);
+
     const items = resolveStatusLineItems(this.state);
     // A deliberately blanked status line (`tui.statusLine: []`) renders nothing at all — not a
     // pair of empty strings. Returning zero lines lets the frame reclaim the row instead of
     // reserving a blank one.
-    if (items.length === 0) return [];
+    if (items.length === 0) return daemonLine === undefined ? [] : [daemonLine];
 
     const block = this.customStatusConfig?.display === 'block' && items.includes('custom-command');
     const segments = items
@@ -104,10 +110,14 @@ export class TuiStatusLine implements Component {
     const customLines = block
       ? this.renderCustomBlock(safeWidth, height - originalLines.length - 1)
       : [];
-    if (originalLines.length === 0 && customLines.length === 0) return [];
-    return this.customStatusConfig?.position === 'below'
-      ? ['', ...originalLines, ...customLines]
-      : ['', ...customLines, ...originalLines];
+    if (originalLines.length === 0 && customLines.length === 0) {
+      return daemonLine === undefined ? [] : [daemonLine];
+    }
+    const lines =
+      this.customStatusConfig?.position === 'below'
+        ? ['', ...originalLines, ...customLines]
+        : ['', ...customLines, ...originalLines];
+    return daemonLine === undefined ? lines : [daemonLine, ...lines];
   }
 
   private renderCustomBlock(width: number, availableRows: number): string[] {
@@ -123,6 +133,28 @@ export class TuiStatusLine implements Component {
       width,
       this.customStatusConfig?.colorMode,
     ).slice(0, rowLimit);
+  }
+}
+
+/**
+ * W4 (§4.6): the honest daemon connection label, or `undefined` when the
+ * window runs in-process (`MCODE_SERVER_MODE=off`) or the daemon is simply
+ * `ready` (no news is no line).
+ */
+function renderDaemonConnection(
+  state: TuiShellState['daemonConnection'],
+): string | undefined {
+  switch (state) {
+    case 'connecting':
+      return chalk.hex(colors.muted)('daemon: connecting…');
+    case 'reconnecting':
+      return chalk.hex(colors.signal)('daemon: reconnecting…');
+    case 'disconnected':
+      return chalk.hex(colors.signal)('daemon offline');
+    case 'closed':
+      return chalk.hex(colors.muted)('daemon disconnected');
+    default:
+      return undefined;
   }
 }
 

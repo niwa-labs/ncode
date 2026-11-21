@@ -11,6 +11,10 @@ import {
 } from "@mavis/local-runtime";
 import { logger } from "@mavis/shared/local-runtime-logging";
 
+import { join } from "node:path";
+
+import { HeadlessChromeBrowserProvider } from "./service/browser-use/headless/headless-chrome-provider.js";
+
 import {
   createBackgroundRuntime,
   type BackgroundRuntime,
@@ -19,7 +23,7 @@ import {
   cleanupFailedV1Startup,
   createDeferredAgentRuntimeTelemetry,
   createV1RuntimeCompatibility,
-  withAgentStorageScope,
+  withAgentStorageLock,
   type V1RuntimeCompatibility,
 } from "./compat/v1/runtime.js";
 import { createV2AgentRuntimeManagementPort } from "./local/agent-runtime-port.js";
@@ -29,6 +33,7 @@ import {
   type DatabaseInitializationResult,
 } from "./infra/db/initialize.js";
 import { createCliService } from "./local/app.js";
+import { resolveHistoryProviderMode } from "./service/session-system/messages/history/durable-canonical-history-provider.js";
 import type {
   CreateLocalRuntimeHostOptions,
   CreatedLocalRuntimeHost,
@@ -49,6 +54,12 @@ import {
   type RuntimeServices,
   type RuntimeServicesTestOverrides,
 } from "./services.js";
+import {
+  joinReleasedNativeTasksWithCanonicalHistory,
+  type ReleasedTaskRowSnapshot,
+} from "./service/turn-system/execution/steering/native-wait-recovery.js";
+import { scheduleLocalBackgroundTaskDelivery } from "@mavis/local-runtime";
+import type { NativeTaskWaits } from "./service/turn-system/execution/steering/native-task-waits.js";
 
 const V2_LAYOUT_MIGRATION_RECEIPT_CARRIER = Symbol.for(
   "mavis.local-runtime.v2-layout-migration-receipt",
@@ -96,6 +107,146 @@ function bindAskUserSuppressionProbe(
     hasPendingUserSteering(sessionId);
 }
 
+/**
+ * Native task-wait binding (verdict 09 §1.4), late-bound now that BOTH sides
+ * exist: the steering composition's port (durable mode only) and the API host
+ * with its background-task service. The port rides onto the host so the task
+ * tool runner registers reactive foreground waits, and the task-row
+ * projection (read status / promote out of `foreground` inside the committed
+ * release pass — §1.5) binds against the same service. V1-only/jsonl hosts
+ * keep the port unset: the task tool keeps the legacy always-inline contract.
+ */
+function bindNativeTaskWaits(
+  apiHost: V1CreatedLocalRuntimeHost["apiHost"],
+  turnSystem: InitializedOwnerRuntime["services"]["turnSystem"] | undefined,
+): void {
+  const nativeWaits = turnSystem?.nativeTaskWaits;
+  if (!nativeWaits) return;
+  apiHost.nativeTaskWaits = nativeWaits;
+  // Owner-input wake (owner bug 2026-11-06): a bounded task_output wait parked
+  // inside a running Turn must release early when a trusted owner input is
+  // accepted — the steer reaches the model in the SAME turn (canon 09), so the
+  // read rides the same accepted-owner-input generation the §1.7 executor
+  // yield seam probes. Machine deliveries never bump it (§1.2), so a
+  // completion notice cannot release the wait. JSONL hosts keep the port unset
+  // above and the full-wait behavior here.
+  apiHost.backgroundTaskService.bindOwnerInputGeneration((ownerSessionId) =>
+    // The durable composition always implements the §1.7 generation; the port
+    // types it optional, and a missing probe degrades to a constant (no wake).
+    nativeWaits.ownerInputGeneration?.(ownerSessionId) ?? 0,
+  );
+  (nativeWaits as NativeTaskWaits).bindTaskProjection({
+    readTaskStatus: async (taskId) =>
+      (await apiHost.backgroundTaskService.get(taskId))?.status,
+    promoteTaskRow: async (taskId) => {
+      // §1.5: mandatory release projection — a row still marked `foreground`
+      // is excluded from the session stop cascade (session-cascade-targets).
+      await apiHost.backgroundTaskService.patch(taskId, {
+        metadata: { executionMode: "background", releasedFromForegroundAtMs: apiHost.nowMs() },
+      });
+    },
+  });
+}
+
+/**
+ * Reactive subagents wave 3 crash-recovery join (verdict 09 §1.8): binds the
+ * seam outcome of released native task waits with the parent conversations'
+ * canonical results exactly once, and re-schedules the background-task
+ * terminal notifications that a crash lost after their durable persist (the
+ * scheduler retries in memory only). Best-effort: a failed join is reported
+ * and retried on the next startup; it can never fail the host.
+ */
+async function runNativeTaskRecoveryJoin(
+  apiHost: V1CreatedLocalRuntimeHost["apiHost"],
+  ownerRuntime: InitializedOwnerRuntime,
+): Promise<void> {
+  const nativeWaits = ownerRuntime.services.turnSystem?.nativeTaskWaits as
+    | NativeTaskWaits
+    | undefined;
+  if (!nativeWaits) return;
+  try {
+    const report = await joinReleasedNativeTasksWithCanonicalHistory({
+      nativeWaits,
+      historyMutation: ownerRuntime.services.sessionSystem.sessions.historyMutation,
+      listReleasedTaskRows: async (): Promise<readonly ReleasedTaskRowSnapshot[]> => {
+        const list = await apiHost.backgroundTaskService.list({
+          kinds: ["subagent"],
+          limit: 500,
+        });
+        return list.items
+          .filter((task) => typeof task.metadata?.["releasedFromForegroundAtMs"] === "number")
+          .map((task) => ({
+            taskId: task.taskId,
+            ownerSessionId: task.ownerSessionId,
+            parentTurnId: readStringMetadata(task.metadata, "parentTurnId"),
+            // The tool-call id is a top-level row field, not metadata.
+            toolCallId: typeof task.toolCallId === "string" ? task.toolCallId : "",
+            ...(typeof task.metadata?.["childSessionId"] === "string"
+              ? { childSessionId: String(task.metadata["childSessionId"]) }
+              : {}),
+            status: task.status,
+          }))
+          .filter((row) => row.parentTurnId !== "" && row.toolCallId !== "");
+      },
+    });
+    // Rupture "terminal persist до enqueue" (§5.4 №16): terminal rows whose
+    // owning process died before the delivery admission — nobody else will
+    // deliver them, so this process schedules the wake.
+    const lostTerminals =
+      await apiHost.backgroundTaskService.listUndeliveredTerminalTasksOfDeadOwners();
+    for (const task of lostTerminals) {
+      scheduleLocalBackgroundTaskDelivery(apiHost, task.taskId);
+    }
+    if (lostTerminals.length > 0) {
+      logger.info(
+        {
+          event: "background_task_terminal_delivery_rescheduled",
+          count: lostTerminals.length,
+        },
+        "Rescheduled background task terminal deliveries lost by a previous process",
+      );
+    }
+    void report;
+  } catch (error) {
+    logger.warn(
+      { err: error },
+      "Native task recovery join failed; the affected rounds stay visible for the next startup",
+    );
+  }
+}
+
+function readStringMetadata(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function bindSandboxPolicyControl(
+  apiHost: V1CreatedLocalRuntimeHost["apiHost"],
+  sandbox: InitializedOwnerRuntime["services"]["sandbox"],
+): void {
+  apiHost.readSandboxFilesystemMode = () =>
+    sandbox.configSnapshot().filesystem.policy.mode;
+  apiHost.applySandboxFilesystemMode = async (mode) => {
+    const current = sandbox.configSnapshot();
+    await sandbox.applyConfig({
+      ...current,
+      // The master switch and the level are one decision: `full_access` means
+      // no sandbox, and a restricting level cannot take effect while the
+      // switch is off (`parseSandboxConfig` normalizes the pair). Setting both
+      // keeps the stored config readable instead of leaving it to that
+      // normalization to reinterpret later.
+      enabled: mode !== "full_access",
+      filesystem: { ...current.filesystem, policy: { mode } },
+    });
+    // Report what the service ended up enforcing rather than what was asked
+    // for, so the UI cannot claim a level the backend did not accept.
+    return sandbox.configSnapshot().filesystem.policy.mode;
+  };
+}
+
 function bindV2AgentRuntimeManagementPort(
   agentRuntimePort: DeferredLocalAgentRuntimePort,
   ownerRuntime: InitializedOwnerRuntime,
@@ -122,21 +273,48 @@ async function createLocalRuntimeHostV2Internal(
   overrides: LocalRuntimeV2TestOverrides,
 ): Promise<CreatedLocalRuntimeHost> {
   const compatibility = createV1Compatibility(isV2RuntimeOwner(options));
+  // Out-of-the-box Browser tooling (owner bug 2026-11-07): a host that does
+  // not inject its own Browser adapter — the mcoded daemon surface has no
+  // Electron shell to own one — composes the local headless Chrome provider,
+  // so the model's turn catalog carries the Browser tool whenever Browser Use
+  // tooling is not explicitly disabled. `beta.browserUseTooling: false` stays
+  // the owner's kill switch (the resolved product config defaults the flag
+  // ON, and the plugin's `control-in-app-browser` skill must never be visible
+  // without its tool). The provider launches Chrome lazily per Browser
+  // session: this composition never starts a process, and a machine without
+  // any Chrome executable fails the first Browser action with an honest setup
+  // error instead of misconfiguring startup.
+  const defaultBrowserProvider = resolveDefaultBrowserProvider(options);
+  const effectiveOptions: LocalRuntimeProductHostOptions = defaultBrowserProvider
+    ? { ...options, browserAdapter: defaultBrowserProvider }
+    : options;
   let agentOwner: AgentRuntimeOwner | undefined;
   let v1: V1CreatedLocalRuntimeHost | undefined;
   let legacyClose: (() => Promise<void>) | undefined;
   let ownerRuntime: InitializedOwnerRuntime | undefined;
-  const agentRuntimePort: DeferredLocalAgentRuntimePort = createDeferredLocalAgentRuntimePort();
-  const getConfig = () => v1?.apiHost.configGetter() ?? options.configGetter?.();
-  const sandboxOperationsFactory = createDeferredLocalSandboxBashOperationsFactory(
-    () => options.configGetter?.().sandbox?.enabled ?? false,
-    (plan) =>
+  const agentRuntimePort: DeferredLocalAgentRuntimePort =
+    createDeferredLocalAgentRuntimePort();
+  const sandboxOperationsFactory =
+    createDeferredLocalSandboxBashOperationsFactory(
+      () => options.configGetter?.().sandbox?.enabled ?? false,
+      // The rm shim is the PATH half of the destructive-delete guard, so it
+      // must move with it: consulted per launch, and only an explicit `false`
+      // stops shadowing `rm`.
       resolveAgentBashEnvPolicy(
         options.dataDir,
-        process.platform,
-        plan?.nativeDelete ?? getConfig()?.permission?.nativeDelete === true,
+        undefined,
+        // Background bash keeps the recoverable-delete shim unconditionally.
+        //
+        // Unlike the foreground tool — whose policy is rebuilt per Turn and so
+        // knows which Session it belongs to — this executor is created once for
+        // the whole process and only sees a `sessionId` at spawn time, with no
+        // synchronous way to tell a main-window run from a sub-agent one. The
+        // destructive-delete guard is therefore never relaxed here: an
+        // unattributable background delete keeps the recoverable net rather
+        // than inheriting the main window's opt-out.
+        () => true,
       ),
-  );
+    );
   const agentTelemetry = createDeferredAgentRuntimeTelemetry();
   let database: DatabaseClient | undefined;
   let preparedServices: PreparedRuntimeServices | undefined;
@@ -172,7 +350,6 @@ async function createLocalRuntimeHostV2Internal(
     // (a 17G dataDir starved the 600s bootstrap watchdog six times in a row).
     // The rootless-v2-generation module remains for the CLI, which acquires
     // its own operation fence.
-
     // Layout migration must complete before the authoritative V2 target is
     // opened.  The services composition below gates all legacy access on the
     // target Agent row count.
@@ -222,7 +399,7 @@ async function createLocalRuntimeHostV2Internal(
           : {}),
         ...(options.nowMs ? { nowMs: options.nowMs } : {}),
         withAgentStorageLock: (operation) =>
-          withAgentStorageScope(options.dataDir, operation),
+          withAgentStorageLock(options.dataDir, operation),
         reportCutover: reportAgentCutover,
         reportIdentityDetach: reportAgentIdentityDetach,
         reportLegacyCustomMaterialization:
@@ -281,7 +458,7 @@ async function createLocalRuntimeHostV2Internal(
           prepared: resolvedPreparedServices,
           disabledLegacyScheduleCount:
             initialization.disabledLegacyScheduleCount,
-          options,
+          options: effectiveOptions,
           overrides,
         }),
       );
@@ -299,6 +476,26 @@ async function createLocalRuntimeHostV2Internal(
       // V2 Turn system exists. V1-only hosts (and partial test graphs) keep
       // the probe unset, which means never suppress.
       bindAskUserSuppressionProbe(v1.apiHost, ownerRuntime.services.turnSystem);
+      // Native task-wait binding (verdict 09 §1.4): same late binding — the
+      // durable steering composition's port rides onto the API host with its
+      // task-row projection; jsonl/V1-only hosts keep the legacy contract.
+      bindNativeTaskWaits(v1.apiHost, ownerRuntime.services.turnSystem);
+      // Reactive subagents wave 3 (verdict 09 §1.8/§5.4 №16): the crash-
+      // recovery join — finalize prepared releases into the seam, close the
+      // parents' released rounds with the KNOWN seam notes, reschedule the
+      // terminal notifications a crash lost, and report unconsumed owner
+      // inputs. Runs before the host accepts submissions, so no live turn can
+      // race the join; jsonl hosts have no native binding and skip it.
+      await runNativeTaskRecoveryJoin(v1.apiHost, ownerRuntime);
+      // Same late binding for the sandbox policy: only the owner service can
+      // re-initialize the platform backend, so hosts without it report the
+      // sandbox as unmanaged instead of writing a mode nothing enforces.
+      bindSandboxPolicyControl(v1.apiHost, ownerRuntime.services.sandbox);
+      // §2.1: the per-session permission-mode registry rides onto the V1 API
+      // host so the V1 permission seam and the child-Session creation points
+      // read the SAME instance the Turn system locks and the CliService
+      // binds. V1-only hosts keep it unset (process mode everywhere).
+      v1.apiHost.sessionPermissionModes = ownerRuntime.services.sessionPermissionModes;
     }
     const cliService = ownerRuntime
       ? createCliService(ownerRuntime.services)
@@ -311,6 +508,7 @@ async function createLocalRuntimeHostV2Internal(
       agentTelemetry,
       v1,
       database,
+      defaultBrowserProvider,
     });
     const ownerCompromiseGuard = createRuntimeOwnerCompromiseGuard(
       ownerRuntime,
@@ -359,7 +557,7 @@ async function createLocalRuntimeHostV2Internal(
     ownerCompromiseGuard.publish();
     ownerRuntime?.background.startMaintenance();
 
-    return createStartedHost(v1, ownerRuntime, v1.ready);
+    return createStartedHost(v1, ownerRuntime, cliService, v1.ready);
   } catch (error) {
     compatibility?.failConversation(error);
     await cleanupFailedStartup({
@@ -369,6 +567,7 @@ async function createLocalRuntimeHostV2Internal(
       agentOwner,
       agentTelemetry,
       database,
+      defaultBrowserProvider,
     });
     throw error;
   }
@@ -435,9 +634,9 @@ function reportDetachedOwnerChannelStartupTiming(
 function createStartedHost(
   v1: V1CreatedLocalRuntimeHost,
   ownerRuntime: InitializedOwnerRuntime | undefined,
+  cliService: ReturnType<typeof createCliService> | undefined,
   ready: Promise<void>,
 ): CreatedLocalRuntimeHost {
-  const cliService = ownerRuntime ? createCliService(ownerRuntime.services) : undefined;
   return {
     ...v1,
     ...(ownerRuntime ? { application: ownerRuntime.services.application } : {}),
@@ -757,6 +956,7 @@ function configureV1HostOptions(
     promptConfigKey,
     promptMode,
     systemPromptOverrides,
+    subscriptionQuota,
     ...v1Options
   } = options;
   void browserAdapter;
@@ -764,6 +964,7 @@ function configureV1HostOptions(
   void promptConfigKey;
   void promptMode;
   void systemPromptOverrides;
+  void subscriptionQuota;
   // V2 owns the channel startup point: the V1 shell must build stores, APIs,
   // runner and registries without restoring a single transport.
   if (compatibility) {
@@ -846,7 +1047,13 @@ async function initializeOwnerRuntime(input: {
       metrics: v1.metricsClient,
       ...(options.nowMs ? { nowMs: options.nowMs } : {}),
       restorePersistedJobExecution: startupExecutionEnabled,
-      enableScheduler: electronOwner,
+      // W10 atomic scheduler swap (state/w08.md closure №1): in the durable
+      // hybrid default the croner Scheduler is NOT constructed at all — the
+      // cron wake lives on the ONE pi scheduler (CronJobBridge); three
+      // schedulers never live. jsonl compatibility mode keeps the legacy
+      // scheduler.
+      enableScheduler:
+        electronOwner && resolveHistoryProviderMode() !== "durable",
     });
     services = await createRuntimeServices({
       db: database.db,
@@ -869,15 +1076,20 @@ async function initializeOwnerRuntime(input: {
       recoverPersistedState: startupExecutionEnabled,
       greetingEnabled: electronOwner && startupExecutionEnabled,
       runtimeOwnerKind: options.runtimeOwnerKind,
+      // Per-session durable history (owner decision 2026-11-18): the host
+      // that owns the shared system log (the mcoded daemon) passes it down;
+      // embedded hosts stay per-session only.
+      ...(options.ownsSystemLog !== undefined
+        ? { ownsSystemLog: options.ownsSystemLog }
+        : {}),
       browserUse: createBrowserUseServiceOptions(options),
       ...(options.promptConfigKey
         ? { promptConfigKey: options.promptConfigKey }
         : {}),
       capabilityProfile: options.capabilityProfile,
       systemPromptOverrides: options.systemPromptOverrides,
+      subscriptionQuota: options.subscriptionQuota,
       getRunawayGuardConfig: options.getRunawayGuardConfig,
-      getPromptSuggestionPolicy: options.getPromptSuggestionPolicy,
-      promptSuggestionSurface: options.promptSuggestionSurface,
       ...(options.getToolResultCompactionConfig
         ? {
             getToolResultCompactionConfig:
@@ -922,6 +1134,8 @@ interface RuntimeResourceState {
   readonly agentTelemetry: { close(): void };
   readonly v1: V1CreatedLocalRuntimeHost | undefined;
   readonly database: DatabaseClient | undefined;
+  /** The host-owned default provider (see resolveDefaultBrowserProvider). */
+  readonly defaultBrowserProvider: { close(): Promise<void> } | undefined;
 }
 
 function createSharedClose(state: RuntimeResourceState): () => Promise<void> {
@@ -942,6 +1156,7 @@ async function closeRuntime({
   agentTelemetry,
   v1,
   database,
+  defaultBrowserProvider,
 }: RuntimeResourceState): Promise<void> {
   let firstError: unknown;
   await stopV1Producers(v1, (error) => {
@@ -972,6 +1187,14 @@ async function closeRuntime({
   }
   try {
     database?.close();
+  } catch (error) {
+    firstError ??= error;
+  }
+  try {
+    // The composed-by-default Browser provider is HOST-owned (unlike an
+    // injected adapter, whose owner closes it): dispose its Chrome sessions
+    // with the runtime that created it.
+    await defaultBrowserProvider?.close();
   } catch (error) {
     firstError ??= error;
   }
@@ -1013,6 +1236,7 @@ async function cleanupFailedStartup({
   agentOwner,
   agentTelemetry,
   database,
+  defaultBrowserProvider,
 }: RuntimeResourceState): Promise<void> {
   await stopV1Producers(v1, (error) => {
     try {
@@ -1075,6 +1299,41 @@ async function cleanupFailedStartup({
       // Continue cleanup.
     }
   }
+  try {
+    await defaultBrowserProvider?.close();
+  } catch (error) {
+    try {
+      logger.warn(
+        { cleanupStep: "close_default_browser_provider", err: error },
+        "local-runtime-v2 startup cleanup failed",
+      );
+    } catch {
+      // Continue cleanup.
+    }
+  }
+}
+
+/**
+ * The out-of-the-box Browser adapter for hosts without an injected one.
+ * Construction is synchronous and starts no process — Chrome launches lazily
+ * per Browser session — so a machine without Chrome still boots; the first
+ * Browser action reports the honest setup error. Ownership: the HOST closes
+ * this provider (an injected adapter stays owned by its injectors, whose
+ * lifecycle the TUI/daemon shells already manage).
+ */
+function resolveDefaultBrowserProvider(
+  options: LocalRuntimeProductHostOptions,
+): HeadlessChromeBrowserProvider | undefined {
+  if (options.browserAdapter) return undefined;
+  const configured = options.configGetter?.().beta?.browserUseTooling;
+  if (configured === false) return undefined;
+  const chromePath =
+    options.configGetter?.().browser?.chromePath?.trim() ||
+    process.env.MCODE_CHROME_PATH?.trim();
+  return new HeadlessChromeBrowserProvider({
+    dataDir: join(options.dataDir, "browser"),
+    ...(chromePath ? { chromePath } : {}),
+  });
 }
 
 async function stopV1Producers(

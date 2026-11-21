@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createLogger } from '@mavis/logging';
 import { loadBetterSqlite3Module } from '../better-sqlite3-loader.js';
 import { registerLocalAssetSync, type LocalRuntimeAssetRecord } from '../../assets/store.js';
 import { openLocalRuntimeDb, type DatabaseConstructor, type DatabaseLike } from '../db.js';
@@ -18,7 +19,7 @@ export interface V2MigrationOptions {
   dataDir: DataDirInput;
   nowMs?: () => number;
   onError?: (err: Error) => void;
-  /** Structured-log sink for migration sub-steps (defaults to console.log). */
+  /** Structured-log sink for migration sub-steps (defaults to the `mcode:runtime` debug logger). */
   logLine?: (line: string) => void;
   /** Optional reporter for `legacy_migration_total{layer=v2_layout}`; absent → noop. */
   metrics?: ModuleMetricsReporter;
@@ -69,6 +70,9 @@ const REQUIRED_LOCAL_RUNTIME_TABLES = getLocalRuntimeSqliteTableRoleLegend().tab
 );
 const V2_LAYOUT_MIGRATION_RECEIPT_BRAND = Symbol('v2-layout-migration-receipt-brand');
 
+/** Spec §4 registry: `mcode:runtime` is the local-runtime namespace. */
+const log = createLogger('mcode:runtime');
+
 /**
  * Internal carrier shared only by the V2 composition root and the V1 host
  * boundary. Its value is still validated with the private migration brand.
@@ -99,6 +103,7 @@ export function ensureCurrentLocalRuntimeDataMigratedToV2(
   };
 
   try {
+    log.info('v2 migration start', { dataDir, migrationId: manifest.migrationId });
     copyCurrentLocalRuntimeStores(dataDir, manifest);
     manifest.assetRefMigrationDbIdentity = readCurrentRuntimeDbIdentity(dataDir);
     const skipAssetRefMigration = isAssetRefMigrationCurrent(dataDir, manifest);
@@ -107,8 +112,7 @@ export function ensureCurrentLocalRuntimeDataMigratedToV2(
       nowMs,
       manifest,
       skipAssetRefMigration,
-      // eslint-disable-next-line no-console
-      logLine: options.logLine ?? ((line) => console.log(line)),
+      logLine: options.logLine ?? ((line) => log.debug(line)),
       onDone: (finishedManifest) => writeMigrationManifest(dataDir, nowMs(), finishedManifest),
       onError: options.onError,
     });
@@ -116,6 +120,14 @@ export function ensureCurrentLocalRuntimeDataMigratedToV2(
     if (result.status === 'completed') {
       markCompletedV2LayoutMigrationReceipt(result, dataDir);
     }
+    log.info('v2 migration completed', {
+      migrationId: result.migrationId,
+      status: result.status,
+      copied: result.copied.length,
+      skipped: result.skipped.length,
+      assetRefsUpdated: result.assetRefsUpdated,
+      durationMs: nowMs() - startedAtMs,
+    });
     return result;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -124,6 +136,11 @@ export function ensureCurrentLocalRuntimeDataMigratedToV2(
     manifest.finishedAtMs = nowMs();
     // Emit before the manifest write so a failing write can't drop the metric.
     reportV2LayoutMigration(options.metrics, 'failed', manifest.finishedAtMs - startedAtMs);
+    log.error('v2 migration failed', {
+      err: error,
+      migrationId: manifest.migrationId,
+      durationMs: manifest.finishedAtMs - startedAtMs,
+    });
     writeMigrationManifest(dataDir, manifest.finishedAtMs, manifest);
     options.onError?.(error);
     return manifest;
@@ -485,29 +502,38 @@ function migrateJsonRows(
   },
 ): number {
   if (!tableExists(db, input.table)) return 0;
-  const rows = db
-    .prepare(
-      `SELECT ${input.idColumn} AS id, ${input.jsonColumn} AS data, ${input.sessionColumn} AS sessionId FROM ${input.table}`,
-    )
-    .all() as Array<{ id: number | string; data: string; sessionId: string }>;
+  // Page by the primary key instead of materializing the table: a legacy
+  // profile can hold gigabytes of message rows (the OOM repro was a 4 GB
+  // runtime-state.sqlite), and `.all()` on the whole table reached the heap
+  // limit before the first update. Pages are bounded (200 rows), so memory
+  // no longer depends on history size.
+  const select = db.prepare(
+    `SELECT ${input.idColumn} AS id, ${input.jsonColumn} AS data, ${input.sessionColumn} AS sessionId FROM ${input.table} WHERE ${input.idColumn} > ? ORDER BY ${input.idColumn} LIMIT 200`,
+  );
+  const update = db.prepare(
+    `UPDATE ${input.table} SET ${input.jsonColumn} = ? WHERE ${input.idColumn} = ?`,
+  );
   let updated = 0;
-  for (const row of rows) {
-    const parsed = parseJsonRecord(row.data);
-    if (parsed === undefined) continue;
-    const result = migrateAttachmentRefs(
-      parsed,
-      input.dataDir,
-      input.nowMs,
-      input.errors,
-      row.sessionId,
-      input.migratedAssets,
-    );
-    if (!result.changed) continue;
-    db.prepare(`UPDATE ${input.table} SET ${input.jsonColumn} = ? WHERE ${input.idColumn} = ?`).run(
-      JSON.stringify(result.value),
-      row.id,
-    );
-    updated += result.updated;
+  let cursor: number | string = -1;
+  for (;;) {
+    const rows = select.all(cursor) as Array<{ id: number | string; data: string; sessionId: string }>;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      cursor = row.id;
+      const parsed = parseJsonRecord(row.data);
+      if (parsed === undefined) continue;
+      const result = migrateAttachmentRefs(
+        parsed,
+        input.dataDir,
+        input.nowMs,
+        input.errors,
+        row.sessionId,
+        input.migratedAssets,
+      );
+      if (!result.changed) continue;
+      update.run(JSON.stringify(result.value), row.id);
+      updated += result.updated;
+    }
   }
   return updated;
 }
@@ -520,48 +546,55 @@ function migratePackedMessageRows(
   migratedAssets: Map<string, LocalRuntimeAssetRecord>,
 ): number {
   if (!tableExists(db, 'local_runtime_messages')) return 0;
-  const rows = db
-    .prepare(
-      'SELECT session_id AS sessionId, display_messages_json AS displayMessages, pi_history_json AS piHistory FROM local_runtime_messages',
-    )
-    .all() as Array<{ sessionId: string; displayMessages: string; piHistory: string }>;
+  // Keyed pages, same OOM rationale as migrateJsonRows: the packed history of
+  // a large legacy profile must never be materialized in one array.
+  const select = db.prepare(
+    'SELECT session_id AS sessionId, display_messages_json AS displayMessages, pi_history_json AS piHistory FROM local_runtime_messages WHERE session_id > ? ORDER BY session_id LIMIT 50',
+  );
+  const update = db.prepare(
+    'UPDATE local_runtime_messages SET display_messages_json = ?, pi_history_json = ? WHERE session_id = ?',
+  );
   let updated = 0;
-  for (const row of rows) {
-    const displayMessages = parseJsonRecord(row.displayMessages);
-    const piHistory = parseJsonRecord(row.piHistory);
-    let changed = false;
-    let rowUpdated = 0;
-    if (displayMessages !== undefined) {
-      const result = migrateAttachmentRefs(
-        displayMessages,
-        dataDir,
-        nowMs,
-        errors,
-        row.sessionId,
-        migratedAssets,
-      );
-      changed = changed || result.changed;
-      rowUpdated += result.updated;
-      row.displayMessages = JSON.stringify(result.value);
+  let cursor = '';
+  for (;;) {
+    const rows = select.all(cursor) as Array<{ sessionId: string; displayMessages: string; piHistory: string }>;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      cursor = row.sessionId;
+      const displayMessages = parseJsonRecord(row.displayMessages);
+      const piHistory = parseJsonRecord(row.piHistory);
+      let changed = false;
+      let rowUpdated = 0;
+      if (displayMessages !== undefined) {
+        const result = migrateAttachmentRefs(
+          displayMessages,
+          dataDir,
+          nowMs,
+          errors,
+          row.sessionId,
+          migratedAssets,
+        );
+        changed = changed || result.changed;
+        rowUpdated += result.updated;
+        row.displayMessages = JSON.stringify(result.value);
+      }
+      if (piHistory !== undefined) {
+        const result = migrateAttachmentRefs(
+          piHistory,
+          dataDir,
+          nowMs,
+          errors,
+          row.sessionId,
+          migratedAssets,
+        );
+        changed = changed || result.changed;
+        rowUpdated += result.updated;
+        row.piHistory = JSON.stringify(result.value);
+      }
+      if (!changed) continue;
+      update.run(row.displayMessages, row.piHistory, row.sessionId);
+      updated += rowUpdated;
     }
-    if (piHistory !== undefined) {
-      const result = migrateAttachmentRefs(
-        piHistory,
-        dataDir,
-        nowMs,
-        errors,
-        row.sessionId,
-        migratedAssets,
-      );
-      changed = changed || result.changed;
-      rowUpdated += result.updated;
-      row.piHistory = JSON.stringify(result.value);
-    }
-    if (!changed) continue;
-    db.prepare(
-      'UPDATE local_runtime_messages SET display_messages_json = ?, pi_history_json = ? WHERE session_id = ?',
-    ).run(row.displayMessages, row.piHistory, row.sessionId);
-    updated += rowUpdated;
   }
   return updated;
 }

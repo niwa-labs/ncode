@@ -1,14 +1,6 @@
-export {
-  backgroundTaskNotificationReceiptId,
-  createUserStopCascade,
-  isTaskDeliverySuppressed,
-  type UserStopCascade,
-} from "./background-task/index.js";
-export {
-  ensureRmShim,
-  resolveAgentBashEnvPolicy,
-  resolveRmShimDir,
-} from "./infra/ensure-rm-shim.js";
+export { createUserStopCascade, type UserStopCascade } from "./background-task/index.js";
+export { scheduleLocalBackgroundTaskDelivery } from "./background-task/index.js";
+export { resolveAgentBashEnvPolicy } from "./infra/ensure-rm-shim.js";
 export {
   ManagedWorktreeService,
   type ManagedWorktreeServicePort,
@@ -27,8 +19,8 @@ export {
 export { closeAgentDb } from "./agent/db.js";
 export { resolveTaskTarget } from "./agent/port.js";
 export {
-  withAgentNameConflictMigrationScope,
-  type AgentNameConflictMigrationResult,
+  withAgentNameConflictMigrationScope as withAgentNameConflictMigrationLock,
+  type AgentNameConflictMigrationScope,
 } from "./persistence/migration/agent-name-conflict-migration.js";
 export {
   createDeferredLocalAgentRuntimePort,
@@ -70,6 +62,15 @@ export { ensureCurrentLocalRuntimeDataMigratedToV2OrThrow } from "./persistence/
 export { LocalRuntimeApiHost } from "./api/host.js";
 
 export {
+  nativeTaskWaitId,
+  type LocalNativeTaskWaits,
+  type NativeTaskWaitHandle,
+  type NativeTaskWaitOutcome,
+  type NativeTaskWaitRegistration,
+  type NativeTaskWaitReleaseReason,
+} from "./api/native-task-wait.js";
+
+export {
   createLocalRuntimeHost,
   type CreateConversationCompatibilityHostOptions,
   type CreateLocalRuntimeHostOptions,
@@ -80,6 +81,13 @@ export { ThreadGoalContractError } from "./thread-goal/contract.js";
 
 export { readLocalPermissionMode } from "./api/host-helpers.js";
 export { replyLocalPermissionRequests } from "./api/routes/permissions.js";
+export {
+  localPermissionVerdictKey,
+  recordLocalPermissionVerdict,
+  resetLocalPermissionVerdictLedger,
+  takeLocalPermissionVerdict,
+  type LocalPermissionVerdictAttribution,
+} from "./permissions/verdict-ledger.js";
 
 export { updateLocalConfigFile } from "./config/update.js";
 

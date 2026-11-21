@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { TuiActiveRunFlow } from "../../../../../src/tui/controller/run/active-run-flow.js";
 import { TuiCommandFlow } from "../../../../../src/tui/controller/product/command-flow.js";
 import {
   MINIMAX_CODE_TUI_LOGIN_REQUIRED_MESSAGE,
@@ -1086,112 +1087,6 @@ describe("TuiCommandFlow", () => {
     });
   });
 
-  describe('while another MCode process runs the Session', () => {
-    function createElsewhereFlow(afterRefresh: {
-      state: 'running' | 'idle';
-      runningElsewhere?: true;
-    }) {
-      let snapshot: Record<string, unknown> = {
-        sessionId: 'session-1',
-        state: 'running',
-        runningElsewhere: true,
-        actions: { steer: false },
-      };
-      const activeRunFlow = {
-        currentSnapshot: vi.fn(() => snapshot),
-        refresh: vi.fn(async () => {
-          snapshot = { sessionId: 'session-1', actions: { steer: false }, ...afterRefresh };
-        }),
-        steer: vi.fn(async () => false),
-      };
-      const controller = {
-        snapshot: vi.fn(() => ({
-          status: 'idle' as const,
-          sessions: [],
-          session: { sessionId: 'session-1' },
-        })),
-        hasInProcessRun: vi.fn(() => false),
-        reconcileOwnerHistory: vi.fn(async () => true),
-        requireLoginForAgentAction: vi.fn(async () => undefined),
-        projectOptimisticUserMessage: vi.fn(),
-        removeOptimisticUserMessage: vi.fn(),
-      };
-      const queueFlow = {
-        beginAdmission: vi.fn(),
-        cancelAdmission: vi.fn(),
-        enqueue: vi.fn(async () => undefined),
-      };
-      const runProjection = {
-        snapshot: () => ({ queuedCount: 0 }),
-        reconcileRuntimeTurn: vi.fn(),
-      };
-      const editor = { setText: vi.fn() };
-      const setHint = vi.fn();
-      const flow = new TuiCommandFlow({
-        workspaceDir: '/workspace',
-        controller: controller as never,
-        activeRunFlow: activeRunFlow as never,
-        featureFlow: createFeatureFlowMock() as never,
-        feedbackFlow: {} as never,
-        updateFlow: {} as never,
-        interactionFlow: {
-          handleCommand: vi.fn(async () => false),
-          hasPending: vi.fn(() => false),
-        } as never,
-        sessionFlow: {} as never,
-        queueFlow: queueFlow as never,
-        composerDraft: { hasContent: vi.fn(() => false) } as never,
-        workspaceRoots: { additionalDirectories: () => [] } as never,
-        runProjection: runProjection as never,
-        editor: editor as never,
-        surface: {} as never,
-        surfaceHost: { setChatFocus: vi.fn() } as never,
-        queueEnabled: true,
-        liveRunId: () => 'session:session-1',
-        runtimeStopping: () => false,
-        abortLiveTurn: vi.fn(async () => false),
-        leaveUi: vi.fn(async () => undefined),
-        whenReady: vi.fn(async () => undefined),
-        append: vi.fn(),
-        setHint,
-        onChanged: vi.fn(),
-      });
-      return { activeRunFlow, controller, editor, flow, queueFlow, runProjection, setHint };
-    }
-
-    it('keeps the draft instead of steering or queueing', async () => {
-      const harness = createElsewhereFlow({ state: 'running', runningElsewhere: true });
-
-      await expect(
-        harness.flow.submit('also check the tests', undefined, { busyAction: 'steer' }),
-      ).resolves.toBe('retained');
-
-      expect(harness.activeRunFlow.refresh).toHaveBeenCalledWith(true);
-      expect(harness.activeRunFlow.steer).not.toHaveBeenCalled();
-      expect(harness.queueFlow.enqueue).not.toHaveBeenCalled();
-      expect(harness.runProjection.reconcileRuntimeTurn).not.toHaveBeenCalled();
-      expect(harness.editor.setText).toHaveBeenCalledWith('also check the tests');
-      expect(harness.setHint).toHaveBeenLastCalledWith(
-        'This Session is running in another MCode process and is read-only here. Your draft is preserved.',
-      );
-    });
-
-    it('refreshes the Session once the other run ends and waits for an explicit resend', async () => {
-      const harness = createElsewhereFlow({ state: 'idle' });
-
-      await expect(harness.flow.submit('also check the tests')).resolves.toBe('retained');
-
-      expect(harness.runProjection.reconcileRuntimeTurn).toHaveBeenCalledWith(undefined);
-      expect(harness.controller.reconcileOwnerHistory).toHaveBeenCalledTimes(1);
-      expect(harness.activeRunFlow.steer).not.toHaveBeenCalled();
-      expect(harness.queueFlow.enqueue).not.toHaveBeenCalled();
-      expect(harness.editor.setText).toHaveBeenCalledWith('also check the tests');
-      expect(harness.setHint).toHaveBeenLastCalledWith(
-        'The other MCode process finished; Session refreshed. Press Enter to send your draft.',
-      );
-    });
-  });
-
   it.each([
     ["accepts the handoff", false, "queue-item-1"],
     ["rejects the handoff", true, undefined],
@@ -1372,6 +1267,80 @@ describe("TuiCommandFlow", () => {
       expect.objectContaining({ content: "follow-up" }),
       expect.stringMatching(/^\d+-\d+$/u),
     );
+  });
+
+  it.each([true, false])("preserves Enter intent after busy refusal (accepted=%s)", async (accepted) => {
+    const steer = vi.fn(async () => accepted);
+    const restoreSubmission = vi.fn();
+    const projectOptimisticUserMessage = vi.fn();
+    const removeOptimisticUserMessage = vi.fn();
+    const beginAdmission = vi.fn();
+    const enqueue = vi.fn(async () => undefined);
+    const draft = { attachments: [] };
+    const flow = new TuiCommandFlow({
+      workspaceDir: "/workspace",
+      controller: {
+        snapshot: vi.fn(() => ({
+          status: "idle" as const,
+          sessions: [],
+          session: { sessionId: "session-1" },
+        })),
+        submit: vi.fn(async () => "queue-required" as const),
+        requireLoginForAgentAction: vi.fn(async () => undefined),
+        projectOptimisticUserMessage,
+        removeOptimisticUserMessage,
+      } as never,
+      activeRunFlow: { steer } as never,
+      featureFlow: createFeatureFlowMock() as never,
+      feedbackFlow: {} as never,
+      updateFlow: {} as never,
+      interactionFlow: {
+        handleCommand: vi.fn(async () => false),
+        hasPending: vi.fn(() => false),
+      } as never,
+      sessionFlow: {} as never,
+      queueFlow: {
+        beginAdmission,
+        cancelAdmission: vi.fn(),
+        enqueue,
+      } as never,
+      composerDraft: {
+        hasContent: vi.fn(() => false),
+        restoreSubmission,
+        completeSubmission: vi.fn(async () => undefined),
+      } as never,
+      workspaceRoots: { additionalDirectories: () => [] } as never,
+      runProjection: { snapshot: () => ({ queuedCount: 0 }) } as never,
+      editor: { restoreSubmittedDraft: vi.fn() } as never,
+      surface: {} as never,
+      surfaceHost: { setChatFocus: vi.fn() } as never,
+      queueEnabled: true,
+      liveRunId: () => undefined,
+      runtimeStopping: () => false,
+      abortLiveTurn: vi.fn(async () => false),
+      leaveUi: vi.fn(async () => undefined),
+      whenReady: vi.fn(async () => undefined),
+      append: vi.fn(),
+      setHint: vi.fn(),
+      onChanged: vi.fn(),
+    });
+    const seed = {
+      sessionId: "session-1",
+      editor: {
+        schemaVersion: 1 as const,
+        text: "follow-up",
+        cursor: 9,
+        pasteCounter: 0,
+        pastes: [],
+      },
+      resources: draft,
+    };
+
+    await expect(flow.submit("follow-up", seed, { busyAction: "steer" })).resolves.toBe(accepted ? "consumed" : "retained");
+    expect(steer).toHaveBeenCalledWith("follow-up", { requireActiveTurn: true, attachments: [], transcriptAttachments: [] });
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(beginAdmission).not.toHaveBeenCalled();
+    if (!accepted) expect(restoreSubmission).toHaveBeenCalled();
   });
 
   it("preserves the draft and guides login when a direct Agent Turn is blocked", async () => {
@@ -1814,5 +1783,273 @@ describe("TuiCommandFlow", () => {
     );
     expect(showPending).toHaveBeenCalledTimes(1);
     expect(activeRunFlow.handle).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Owner bug 2026-11-06 (input lost during a live run): settings slash
+// commands apply immediately and are NEVER parked in the Runtime Queue, and
+// an unrecognized slash command refuses the parking with a visible warning
+// instead of dying silently as queue text. The Enter steer intent (canon
+// verdict 09) stays untouched: input routed through steer is delivered, not
+// parked.
+// ---------------------------------------------------------------------------
+describe("TuiCommandFlow: slash commands vs the Queue while busy", () => {
+  function createBusyQueueFlow(options: {
+    permissionModeFlow?: Record<string, unknown>;
+    activeRunFlow?: Record<string, unknown>;
+    queueFlow?: Record<string, unknown>;
+    append?: (text: string, kind?: string) => void;
+    editor?: Record<string, unknown>;
+  }) {
+    const controller = {
+      snapshot: vi.fn(() => ({
+        status: "running" as const,
+        sessions: [],
+        session: { sessionId: "session-1" },
+        activeTurnId: "turn-active",
+      })),
+      hasInProcessRun: vi.fn(() => true),
+      requireLoginForAgentAction: vi.fn(async () => undefined),
+      projectOptimisticUserMessage: vi.fn(),
+      removeOptimisticUserMessage: vi.fn(),
+    };
+    const composerDraft = {
+      hasContent: vi.fn(() => false),
+      capture: vi.fn(() => ({ attachments: [] })),
+      reserveSubmission: vi.fn(() => ({ attachments: [] })),
+      restoreSubmission: vi.fn(),
+      completeSubmission: vi.fn(async () => undefined),
+    };
+    const queueFlow = {
+      beginAdmission: vi.fn(),
+      cancelAdmission: vi.fn(),
+      enqueue: vi.fn(async () => undefined),
+      ...(options.queueFlow ?? {}),
+    };
+    const flow = new TuiCommandFlow({
+      workspaceDir: "/workspace",
+      controller: controller as never,
+      activeRunFlow: (options.activeRunFlow ?? {
+        steer: vi.fn(async () => true),
+      }) as never,
+      featureFlow: createFeatureFlowMock() as never,
+      feedbackFlow: {} as never,
+      updateFlow: {} as never,
+      interactionFlow: {
+        handleCommand: vi.fn(async () => false),
+        hasPending: vi.fn(() => false),
+        showPending: vi.fn(),
+      } as never,
+      sessionFlow: {} as never,
+      queueFlow: queueFlow as never,
+      composerDraft: composerDraft as never,
+      workspaceRoots: { additionalDirectories: () => [] } as never,
+      runProjection: { snapshot: () => ({ queuedCount: 0 }) } as never,
+      editor: (options.editor ?? { setText: vi.fn() }) as never,
+      surface: {} as never,
+      surfaceHost: { setChatFocus: vi.fn() } as never,
+      ...(options.permissionModeFlow ? { permissionModeFlow: options.permissionModeFlow } : {}),
+      queueEnabled: true,
+      liveRunId: () => "run-active",
+      runtimeStopping: () => false,
+      abortLiveTurn: vi.fn(async () => false),
+      leaveUi: vi.fn(async () => undefined),
+      whenReady: vi.fn(async () => undefined),
+      append: options.append ?? vi.fn(),
+      setHint: vi.fn(),
+      onChanged: vi.fn(),
+    });
+    return { flow, controller, composerDraft, queueFlow };
+  }
+
+  const busySeed = {
+    sessionId: "session-1",
+    editor: {
+      schemaVersion: 1 as const,
+      text: "text",
+      cursor: 4,
+      pasteCounter: 0,
+      pastes: [],
+    },
+    resources: { attachments: [] },
+  };
+
+  it("applies a settings command immediately during a live run and never parks it in the Queue", async () => {
+    const permissionModeFlow = { set: vi.fn(async () => undefined) };
+    const { flow, queueFlow } = createBusyQueueFlow({ permissionModeFlow });
+
+    // Alt+Enter during a run expresses the QUEUE intent: a settings command
+    // must still apply immediately instead of becoming queue text.
+    await expect(
+      flow.submit("/permission auto", busySeed, { busyAction: "queue" }),
+    ).resolves.toBe("consumed");
+
+    expect(permissionModeFlow.set).toHaveBeenCalledWith("auto");
+    expect(queueFlow.enqueue).not.toHaveBeenCalled();
+    expect(queueFlow.beginAdmission).not.toHaveBeenCalled();
+  });
+
+  it("applies a settings command during a live run with no explicit busy intent", async () => {
+    const permissionModeFlow = { set: vi.fn(async () => undefined) };
+    const { flow, queueFlow } = createBusyQueueFlow({ permissionModeFlow });
+
+    await expect(flow.submit("/permission auto", busySeed)).resolves.toBe("consumed");
+
+    expect(permissionModeFlow.set).toHaveBeenCalledWith("auto");
+    expect(queueFlow.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses to park an unrecognized slash command in the Queue and keeps the draft", async () => {
+    const append = vi.fn();
+    const restoreSubmittedDraft = vi.fn();
+    const editor = {
+      setText: vi.fn(),
+      restoreSubmittedDraft,
+      captureDraft: vi.fn(() => ({
+        schemaVersion: 1 as const,
+        text: "/autocompact 80000",
+        cursor: 19,
+        pastes: [],
+        pasteCounter: 0,
+      })),
+    };
+    const { flow, queueFlow } = createBusyQueueFlow({ append, editor });
+
+    const disposition = await flow.submit("/autocompact 80000", busySeed, {
+      busyAction: "queue",
+    });
+
+    expect(disposition).toBe("retained");
+    expect(queueFlow.enqueue).not.toHaveBeenCalled();
+    // The admission preview opened in submit() is rolled back...
+    expect(queueFlow.cancelAdmission).toHaveBeenCalled();
+    // ...the user is told NOW that the command does not exist...
+    const warning = append.mock.calls.map(([text]) => text).join("\n");
+    expect(warning).toContain("/autocompact is not a recognized MCode command");
+    expect(warning).toContain("not queued");
+    // ...and the draft is preserved for correction.
+    expect(restoreSubmittedDraft).toHaveBeenCalled();
+  });
+
+  it("still steers unrecognized slash text with the Enter intent (canon verdict 09)", async () => {
+    const activeRunFlow = { steer: vi.fn(async () => true) };
+    const { flow, queueFlow } = createBusyQueueFlow({ activeRunFlow });
+
+    await expect(
+      flow.submit("/autocompact 80000", busySeed, { busyAction: "steer" }),
+    ).resolves.toBe("consumed");
+
+    expect(activeRunFlow.steer).toHaveBeenCalledWith(
+      "/autocompact 80000",
+      expect.objectContaining({ requireActiveTurn: true }),
+    );
+    expect(queueFlow.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses to park an unrecognized slash command at the queue-required fallback too", async () => {
+    const append = vi.fn();
+    const restoreSubmittedDraft = vi.fn();
+    const editor = {
+      setText: vi.fn(),
+      restoreSubmittedDraft,
+      captureDraft: vi.fn(() => ({
+        schemaVersion: 1 as const,
+        text: "/nope 1",
+        cursor: 7,
+        pastes: [],
+        pasteCounter: 0,
+      })),
+    };
+    const queueFlow = {
+      beginAdmission: vi.fn(),
+      cancelAdmission: vi.fn(),
+      enqueue: vi.fn(async () => undefined),
+    };
+    // The TUI believed the run was over (no live-run signals at submit time),
+    // but the controller answered `queue-required`: the fallback park point
+    // must obey the same no-slash-parking rule.
+    const flow = new TuiCommandFlow({
+      workspaceDir: "/workspace",
+      controller: {
+        snapshot: vi.fn(() => ({
+          status: "idle" as const,
+          sessions: [],
+          session: { sessionId: "session-1" },
+        })),
+        hasInProcessRun: vi.fn(() => false),
+        submit: vi.fn(async () => "queue-required" as const),
+        requireLoginForAgentAction: vi.fn(async () => undefined),
+        projectOptimisticUserMessage: vi.fn(),
+        removeOptimisticUserMessage: vi.fn(),
+        refreshSessionMetadata: vi.fn(async () => undefined),
+      } as never,
+      activeRunFlow: { steer: vi.fn(async () => true) } as never,
+      featureFlow: createFeatureFlowMock() as never,
+      feedbackFlow: {} as never,
+      updateFlow: {} as never,
+      interactionFlow: {
+        handleCommand: vi.fn(async () => false),
+        hasPending: vi.fn(() => false),
+        showPending: vi.fn(),
+      } as never,
+      sessionFlow: {} as never,
+      queueFlow: queueFlow as never,
+      composerDraft: {
+        hasContent: vi.fn(() => false),
+        capture: vi.fn(() => ({ attachments: [] })),
+        reserveSubmission: vi.fn(() => ({ attachments: [] })),
+        restoreSubmission: vi.fn(),
+        completeSubmission: vi.fn(async () => undefined),
+      } as never,
+      workspaceRoots: { additionalDirectories: () => [] } as never,
+      runProjection: { snapshot: () => ({ queuedCount: 0 }) } as never,
+      editor: editor as never,
+      surface: {} as never,
+      surfaceHost: { setChatFocus: vi.fn() } as never,
+      queueEnabled: true,
+      liveRunId: () => undefined,
+      runtimeStopping: () => false,
+      abortLiveTurn: vi.fn(async () => false),
+      leaveUi: vi.fn(async () => undefined),
+      whenReady: vi.fn(async () => undefined),
+      append,
+      setHint: vi.fn(),
+      onChanged: vi.fn(),
+    });
+
+    const disposition = await flow.submit("/nope 1", busySeed);
+
+    expect(disposition).toBe("retained");
+    expect(queueFlow.enqueue).not.toHaveBeenCalled();
+    const warning = append.mock.calls.map(([text]) => text).join("\n");
+    expect(warning).toContain("/nope is not a recognized MCode command");
+    expect(restoreSubmittedDraft).toHaveBeenCalled();
+  });
+});
+
+
+describe("guidance after a stale local run view", () => {
+  it("adopts a daemon-owned Turn even when its refreshed snapshot already has the same id", async () => {
+    const session = { sessionId: "session-1", workspaceDir: "/workspace" };
+    const adoptRuntimeTurn = vi.fn();
+    const flow = new TuiActiveRunFlow({
+      runtime: {
+        getActiveRun: vi.fn(async () => ({ sessionId: session.sessionId, turnId: "daemon-turn", state: "running", actions: { steer: true } })),
+        steer: vi.fn(async () => ({ mode: "steered", turnId: "daemon-turn" })),
+      } as never,
+      controller: {
+        snapshot: () => ({ session, sessions: [], status: "idle" }),
+        projectOptimisticUserMessage: vi.fn(), removeOptimisticUserMessage: vi.fn(),
+        acceptOptimisticUserMessage: vi.fn(), requireLoginForAgentAction: vi.fn(async () => undefined),
+      } as never,
+      editor: { getText: () => "", setAutocompleteProvider: vi.fn() } as never,
+      terminal: {} as never, workspaceDir: "/workspace", liveRunId: () => undefined,
+      skillCommands: () => [], requireSession: () => session,
+      append: vi.fn(), stage: vi.fn(), showInteraction: vi.fn(), closeInteraction: vi.fn(() => true),
+      onChanged: vi.fn(), adoptRuntimeTurn, queueEnabled: true,
+    });
+    await expect(flow.steer("finish now", { requireActiveTurn: true })).resolves.toBe(true);
+    expect(adoptRuntimeTurn).toHaveBeenCalledWith(session.sessionId, "daemon-turn", expect.any(Number));
   });
 });

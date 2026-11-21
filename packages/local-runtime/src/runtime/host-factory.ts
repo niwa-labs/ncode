@@ -1,4 +1,5 @@
 import { getConfig, isManagedRuntime } from "@mavis/config";
+import { createLogger } from "@mavis/logging";
 
 import { LocalRuntimeApiHost } from "../api/host.js";
 import { copyV2LayoutMigrationReceipt } from "../persistence/migration/v2-migration.js";
@@ -55,6 +56,9 @@ export type {
   CreateLocalRuntimeHostOptions,
   LocalRuntimeProductHostOptions,
 } from "./host-factory-types.js";
+
+/** Spec §4 registry: `mcode:runtime` is the local-runtime namespace. */
+const log = createLogger("mcode:runtime");
 
 export function createLocalRuntimeHost(
   options: CreateLocalRuntimeHostOptions,
@@ -198,6 +202,7 @@ export function createLocalRuntimeHost(
     modelResolver: options.modelResolver,
     authContextGetter: options.authContextGetter,
     authContextInvalidator: options.authContextInvalidator,
+    daemonProfile: options.daemonProfile,
     routingContextGetter: options.routingContextGetter,
     isContextWindowUsageEnabled: options.isContextWindowUsageEnabled,
     fetchImpl: options.fetchImpl,
@@ -228,6 +233,12 @@ export function createLocalRuntimeHost(
       : {}),
   });
   const apiHost = new LocalRuntimeApiHost(apiHostOptions);
+  log.info("local runtime host created", {
+    dataDir,
+    runtimeOwnerKind: options.runtimeOwnerKind,
+    runtimeMode: options.runtimeMode,
+    legacyOpencodeEnabled,
+  });
   if (options.sandboxOperationsFactory) {
     const buildOwnerTurnToolSources =
       apiHost.buildOwnerTurnToolSources.bind(apiHost);

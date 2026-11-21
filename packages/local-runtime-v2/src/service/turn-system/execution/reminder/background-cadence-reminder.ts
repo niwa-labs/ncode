@@ -9,12 +9,19 @@ import {
 import {
   BACKGROUND_CADENCE_REMINDER_CUSTOM_TYPE,
   projectBackgroundHistory,
+  backgroundTaskKey,
 } from '../../compaction/algorithm/background-cadence.js';
-import { TODO_CADENCE_INTERVAL } from '../../compaction/compat.js';
 import type { ContextUsageAnchorState } from '../../compaction/execution/usage-anchor.js';
 import { readBackgroundTaskOriginMetadata } from '../../agent-host/history/background/host-metadata.js';
 import { fitsReminderInFinalRequest } from './reminder-admission.js';
 
+/**
+ * Background task completion reminders, event-driven. Delivery happens only
+ * when the state it reports is new to the model: once per user turn start while
+ * tasks remain undelivered (phase 'initial'), plus one reminder per not-yet-
+ * observed terminal task mid-turn. Suppression gates — a successful
+ * `task_output` read and automatic background-origin messages — stay intact.
+ */
 export function createBackgroundCadenceReminder(
   usageAnchor: ContextUsageAnchorState,
 ): BackgroundCadenceReminder {
@@ -36,6 +43,8 @@ export function createBackgroundCadenceReminder(
           initialCandidate: candidate,
           usageAnchor,
           hasSuccessfulTaskOutputRead: input.hasSuccessfulTaskOutputRead,
+          readTaskIds: input.readTaskIds,
+          loadFacts: input.loadFacts,
         }),
       };
     },
@@ -47,6 +56,8 @@ function createPreparedBackgroundCadenceReminderHook(options: {
   readonly initialCandidate: BackgroundCadenceMarker | undefined;
   readonly usageAnchor: ContextUsageAnchorState;
   readonly hasSuccessfulTaskOutputRead?: () => boolean;
+  readonly readTaskIds?: () => ReadonlySet<string>;
+  readonly loadFacts: () => Promise<BackgroundReminderFacts>;
 }): PiBeforeLlmCallHook {
   const {
     facts,
@@ -54,11 +65,18 @@ function createPreparedBackgroundCadenceReminderHook(options: {
     usageAnchor,
     hasSuccessfulTaskOutputRead = () => false,
   } = options;
-  return (input) => {
-    if (hasSuccessfulTaskOutputRead()) return undefined;
+  return async (input) => {
+    // Legacy callers keep their old boolean contract. Runtime callers settle
+    // identified tasks only; reading A must never suppress unread result B.
+    if (!options.readTaskIds && hasSuccessfulTaskOutputRead()) return undefined;
     if (hasAutomaticBackgroundOrigin(input.canonicalMessages.at(-1))) return undefined;
     const marker =
-      input.phase === 'initial' ? initialCandidate : createBackgroundCadenceMarker(input, facts);
+      input.phase === 'initial'
+        ? initialCandidate
+        : createBackgroundCadenceMarker(
+            input,
+            excludeReadTasks(freezeFacts(await options.loadFacts()), options.readTaskIds?.()),
+          );
     if (
       !marker ||
       (input.phase === 'initial' && hasPreparedMarker(input.canonicalMessages, marker)) ||
@@ -89,9 +107,18 @@ function createBackgroundCadenceMarker(
     !projection.hasBackgroundState ||
     (projection.observedTerminalCount !== undefined &&
       facts.terminalTotal > projection.observedTerminalCount);
-  if (!hasNewTerminalTask && projection.assistantIterationsSinceReminder < TODO_CADENCE_INTERVAL) {
+  // The reminder is event-driven: mid-turn it only fires when history has not
+  // observed this many terminal tasks yet. The blind iteration-counter cadence
+  // is gone — it re-fired every TODO_CADENCE_INTERVAL assistant iterations and
+  // each injection spawned the next loop wave. The only counter-free delivery
+  // is the single reminder prepared once at the start of a user turn.
+  const newTasks = facts.tasks.filter(
+    (task) => !projection.observedTaskKeys?.includes(backgroundTaskKey({ ...task })!),
+  );
+  if (input.phase !== 'initial' && newTasks.length === 0) return undefined;
+  // Legacy observations without task identities use their original count gate.
+  if (input.phase !== 'initial' && projection.observedTaskKeys === undefined && !hasNewTerminalTask)
     return undefined;
-  }
   const details: BackgroundCadenceReminderDetails = {
     version: 1,
     tasks: facts.tasks,
@@ -135,4 +162,20 @@ function hasPreparedMarker(messages: readonly unknown[], marker: BackgroundCaden
 
 function hasAutomaticBackgroundOrigin(message: unknown): boolean {
   return readBackgroundTaskOriginMetadata(message) !== undefined;
+}
+
+function excludeReadTasks(
+  facts: BackgroundReminderFacts,
+  read: ReadonlySet<string> | undefined,
+): BackgroundReminderFacts {
+  if (!read?.size) return facts;
+  const tasks = facts.tasks.filter((task) => !read.has(task.taskId));
+  return {
+    ...facts,
+    tasks,
+    undeliveredTotal: Math.max(
+      tasks.length,
+      facts.undeliveredTotal - (facts.tasks.length - tasks.length),
+    ),
+  };
 }

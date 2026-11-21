@@ -11,6 +11,19 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { parseTuiConfig, type TuiConfig } from "./tui-config.js";
+import type { PromptSuggestionRemotePolicy } from "./prompt-suggestion-config.js";
+
+// ── Next Prompt Suggestion ───────────────────────────────────────
+
+/**
+ * The user's own opt-in for the post-turn next-message suggestion. Absent
+ * means "never chose": `resolvePromptSuggestionEnabled` turns that into the
+ * effective default, which a rollout policy may override. The policy itself is
+ * remote-only; see `PromptSuggestionRemotePolicy`.
+ */
+export interface PromptSuggestionConfig {
+  enabled?: boolean;
+}
 import {
   applyManagedMinimaxContextLimits,
   applyRequiredProviderOverrides,
@@ -38,6 +51,11 @@ import {
 
 import type { SkillEvolveConfig } from "./skill-evolve-config.js";
 import {
+  REQUEST_MEDIA_DEFAULTS,
+  parseRequestMediaConfig,
+  type RequestMediaSettings,
+} from "./request-media-config.js";
+import {
   DEFAULT_SKILLS_CONFIG,
   parseSkillsConfig,
   type SkillsConfig,
@@ -48,6 +66,7 @@ import {
   type AgentRuntimeConfig,
 } from "./agent-runtime-config.js";
 import { resolveDataDir } from "./data-dir.js";
+import { normalizeProfileSelector, readProfileEnv } from "./auth-profile.js";
 import type { ProviderAuthMode } from "./provider-auth-mode.js";
 import { parseAgentsConfig, type AgentsConfig } from "./agent-capabilities.js";
 import {
@@ -65,11 +84,6 @@ import {
   parseToolResultCompactionConfig,
   type ToolResultCompactionSettings,
 } from "./tool-result-compaction-config.js";
-import {
-  REQUEST_MEDIA_DEFAULTS,
-  parseRequestMediaConfig,
-  type RequestMediaSettings,
-} from './request-media-config.js';
 import {
   BROWSER_CONFIG_DEFAULTS,
   parseBrowserConfig,
@@ -133,6 +147,10 @@ export function getRuntimeRegion(): MavisRegion {
     if (locale === "en") return "en";
   }
 
+  // Bare-shell fallback `en` is unreachable for the CLI/daemon: their startup
+  // chain (configureTuiRuntimeEnvironment / mcoded startup-env.ts) always writes
+  // a valid MAVIS_REGION first, with the managed-account default `cn`. Only
+  // Electron processes (locale mapping above) land here in practice.
   return "en";
 }
 
@@ -326,7 +344,6 @@ export type * from "./asr.js";
  *   browserAgentCursor: false
  *   desktopPlanMode: true
  *   desktopPlanModeAgentEntry: false
- *   ptc: false
  *   taskHistoryProjectGrouping: false
  *   threadGoal: false
  *   mcodeTools: false
@@ -438,12 +455,6 @@ export interface BetaConfig {
    */
   desktopPlanModeAgentEntry: boolean;
   /**
-   * Programmatic Tool Calling for eligible local root conversations. Read only when a
-   * conversation is created or has just compacted: the conversation keeps that run mode
-   * (`toolCallMode`) so toggling this never rewrites an existing prompt prefix.
-   */
-  ptc: boolean;
-  /**
    * /btw side-question peek command (the UI's "Aside" slash palette row). Both visibility fields
    * are `test`, so dev/test ships ON by default while prod is force-off regardless of config.yaml
    * (even `beta.peek: true` cannot open it).
@@ -513,6 +524,17 @@ export interface BetaConfig {
    * `config.yaml` and OAuth credentials stay in `<dataDir>/codex-auth.json`.
    */
   codexOAuth: boolean;
+  /**
+   * `run_code` — JavaScript that calls the turn's other tools (our codemode host,
+   * QuickJS worker per launch). The tool AND its prompt section switch together:
+   * when enabled, the turn catalog gains `run_code` and the V2 prompts render the
+   * "Tool calls in this turn" section.
+   *
+   * `defaultVisibility: 'none', configurableVisibility: 'online'` — OFF in every
+   * channel until the K1 acceptance matrix passes; explicit `beta.runCode: true`
+   * opts in. `MCODE_CODEMODE=1` keeps working as a dev/probe escape hatch.
+   */
+  runCode: boolean;
 }
 
 export type FeatureVisibility = "none" | "test" | "internal" | "online";
@@ -642,14 +664,6 @@ export const BETA_FEATURE_DEFS = {
     defaultVisibility: "none",
     configurableVisibility: "online",
   },
-  // On by default everywhere except the public production build: dev/test/staging through the
-  // test channel, Internal and inside packages through their build variant. An explicit `false`
-  // always wins, and explicit `true` still opts a production install in.
-  ptc: {
-    defaultVisibility: "test",
-    defaultBuildVariants: ["internal", "inside"],
-    configurableVisibility: "online",
-  },
   peek: { defaultVisibility: "test", configurableVisibility: "test" },
   keepAlive: { defaultVisibility: "test", configurableVisibility: "test" },
   promptOverride: { defaultVisibility: "test", configurableVisibility: "test" },
@@ -670,6 +684,7 @@ export const BETA_FEATURE_DEFS = {
     defaultVisibility: "online",
     configurableVisibility: "online",
   },
+  runCode: { defaultVisibility: "none", configurableVisibility: "online" },
 } satisfies Record<keyof BetaConfig, BetaFeatureDef>;
 
 assertBetaFeatureDefinitions(BETA_FEATURE_DEFS);
@@ -794,18 +809,6 @@ export type { AskUserConfig } from "./ask-user-config.js";
  */
 export interface SessionTitleConfig {
   enabled: boolean;
-}
-
-// ── Next Prompt Suggestion ───────────────────────────────────────
-
-/**
- * The user's own choice for one extra post-turn model request. Absent means
- * the user never chose; `resolvePromptSuggestionEnabled` turns that into the
- * effective value (the remote default, on when absent). The rollout policy is
- * remote-only; see `PromptSuggestionRemotePolicy`.
- */
-export interface PromptSuggestionConfig {
-  enabled?: boolean;
 }
 
 // ── CLI Feature Flags ─────────────────────────────────────────────
@@ -992,8 +995,6 @@ export interface Config {
   defaultLightModel?: string;
   /** Permission mode for tool call authorization. */
   permissionMode: PermissionMode;
-  /** Explicit Windows TUI hard-safety opt-out; defaults to false and is read at startup. */
-  skipWindowsHardSafetyChecks: boolean;
   permission: PermissionConfig;
   /** Global SSE error event publishing controls. */
   sseErrorPush: SSEErrorPushConfig;
@@ -1030,7 +1031,13 @@ export interface Config {
   askUser: AskUserConfig;
   /** Session title auto-generation feature flag — see `SessionTitleConfig`. */
   sessionTitle: SessionTitleConfig;
-  /** Post-turn next-user-prompt suggestion — see `PromptSuggestionConfig`. */
+  /** Per-image request encoding limits; see `RequestMediaSettings`. */
+  requestMedia: RequestMediaSettings;
+  /**
+   * Post-turn next-user-prompt suggestion (composer chips) — see
+   * `PromptSuggestionConfig` in ./prompt-suggestion-config.ts and
+   * `resolvePromptSuggestionEnabled`.
+   */
   promptSuggestion: PromptSuggestionConfig;
   /** CLI feature flags. */
   cli: CliConfig;
@@ -1048,8 +1055,6 @@ export interface Config {
   runawayGuard: RunawayGuardSettings;
   /** ToolResult archive/trim thresholds shared by TUI, CLI and managed Desktop. */
   toolResultCompaction: ToolResultCompactionSettings;
-  /** Per-image encoding limits, and how far a request rejected for its media is cut. */
-  requestMedia: RequestMediaSettings;
   /** Runtime selection knobs (e.g. `defaultFramework` for new sessions). */
   agentRuntime: AgentRuntimeConfig;
   /**
@@ -1269,21 +1274,51 @@ function runtimeEnv(suffix: string): string | undefined {
     : undefined;
 }
 
+/**
+ * Read a root option value out of `process.argv`.
+ *
+ * This runs before commander parses anything, because the data directory and
+ * the identity it selects must be known that early. Two rules keep it
+ * consistent with commander:
+ *
+ * - Scanning stops at `--`. Everything after it is positional text, so
+ *   `mcode exec -- --profile work` passes a prompt, it does not select a
+ *   profile.
+ * - The **last** occurrence wins, matching commander's default. Returning the
+ *   first would let `--profile work --profile personal` start in one account
+ *   while commander reports the other.
+ */
 function cliArgValue(name: string): string | undefined {
   const flag = `--${name}`;
+  let value: string | undefined;
   for (let i = 2; i < process.argv.length; i++) {
     const arg = process.argv[i];
-    if (arg === flag) return process.argv[i + 1];
-    if (arg?.startsWith(`${flag}=`)) return arg.slice(flag.length + 1);
+    if (arg === "--") break;
+    if (arg === flag) {
+      const next = process.argv[i + 1];
+      // A following flag is not this option's value. Report it as missing
+      // rather than passing `--env` down as a profile name and failing
+      // validation with a misleading message.
+      value = next === undefined || next.startsWith("-") ? undefined : next;
+      i++;
+      continue;
+    }
+    if (arg?.startsWith(`${flag}=`)) {
+      const inline = arg.slice(flag.length + 1);
+      value = inline.length > 0 ? inline : undefined;
+    }
   }
-  return undefined;
+  return value;
 }
 
 function hasCliFlag(name: string): boolean {
   const flag = `--${name}`;
-  return process.argv
-    .slice(2)
-    .some((arg) => arg === flag || arg.startsWith(`${flag}=`));
+  for (let i = 2; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg === "--") return false;
+    if (arg === flag || arg?.startsWith(`${flag}=`)) return true;
+  }
+  return false;
 }
 
 export const DEFAULT_PORT = 5321;
@@ -1382,9 +1417,19 @@ function shouldUseGitAutoConfig(): boolean {
   return true;
 }
 
+/**
+ * Resolve the explicitly requested profile from `--profile`, `MINIMAX_PROFILE`,
+ * or the gated legacy runtime variable.
+ *
+ * A non-blank selector is validated rather than sanitised. The value becomes a
+ * directory segment, so an unusable name must fail loudly instead of silently
+ * resolving to the default profile and its credentials.
+ *
+ * @throws {InvalidProfileNameError}
+ */
 function getExplicitProfileEnv(): string | null {
-  const profile = cliArgValue("profile") ?? runtimeEnv("PROFILE");
-  return profile && profile.length > 0 ? profile : null;
+  const profile = cliArgValue("profile") ?? readProfileEnv() ?? runtimeEnv("PROFILE");
+  return normalizeProfileSelector(profile);
 }
 
 function getExplicitPortEnv(): number | null {
@@ -1724,7 +1769,6 @@ const DEFAULTS: Omit<
   logLevel: "info",
   devPort: DEFAULT_UI_PORT,
   permissionMode: "auto",
-  skipWindowsHardSafetyChecks: false,
   sseErrorPush: {
     history: true,
     stream: true,
@@ -1779,9 +1823,7 @@ const DEFAULTS: Omit<
     // Default ON. See `SessionTitleConfig`.
     enabled: true,
   },
-  promptSuggestion: {
-    // Unset: the effective default is resolved with the remote policy.
-  },
+  requestMedia: REQUEST_MEDIA_DEFAULTS,
   cli: {
     spawn: {
       enabled: false,
@@ -1811,7 +1853,6 @@ const DEFAULTS: Omit<
   },
   runawayGuard: { enabled: true },
   toolResultCompaction: { ...TOOL_RESULT_COMPACTION_DEFAULTS },
-  requestMedia: { ...REQUEST_MEDIA_DEFAULTS },
   agentRuntime: {
     // Single source of truth lives in `./agent-runtime-config.ts` so the
     // default and the union type cannot drift.
@@ -1827,6 +1868,7 @@ const DEFAULTS: Omit<
   goal: structuredClone(GOAL_CONFIG_DEFAULTS),
   sandbox: structuredClone(SANDBOX_CONFIG_DEFAULTS),
   goalWarnings: [],
+  promptSuggestion: {},
 };
 
 function ensureConfigFile(): void {
@@ -1865,8 +1907,6 @@ function ensureConfigFile(): void {
     logLevel: DEFAULTS.logLevel,
     provider: managedPresetBaseUrlSyncEnabled ? preset.provider : undefined,
     defaultModel: preset.defaultModel,
-    // Written on first install as an editable safe default; existing files are not changed.
-    skipWindowsHardSafetyChecks: DEFAULTS.skipWindowsHardSafetyChecks,
   });
   writePrivateConfigFileSync(configPath, content, true);
 }
@@ -2059,7 +2099,6 @@ export function resolveConfigFromRaw(
       typeof raw.defaultLightModel === "string"
         ? raw.defaultLightModel
         : undefined,
-    skipWindowsHardSafetyChecks: raw.skipWindowsHardSafetyChecks === true,
     permissionMode:
       typeof raw.permissionMode === "string" &&
       ["default", "bypassPermissions", "auto", "off"].includes(
@@ -2100,6 +2139,7 @@ export function resolveConfigFromRaw(
     skills: parseSkillsConfig(raw),
     askUser: parseAskUserConfig(raw, DEFAULTS.askUser),
     sessionTitle: parseSessionTitleConfig(raw),
+    requestMedia: parseRequestMediaConfig(raw.requestMedia),
     promptSuggestion: parsePromptSuggestionConfig(raw),
     cli: parseCliConfig(raw),
     browser: parseBrowserConfig(raw.browser),
@@ -2111,7 +2151,6 @@ export function resolveConfigFromRaw(
     toolResultCompaction: parseToolResultCompactionConfig(
       raw.toolResultCompaction,
     ),
-    requestMedia: parseRequestMediaConfig(raw.requestMedia),
     agentRuntime: parseAgentRuntimeConfig(raw.agentRuntime),
     logRetentionDays: parseLogRetentionDays(raw),
     contentReview: parseContentReviewConfig(raw),
@@ -2182,21 +2221,7 @@ function parseBetaConfig(raw: Record<string, unknown>): BetaConfig {
       ? (raw.beta as Record<string, unknown>)
       : {};
 
-  const context = currentBetaResolutionContext();
-  const result = {} as BetaConfig;
-  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
-    result[key] = resolveBetaFeature(key, obj[key], context);
-  }
-  return result;
-}
-
-/**
- * The build facts `parseBetaConfig` resolves every flag with. Exported so a caller holding a
- * raw (unparsed) config can resolve one flag exactly as `getConfig()` would for this process,
- * instead of rebuilding the context and drifting from it.
- */
-export function currentBetaResolutionContext(): BetaFeatureResolutionContext {
-  return {
+  const context: BetaFeatureResolutionContext = {
     buildEnv: getRuntimeBuildEnv(),
     defaultBuildEnvironment: getBetaDefaultBuildEnvironment(),
     internalBuild: isInternalBuild(),
@@ -2206,6 +2231,28 @@ export function currentBetaResolutionContext(): BetaFeatureResolutionContext {
         ? "published"
         : undefined,
   };
+  const result = {} as BetaConfig;
+  for (const key of Object.keys(BETA_FEATURE_DEFS) as (keyof BetaConfig)[]) {
+    result[key] = resolveBetaFeature(key, configuredBetaValue(key, obj), context);
+  }
+  return result;
+}
+
+/**
+ * The `run_code` dev/probe hatch: an absent `beta.runCode` resolves as enabled
+ * while MCODE_CODEMODE=1. Only the raw file distinguishes "absent" from an
+ * explicit `false` — the resolved BetaConfig materializes every key, so this
+ * hatch must live at config parse time, not at the gate. An explicit
+ * `beta.runCode: false` stays an owner decision that blocks the hatch.
+ */
+function configuredBetaValue(
+  key: keyof BetaConfig,
+  obj: Record<string, unknown>,
+): unknown {
+  if (key === "runCode" && obj.runCode === undefined && process.env.MCODE_CODEMODE === "1") {
+    return true;
+  }
+  return obj[key];
 }
 
 // ── Skill Evolve config parsing ─────────────────────────────────
@@ -2512,12 +2559,12 @@ function parseSessionTitleConfig(
 function parsePromptSuggestionConfig(raw: Record<string, unknown>): PromptSuggestionConfig {
   const value = raw.promptSuggestion;
   const enabled =
-    value != null && typeof value === 'object' && !Array.isArray(value)
+    value != null && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>).enabled
       : undefined;
   // Keep "never chose" distinct from an explicit `false`: the effective default
   // depends on the remote policy, which parsing cannot see.
-  return typeof enabled === 'boolean' ? { enabled } : {};
+  return typeof enabled === "boolean" ? { enabled } : {};
 }
 
 // ── CLI config parsing ──────────────────────────────────────────

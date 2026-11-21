@@ -4,12 +4,11 @@ import type {
   LocalRuntimeConfig,
 } from '@mavis/local-runtime-v2/process-local';
 import { getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
+import { isPidAlive, readDaemonManifest, resolveDaemonTargets } from '@mavis/mcoded';
 import {
-  currentBetaResolutionContext,
   getRuntimeBuildEnv,
   getRuntimeRegion,
   readExplicitBetaFeatureFromFile,
-  resolveBetaFeature,
 } from '@mavis/config';
 import {
   AuthSessionChangedError,
@@ -26,7 +25,13 @@ import {
   type EmbeddedRuntimeHost,
   type EmbeddedRuntimeHostFactory,
 } from './embedded-host.js';
+import {
+  createRemoteRuntimeHost,
+  resolveTuiServerMode,
+  type RemoteRuntimeHost,
+} from './remote-host.js';
 import { createTuiRuntimeLogging, type TuiRuntimeLogging } from './logging.js';
+import { createLogger } from '@mavis/logging';
 import { TuiRuntimeAdapter } from './adapter.js';
 import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
@@ -40,7 +45,6 @@ import {
   TuiAuthenticationError,
   TuiMatrixAccountClient,
 } from '../account/matrix-account-client.js';
-import { projectAccountDisplayIdentity } from '../account/display-identity.js';
 import {
   invalidateCliAuthContext,
   importSharedCliAuthContext,
@@ -76,6 +80,8 @@ import {
 // This outer process ceiling must cover the whole close graph, not race one component budget.
 const DEFAULT_RUNTIME_SHUTDOWN_TIMEOUT_MS = 60_000;
 
+const log = createLogger('mcode:tui-lifecycle');
+
 export interface CreateTuiRuntimeOptions {
   dataDir: string;
   workspaceDir: string;
@@ -85,14 +91,28 @@ export interface CreateTuiRuntimeOptions {
   systemPromptOverrides?: CreateLocalRuntimeHostOptions['systemPromptOverrides'];
   surface?: TuiObservabilitySurface;
   /**
-   * `--ptc`: new Sessions in this process use PTC regardless of `beta.ptc`.
-   * Held in memory only; config.yaml is never rewritten by the flag.
+   * Management commands reuse a live daemon's owner. Without one, they run
+   * locally with persisted job execution quarantined, without spawning a daemon.
    */
-  ptcLaunchOverride?: boolean;
+  managementSurface?: boolean;
   observability?: TuiObservability;
   permissionMode?: NonNullable<LocalRuntimeConfig['permissionMode']>;
   contextMode?: McodeContextMode;
   lane?: string;
+  /**
+   * Explicit `--profile <name>` (opus 2026-11-01, правка 4): reaches
+   * `resolveDaemonTargets` as the top-priority input, so the thin client
+   * binds to the profile's daemon without relying on the env fallback.
+   */
+  profile?: string;
+  /**
+   * Explicit `--no-daemon`: run the agent in THIS process (embedded host),
+   * the CLI equivalent of `MCODE_SERVER_MODE=off`. The flag beats the env —
+   * it names the user's intent for this one invocation precisely, which is
+   * also what isolated/wrapper runs need: the process tree (tool spawns
+   * included) stays inside the caller's process, inheriting its OS rights.
+   */
+  noDaemon?: boolean;
 }
 
 export interface CreateTuiRuntimeDependencies {
@@ -135,11 +155,20 @@ export interface CreateTuiRuntimeDependencies {
 }
 
 export interface CreatedTuiRuntime {
-  host: EmbeddedRuntimeHost;
+  host: EmbeddedRuntimeHost | RemoteRuntimeHost;
   adapter: TuiRuntimeAdapter;
   browserProvider?: TuiBrowserProvider;
   logDirectory: string;
   observability: TuiObservability;
+  /**
+   * W4 (§4.6): present only in server mode (`auto`/`required`) — the honest
+   * daemon connection state for the status line. `reconnecting` is a state
+   * the window RENDERS, never a spinner pretending the turn is alive.
+   */
+  connection?: {
+    state(): 'disconnected' | 'connecting' | 'ready' | 'reconnecting' | 'closed';
+    onChange(listener: (state: 'disconnected' | 'connecting' | 'ready' | 'reconnecting' | 'closed') => void): () => void;
+  };
   synchronizeAuthContext(authState: 'authenticated' | 'logged_out'): Promise<void>;
   shutdownAuth(): Promise<void>;
   shutdownLogging(): Promise<void>;
@@ -149,6 +178,65 @@ export async function createTuiRuntime(
   options: CreateTuiRuntimeOptions,
   dependencies: CreateTuiRuntimeDependencies = {},
 ): Promise<CreatedTuiRuntime> {
+  // Region/buildEnv guard BEFORE any boot work — deliberately outside the
+  // try below, whose cleanup (observability.flush) makes network calls and
+  // would itself hang against an unreachable endpoint of the mismatched
+  // region (incident 2026-11-15: a cn child on the en daemon stalled 90s+
+  // with zero diagnostics). A LIVE daemon manifest names its env: a child
+  // whose resolved env differs refuses here, fast and actionable. A manifest
+  // field that is ABSENT makes no claim (older daemon.json, isolated test
+  // fixtures) and cannot mismatch. A stale manifest (dead pid) is skipped —
+  // the remote host's spawn hook starts a fresh daemon for THIS process's
+  // env. The targets resolve exactly ONCE here (same argument shape as the
+  // remote host's own resolution — the plumbing test pins that) and travel
+  // into createRemoteRuntimeHost.
+  const daemonTargets = resolveDaemonTargets({
+    profile: options.profile,
+    dataDir: options.dataDir,
+    env: process.env,
+  });
+  // The server mode resolves ONCE, here — the env guard below and the host
+  // branch below it must agree on the same value. An explicit `--no-daemon`
+  // beats the env (CLI > env); an explicit NON-off MCODE_SERVER_MODE under
+  // the flag gets a warning, not a refusal, for the same reason: the flag is
+  // the more specific statement of intent for this invocation. An INVALID
+  // env value still throws (the config package's fail-closed contract).
+  const cliServerMode = options.noDaemon === true ? 'off' : resolveTuiServerMode();
+  if (options.noDaemon === true) {
+    const raw = process.env['MCODE_SERVER_MODE']?.trim();
+    if (raw !== undefined && raw !== '' && raw !== 'off') {
+      log.warn('--no-daemon overrides MCODE_SERVER_MODE for this invocation', { env: raw });
+    }
+  }
+  {
+    const manifest = readDaemonManifest(daemonTargets.controlRoot);
+    if (manifest && isPidAlive(manifest.pid)) {
+      const mismatches: string[] = [];
+      if (manifest.region !== undefined && manifest.region !== getRuntimeRegion()) {
+        mismatches.push(`region (daemon: ${manifest.region}, this process: ${getRuntimeRegion()})`);
+      }
+      if (manifest.buildEnv !== undefined && manifest.buildEnv !== getRuntimeBuildEnv()) {
+        mismatches.push(`buildEnv (daemon: ${manifest.buildEnv}, this process: ${getRuntimeBuildEnv()})`);
+      }
+      if (mismatches.length > 0) {
+        const message =
+          `Daemon env mismatch on control root ${daemonTargets.controlRoot}: ${mismatches.join('; ')}. ` +
+          `Restart this process with the daemon's env ` +
+          `(e.g. MAVIS_REGION=${manifest.region}) or stop the daemon first: mcode daemon stop.`;
+        // In no-daemon mode this process NEVER talks to that daemon — the
+        // mismatch cannot hurt this run, so refusing would only block
+        // isolated/wrapper runs that share the profile's home. Warn and go.
+        if (cliServerMode === 'off' && options.managementSurface !== true) {
+          log.warn('daemon env mismatch ignored in no-daemon mode', {
+            controlRoot: daemonTargets.controlRoot,
+            mismatches,
+          });
+        } else {
+          throw new Error(message);
+        }
+      }
+    }
+  }
   const getSourceConfig = dependencies.getConfig ?? getDefaultLocalRuntimeConfig;
   const configPath = options.configPath ?? join(options.dataDir, 'config.yaml');
   const browserUseToolingEnabled = readBrowserUseToolingOptIn(
@@ -401,7 +489,6 @@ export async function createTuiRuntime(
         beta: {
           ...config.beta,
           mcodeTools: effectiveMcodeTools,
-          ...(options.ptcLaunchOverride ? { ptc: true } : {}),
         },
       };
     },
@@ -468,17 +555,12 @@ export async function createTuiRuntime(
       permissionPrompt: options.surface !== 'headless',
       elicitation: options.surface !== 'headless',
     },
-    ...(options.surface === 'headless' ||
+    ...(options.managementSurface ||
+    options.surface === 'headless' ||
     options.surface === 'acp' ||
     (dependencies.getDataEnvironment ?? resolveMcodeDataEnvironment)() === 'test'
       ? { startupExecutionPolicy: 'quarantined' }
       : {}),
-    // Only the interactive composer can show a next-message suggestion; headless
-    // exec, ACP and inspection runs would pay for an unseen request.
-    promptSuggestionSurface: options.surface === 'tui',
-    // The TUI offers suggestions on every model, BYOK and OAuth included; the
-    // user turns the feature off globally with `promptSuggestion.enabled: false`.
-    promptSuggestionUngated: options.surface === 'tui',
   };
   const startupStartedAt = performance.now();
   if (ownsObservability) {
@@ -488,22 +570,76 @@ export async function createTuiRuntime(
     });
   }
   let browserProvider: TuiBrowserProvider | undefined;
+  // W4 (§4.4/§4.6): the server-mode branch. `off` (the product default) is
+  // byte-for-byte the embedded path below; `auto`/`required` connect the
+  // window to the mcoded daemon as a thin client instead of hosting the
+  // runtime in-process (single-writer invariant: never both).
+  // An INVALID MCODE_SERVER_MODE value already threw at the env guard above
+  // (resolved once into cliServerMode; the config package's fail-closed
+  // contract) — a deliberate W4 delta vs W3, which never read the variable:
+  // silently running in-process when the user asked for a daemon mode would
+  // hide a misconfiguration behind a working-looking TUI. `--no-daemon` is
+  // the one intentional override of that: it IS the user asking.
+  const managementManifest = options.managementSurface
+    ? readDaemonManifest(
+        resolveDaemonTargets({
+          dataDir: options.dataDir,
+          ...(options.profile ? { profile: options.profile } : {}),
+        }).controlRoot,
+      )
+    : undefined;
+  const serverMode = options.managementSurface
+    ? managementManifest && isPidAlive(managementManifest.pid)
+      ? 'required'
+      : 'off'
+    : cliServerMode;
   try {
-    browserProvider = (dependencies.createBrowserProvider ?? createTuiBrowserProvider)(
-      options.dataDir,
-      getConfig(),
+    if (serverMode === 'off') {
+      browserProvider = (dependencies.createBrowserProvider ?? createTuiBrowserProvider)(
+        options.dataDir,
+        getConfig(),
+      );
+    }
+    const host: EmbeddedRuntimeHost | RemoteRuntimeHost = await logging.runDuringStartup(
+      (): Promise<EmbeddedRuntimeHost | RemoteRuntimeHost> =>
+        serverMode === 'off'
+          ? createEmbeddedRuntimeHost(
+              {
+                ...hostOptions,
+                ...(browserProvider ? { browserAdapter: browserProvider } : {}),
+                productCapabilities: { mcodeTools: effectiveMcodeTools },
+              },
+              dependencies.factory,
+            )
+          : createRemoteRuntimeHost({
+              dataDir: options.dataDir,
+              // The env guard already resolved the targets — one resolution
+              // per boot (the plumbing test pins exactly one call).
+              daemonTargets,
+              ...(options.managementSurface ? { autoSpawn: false } : {}),
+              ...(options.profile ? { profile: options.profile } : {}),
+              ...(options.promptMode !== undefined ? { promptMode: options.promptMode } : {}),
+              // W5 (§4.3.2): the hello.client.kind identity — the surface the
+              // runtime serves (`mcode exec` → `exec`, ACP → `acp`).
+              clientKind:
+                options.surface === 'headless'
+                  ? 'exec'
+                  : options.surface === 'acp'
+                    ? 'acp'
+                    : 'tui',
+            }),
     );
-    const host = await logging.runDuringStartup(() =>
-      createEmbeddedRuntimeHost(
-        {
-          ...hostOptions,
-          ...(browserProvider ? { browserAdapter: browserProvider } : {}),
-          productCapabilities: { mcodeTools: effectiveMcodeTools },
-        },
-        dependencies.factory,
-      ),
-    );
-    mcodeToolsReadiness.ensureCommandPath();
+
+    // W5 live-check fix: the embedded path awaits `host.ready` inside its
+    // factory (`embedded-host.ts:97`); the remote path returns a lazy
+    // `ready` promise nobody awaited, so the very first `createSession`
+    // raced the daemon handshake and died with `client is connecting, not
+    // ready` (exit 4 within 5-9 ms — every exec in server mode). Await the
+    // remote handshake before the surface is handed to the runtime.
+    if (serverMode !== 'off') {
+      await logging.runDuringStartup((): Promise<void> => host.ready);
+    }
+mcodeToolsReadiness.ensureCommandPath();
     if (ownsObservability) {
       observability.recordStartup({
         phase: 'runtime.initialize',
@@ -516,18 +652,6 @@ export async function createTuiRuntime(
       adapter: new TuiRuntimeAdapter(host.cliService, {
         workspaceDir: options.workspaceDir,
         observability,
-        ...(options.ptcLaunchOverride
-          ? {
-              ptcLaunchOverride: true,
-              // The source config, re-read after each write, never carries the override.
-              readSavedPtc: () =>
-                resolveBetaFeature(
-                  'ptc',
-                  getSourceConfig().beta?.ptc,
-                  currentBetaResolutionContext(),
-                ),
-            }
-          : {}),
         ...(options.contextMode ? { contextMode: options.contextMode } : {}),
         onSessionDeleted: browserProvider?.disposeSession
           ? browserProvider.disposeSession.bind(browserProvider)
@@ -535,17 +659,19 @@ export async function createTuiRuntime(
         ...(useSharedOAuth
           ? { synchronizeAuth: () => applySharedLease?.() ?? Promise.resolve() }
           : {}),
+        // opus 2026-11-01, правка 5: the epoch the daemon's account status is
+        // compared against — THIS window's own login, read from the same
+        // projected auth view the identity getter uses. A mismatch triggers
+        // the one-shot re-sync in the adapter and, if it persists, the
+        // daemon-only status plus warning (no identity/quota blending).
+        authLoginEpochGetter: () => authContextGetter()?.loginEpoch,
         tokenPlanAccountStatusGetter: (accountOptions) =>
           accountClient.getTokenPlanAccountStatus(undefined, accountOptions),
         accountIdentityGetter: () => {
           const identity = authContextGetter();
-          return identity?.accessToken ? projectAccountDisplayIdentity(identity) : undefined;
-        },
-        accountIdentityRefresher: async () => {
-          const auth = authContextGetter();
-          if (!auth?.accessToken) return undefined;
-          const identity = await accountClient.getAuthContextForAuth(auth);
-          return identity ? projectAccountDisplayIdentity(identity) : undefined;
+          return identity?.accessToken
+            ? { email: identity.userEmail, name: identity.userName ?? identity.subUserName }
+            : undefined;
         },
         dailyCheckin: new TuiDailyCheckinApplication(
           new TuiDailyCheckinHttpGateway({
@@ -581,6 +707,15 @@ export async function createTuiRuntime(
         }),
       }),
       ...(browserProvider ? { browserProvider } : {}),
+      ...(serverMode !== 'off'
+        ? {
+            connection: {
+              state: () => (host as RemoteRuntimeHost).connectionState(),
+              onChange: (listener: (state: ReturnType<RemoteRuntimeHost['connectionState']>) => void) =>
+                (host as RemoteRuntimeHost).onConnectionStateChange(listener),
+            },
+          }
+        : {}),
       logDirectory: logging.logDirectory,
       observability,
       synchronizeAuthContext: async (authState) => {
@@ -651,7 +786,16 @@ function readBrowserUseToolingOptIn(
   readFeature: typeof readExplicitBetaFeatureFromFile,
 ): boolean {
   try {
-    return readFeature(configPath, 'browserUseTooling') === true;
+    // Out-of-the-box Browser tooling (owner bug 2026-11-07): the product's
+    // beta channel model already ships `browserUseTooling` ON by default
+    // (`defaultVisibility: 'online'` in BETA_FEATURE_DEFS), so the absence of
+    // the yaml key means ENABLED — the previous explicit-only read made the
+    // out-of-the-box state impossible and left the plugin's
+    // `control-in-app-browser` skill visible to the model without its tool.
+    // An explicit `beta.browserUseTooling: false` in the owner's config stays
+    // the kill switch and still wins; an unreadable config remains
+    // fail-closed.
+    return readFeature(configPath, 'browserUseTooling') !== false;
   } catch {
     return false;
   }

@@ -64,22 +64,19 @@ export class TuiPluginAccess implements McodePluginRuntimeAccess {
       pluginName: input.plugin.name,
       source: toGeneratedSource(input.plugin.marketplace),
     };
-    const response = await this.cliService[mutationMethod(input.action)](request);
+    const mutations = {
+      install: () => this.cliService.installPlugin(request),
+      remove: () => this.cliService.uninstallPlugin(request),
+      enable: () => this.cliService.enablePlugin(request),
+      disable: () => this.cliService.disablePlugin(request),
+    };
+    const response = await mutations[input.action]();
     return { installed: response.installExists, enabled: response.enabled };
   }
 
   async refreshPlugins(): Promise<void> {
     await this.cliService.refreshPlugins();
   }
-}
-
-function mutationMethod(action: Parameters<McodePluginRuntimeAccess['mutatePlugin']>[0]['action']) {
-  return {
-    install: 'installPlugin',
-    remove: 'uninstallPlugin',
-    enable: 'enablePlugin',
-    disable: 'disablePlugin',
-  }[action] as 'installPlugin' | 'uninstallPlugin' | 'enablePlugin' | 'disablePlugin';
 }
 
 async function collectPages<T>(

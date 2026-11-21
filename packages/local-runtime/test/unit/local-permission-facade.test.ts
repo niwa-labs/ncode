@@ -10,7 +10,8 @@
  *   - off mode short-circuits after the Windows runtime safety boundary
  *   - acceptEdits is normalized to default before engine
  *   - bypassPermissions ('never') downgrades every ASK verdict to ALLOW
- *     at the public entrypoint (see `applyAskGate`). The 22-trigger
+ *     at the public entrypoint (see `applyAskGate`) EXCEPT bypass-immune
+ *     asks (§3), which pass through unchanged. The 22-trigger
  *     invariant table lives in local-permission-ask-gate.test.ts; this
  *     file only pins the H5 curl-pipe-shell + credential paths so the
  *     facade ↔ gate plumbing is exercised end-to-end.
@@ -29,7 +30,6 @@
 
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import * as os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -58,29 +58,24 @@ import {
 } from '../../src/infra/trash-script-win.js';
 import { ensureTrashScript } from '../../src/infra/ensure-trash-script.js';
 
-vi.mock('node:os', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:os')>()),
-}));
-
 function freshFacade(
   opts: {
     permissionMode?: LocalRuntimeConfig['permissionMode'];
     policyOwner?: 'engine' | 'core';
-    nativeDelete?: boolean;
     cloudGateway?: CloudGatewayClient;
     platform?: NodeJS.Platform;
-    shellFamily?: LocalPermissionFacadeDeps['shellFamily'];
+    shellFamily?: 'cmd' | 'powershell';
     workspaceDir?: string;
     sandbox?: LocalRuntimeConfig['sandbox'];
     seedPosixTrash?: boolean;
     dataDirParent?: string;
+    dangerousCommandGateEnabled?: boolean;
   } = {},
 ): {
   facade: LocalPermissionFacade;
   ruleStore: LocalPermissionRuleStore;
   pluginHookPermissionStore: LocalPluginHookPermissionStore;
   dataDir: string;
-  config: LocalRuntimeConfig;
 } {
   const dataDir = mkdtempSync(path.join(opts.dataDirParent ?? tmpdir(), 'aa-facade-'));
   const config: LocalRuntimeConfig = {
@@ -88,7 +83,9 @@ function freshFacade(
     permissionMode: opts.permissionMode ?? 'default',
     permission: {
       policyOwner: opts.policyOwner ?? 'core',
-      nativeDelete: opts.nativeDelete ?? false,
+      ...(opts.dangerousCommandGateEnabled !== undefined
+        ? { dangerousCommandGateEnabled: opts.dangerousCommandGateEnabled }
+        : {}),
     },
     ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
   } as LocalRuntimeConfig;
@@ -111,16 +108,13 @@ function freshFacade(
     cloudGateway: opts.cloudGateway,
     ...(opts.platform ? { platform: opts.platform } : {}),
     ...(opts.shellFamily ? { shellFamily: opts.shellFamily } : {}),
-    ...(opts.platform === 'win32'
-      ? { trashRuntimeProbe: opts.trashRuntimeProbe ?? (() => true) }
-      : {}),
+    ...(opts.platform === 'win32' ? { trashRuntimeProbe: () => true } : {}),
   };
   return {
     facade: new LocalPermissionFacade(deps),
     ruleStore,
     pluginHookPermissionStore,
     dataDir,
-    config,
   };
 }
 
@@ -176,67 +170,6 @@ describe('LocalPermissionFacade', () => {
       cleanup(dataDir);
     }
   });
-
-  it.each([
-    { nativeDelete: false, command: 'rm ./old.txt', rewritten: true },
-    { nativeDelete: true, command: 'rm ./old.txt', rewritten: false },
-    { nativeDelete: false, command: 'mavis-trash -- ./old.txt', rewritten: false },
-  ])(
-    'keeps corrupt-store approval semantics for $command with nativeDelete=$nativeDelete',
-    async ({ nativeDelete, command, rewritten }) => {
-      const { facade, dataDir } = freshFacade({
-        nativeDelete,
-        platform: 'linux',
-        workspaceDir: '/workspace',
-      });
-      try {
-        writeFileSync(path.join(dataDir, 'permission.json'), '{"version":2,"allow":[');
-        const result = await facade.checkPermission({
-          toolName: 'bash',
-          agentName: 'mavis',
-          input: { command },
-        });
-        expect(result.behavior).toBe('ask');
-        expect(result.reason).toMatch(/permission rule store/i);
-        expect(result.hookAutoApprovalEligible).toBeUndefined();
-        expect(result.executionPlan?.nativeDelete).toBe(nativeDelete);
-        expect(result.executionPlan?.transforms).toHaveLength(rewritten ? 1 : 0);
-        expect(result.executionPlan?.effectiveInput.command).toEqual(
-          rewritten ? expect.stringContaining('mavis-trash') : command,
-        );
-      } finally {
-        cleanup(dataDir);
-      }
-    },
-  );
-
-  it.each(['core', 'engine'] as const)(
-    '%s preserves deletion rewrites when sensitive-path policy requires approval',
-    async (policyOwner) => {
-      const { facade, dataDir } = freshFacade({
-        policyOwner,
-        platform: 'linux',
-        workspaceDir: '/workspace',
-      });
-      try {
-        const params = {
-          toolName: 'bash',
-          agentName: 'mavis',
-          input: { command: 'rm /workspace/private.pem' },
-        };
-        for (const corrupt of [false, true]) {
-          if (corrupt)
-            writeFileSync(path.join(dataDir, 'permission.json'), '{"version":2,"allow":[');
-          const result = await facade.checkPermission(params);
-          expect(result.behavior).toBe('ask');
-          expect(result.executionPlan?.transforms).toHaveLength(1);
-          expect(result.executionPlan?.effectiveInput.command).toContain('mavis-trash');
-        }
-      } finally {
-        cleanup(dataDir);
-      }
-    },
-  );
 
   it('does not downgrade an unhealthy permission store to allow in bypass mode', async () => {
     const { facade, dataDir } = freshFacade({
@@ -444,7 +377,10 @@ describe('LocalPermissionFacade', () => {
         input: { path: '/Users/someone/.ssh/id_rsa' },
       });
 
-      expect(result.behavior).toBe('allow');
+      // The ssh-credential ask is bypass-immune (§3): the ask-gate no
+      // longer downgrades it under bypassPermissions, so the final verdict
+      // stays ask and the gate reports itself as not applied.
+      expect(result.behavior).toBe('ask');
       expect(info).toHaveBeenCalledWith(
         {
           session_id: 'mvs_observability',
@@ -452,8 +388,8 @@ describe('LocalPermissionFacade', () => {
           permission_mode: 'bypassPermissions',
           policy_owner: 'core',
           raw_behavior: 'ask',
-          final_behavior: 'allow',
-          ask_gate_applied: true,
+          final_behavior: 'ask',
+          ask_gate_applied: false,
           rewrite_applied: false,
           execution_plan_present: true,
           transform_count: 0,
@@ -552,714 +488,6 @@ describe('LocalPermissionFacade', () => {
     }
   });
 
-  describe('native deletion', () => {
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s keeps POSIX rm unchanged even when the trash runtime is missing',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'linux',
-          workspaceDir: '/workspace',
-          seedPosixTrash: false,
-        });
-        try {
-          const input = { command: 'rm ./old.txt', timeout: 9 };
-          const result = await facade.checkPermission({
-            toolName: 'bash',
-            agentName: 'mavis',
-            input,
-          });
-          expect(result.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-          expect(result.rewrittenInput).toBeUndefined();
-          if (permissionMode === 'off') {
-            expect(result.reason).toMatch(/permission mode is off/i);
-          }
-          expect(result.executionPlan).toMatchObject({
-            nativeDelete: true,
-            effectiveInput: input,
-            transforms: [],
-          });
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['rm -rf /', 'rm -rf ~'] as const)(
-      'keeps native POSIX catastrophic deletion blocked in every permission mode: %s',
-      async (command) => {
-        for (const permissionMode of ['off', 'default', 'bypassPermissions'] as const) {
-          const { facade, dataDir } = freshFacade({
-            nativeDelete: true,
-            permissionMode,
-            platform: 'darwin',
-            workspaceDir: '/workspace',
-            seedPosixTrash: false,
-          });
-          try {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-            expect(result.reason).toMatch(/recursive deletion targets a root or home directory/i);
-          } finally {
-            cleanup(dataDir);
-          }
-        }
-      },
-    );
-
-    describe.skipIf(process.platform === 'win32')('resolved POSIX native targets', () => {
-      it.each(['darwin', 'linux'] as const)(
-        '%s blocks actual home and root paths before every permission-mode shortcut',
-        async (platform) => {
-          for (const permissionMode of ['off', 'default', 'bypassPermissions'] as const) {
-            const home = homedir();
-            const { facade, dataDir } = freshFacade({
-              nativeDelete: true,
-              permissionMode,
-              platform,
-              workspaceDir: path.join(home, 'project'),
-              seedPosixTrash: false,
-            });
-            try {
-              for (const command of [
-                `rm -rf "${home}"`,
-                `rm "${home}" -rf`,
-                `rm "${home}" --recursive`,
-                `rm "${home}" -rf -- ./old`,
-                'rm / -rf',
-                `rm -rf -- "${home}"`,
-                'rm -- ./old;rm -rf "$HOME"',
-                'rm -- ./old&&rm "$HOME" -rf',
-                'rm -- ./old&rm -rf "$HOME"',
-                'for x in $( rm -rf "$HOME" ); do :; done',
-                'value=$( rm -rf "$HOME" )',
-                `sh -c 'rm -- ./old;rm -rf "$HOME"'`,
-                `rm -rf "${home}/projects/..//"`,
-                `rm -rf ${home}/*`,
-                `rm -rf ${home}/projects/../.*`,
-                'rm -rf ../*',
-                `env bash -c 'rm -rf "${home}"'`,
-                'rm -rf ..',
-                'rm -rf ../../../../../../..',
-                `cd "${home}" && rm -rf .`,
-              ]) {
-                const result = await facade.checkPermission({
-                  toolName: 'bash',
-                  agentName: 'mavis',
-                  input: { command },
-                });
-                expect(result, `${permissionMode}: ${command}`).toMatchObject({
-                  behavior: 'deny',
-                  denySource: 'safety-immune',
-                });
-                expect(result.executionPlan).toBeUndefined();
-              }
-            } finally {
-              cleanup(dataDir);
-            }
-          }
-        },
-      );
-
-      it.each(['off', 'default', 'bypassPermissions'] as const)(
-        '%s leaves ordinary native home subpaths to the normal permission flow',
-        async (permissionMode) => {
-          const { facade, dataDir } = freshFacade({
-            nativeDelete: true,
-            permissionMode,
-            platform: 'linux',
-            workspaceDir: homedir(),
-            seedPosixTrash: false,
-          });
-          try {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command: 'rm -rf ./Downloads' },
-            });
-            expect(result.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-            expect(result.rewrittenInput).toBeUndefined();
-          } finally {
-            cleanup(dataDir);
-          }
-        },
-      );
-    });
-
-    it.each([false, true])(
-      'snapshots nativeDelete=%s before the first await',
-      async (nativeDelete) => {
-        const { facade, dataDir, config } = freshFacade({
-          nativeDelete,
-          platform: 'linux',
-          workspaceDir: '/workspace',
-        });
-        try {
-          const input = { command: 'rm ./old.txt' };
-          const pending = facade.checkPermission({ toolName: 'bash', agentName: 'mavis', input });
-          config.permission!.nativeDelete = !nativeDelete;
-          const result = await pending;
-
-          expect(result.behavior).toBe(nativeDelete ? 'ask' : 'allow');
-          expect(result.executionPlan?.nativeDelete).toBe(nativeDelete);
-          expect(result.executionPlan?.originalInput).toEqual(input);
-          if (nativeDelete) {
-            expect(result.rewrittenInput).toBeUndefined();
-            expect(result.executionPlan?.effectiveInput).toEqual(input);
-            expect(result.executionPlan?.transforms).toEqual([]);
-          } else {
-            expect(result.rewrittenInput?.command).toContain('mavis-trash');
-            expect(result.executionPlan?.effectiveInput).toEqual(result.rewrittenInput);
-            expect(result.executionPlan?.transforms).toHaveLength(1);
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it('reads the current opt-in for each request and leaves previously built plans intact', async () => {
-      const { facade, dataDir, config } = freshFacade({
-        permissionMode: 'bypassPermissions',
-        platform: 'linux',
-        workspaceDir: '/workspace',
-      });
-      try {
-        const params = { toolName: 'bash', agentName: 'mavis', input: { command: 'rm ./old.txt' } };
-        const recoverable = await facade.checkPermission(params);
-        expect(recoverable.rewrittenInput?.command).toContain('mavis-trash');
-        config.permission = { ...config.permission, nativeDelete: true };
-        const native = await facade.checkPermission(params);
-        expect(native.rewrittenInput).toBeUndefined();
-        expect(native.executionPlan?.transforms).toEqual([]);
-        expect(recoverable.executionPlan?.transforms).toHaveLength(1);
-        config.permission = { ...config.permission, nativeDelete: false };
-        expect((await facade.checkPermission(params)).rewrittenInput?.command).toContain(
-          'mavis-trash',
-        );
-      } finally {
-        cleanup(dataDir);
-      }
-    });
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s skips Windows trash probes, repair, trusted launcher and rewrite requirements',
-      async (permissionMode) => {
-        const trashRuntimeProbe = vi.fn(() => false);
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'cmd',
-          workspaceDir: String.raw`C:\workspace`,
-          trashRuntimeProbe,
-        });
-        try {
-          for (const command of [
-            String.raw`del C:\workspace\old.txt`,
-            String.raw`cmd /c "del C:\workspace\old.txt"`,
-            String.raw`mavis-trash -- C:\workspace\old.txt`,
-          ]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            const expected =
-              permissionMode === 'default' && !command.startsWith('mavis-trash') ? 'ask' : 'allow';
-            expect(result.behavior).toBe(expected);
-            expect(result.rewrittenInput).toBeUndefined();
-            expect(readWindowsTrashExecution(result.executionPlan?.effectiveInput)).toBeUndefined();
-          }
-          expect(trashRuntimeProbe).not.toHaveBeenCalled();
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s blocks native Windows home deletion inside the workspace',
-      async (permissionMode) => {
-        const home = String.raw`C:\Users\Alice Smith`;
-        const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\Users`,
-        });
-        try {
-          for (const command of [
-            `Remove-Item -Recurse -Force "${home}"`,
-            `Remove-Item "${home}" -Recurse -Force`,
-            String.raw`rm -Recurse "c:/users/ALICE SMITH/projects/../"`,
-            String.raw`Remove-Item -Recurse ".\Alice Smith"`,
-            `powershell -Command 'Remove-Item -Recurse "${home}"'`,
-            `cmd /c 'rmdir /s /q "${home}"'`,
-          ]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            expect(result, command).toMatchObject({
-              behavior: 'deny',
-              denySource: 'safety-immune',
-            });
-            expect(result.reason, command).toMatch(/home directory/i);
-            expect(result.executionPlan).toBeUndefined();
-          }
-          for (const target of [String.raw`${home}\Downloads`, `${home}-old`]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command: `Remove-Item -Recurse "${target}"` },
-            });
-            expect(result.behavior, target).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-            expect(result.rewrittenInput).toBeUndefined();
-          }
-        } finally {
-          homeSpy.mockRestore();
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s blocks native PowerShell network-share deletion before execution',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          for (const command of [
-            String.raw`rm \\fileserver\share\old.txt`,
-            String.raw`powershell.exe -NoProfile -Command "rm \\fileserver\share\old.txt"`,
-          ]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-            expect(result.reason).toContain('network share');
-            expect(result.executionPlan).toBeUndefined();
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s checks native wrapper targets with the explicit PowerShell shell',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'cmd',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          for (const prefix of ['', 'echo ok && ']) {
-            const input = {
-              command: `${prefix}powershell.exe -NoProfile -Command "Remove-Item -Recurse C:\\workspace\\build"`,
-            };
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input,
-            });
-            expect(result.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-            expect(result.rewrittenInput).toBeUndefined();
-            if (permissionMode !== 'off') {
-              expect(result.executionPlan?.effectiveInput).toEqual(input);
-            }
-            const denied = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: {
-                command: `${prefix}powershell.exe -NoProfile -Command "rm -LiteralPath:C:\\Windows\\Temp\\old.txt -ErrorAction Stop"`,
-              },
-            });
-            expect(denied).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-            expect(denied.executionPlan).toBeUndefined();
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s resolves the workspace for nested compound Windows native deletion',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'cmd',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          for (const target of [String.raw`C:\workspace\build`, String.raw`C:\outside\build`]) {
-            const input = {
-              command: `cmd /c "echo ok && powershell -Command Remove-Item ${target} -Recurse"`,
-            };
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input,
-            });
-            if (target === String.raw`C:\workspace\build`) {
-              expect(result.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-              expect(result.rewrittenInput).toBeUndefined();
-            } else {
-              expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-              expect(result.reason).toContain('outside the workspace');
-            }
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s resolves native relative deletion against a verified Windows cwd',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'cmd',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          for (const command of [
-            String.raw`cmd /c "del ..\Windows\Temp\old.txt"`,
-            String.raw`del .\old.txt ..\Windows\Temp\old.txt`,
-            String.raw`cmd /c "cd /d C:\Windows\Temp && del old.txt"`,
-            String.raw`pushd C:\Windows\Temp && cmd /c "del old.txt"`,
-            String.raw`powershell -Command "Set-Location C:\Windows\Temp; Remove-Item old.txt"`,
-          ]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-            expect(result.reason).toMatch(/protected Windows path|cannot be verified safely/i);
-            expect(result.executionPlan).toBeUndefined();
-          }
-          for (const command of [
-            String.raw`del .\old.txt`,
-            String.raw`cmd /c "del .\old.txt"`,
-            String.raw`echo ok && powershell -Command "Remove-Item .\old.txt"`,
-          ]) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input: { command },
-            });
-            expect(result.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-            expect(result.rewrittenInput).toBeUndefined();
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each([
-      { shellFamily: 'cmd', command: 'rmdir /s /q' },
-      { shellFamily: 'powershell', command: 'Remove-Item -Recurse -Force' },
-      { shellFamily: 'powershell', command: 'rm -Recurse -Force' },
-    ] as const)(
-      'keeps $shellFamily native recursive deletion subject to ordinary permissions and path safety',
-      async ({ shellFamily, command }) => {
-        for (const permissionMode of ['off', 'default', 'bypassPermissions'] as const) {
-          const trashRuntimeProbe = vi.fn(() => false);
-          const { facade, dataDir } = freshFacade({
-            nativeDelete: true,
-            permissionMode,
-            platform: 'win32',
-            shellFamily,
-            workspaceDir: String.raw`C:\workspace`,
-            trashRuntimeProbe,
-          });
-          try {
-            const input = { command: `${command} C:\\workspace\\old` };
-            const allowed = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              input,
-            });
-            expect(allowed.behavior).toBe(permissionMode === 'default' ? 'ask' : 'allow');
-            expect(allowed.rewrittenInput).toBeUndefined();
-            expect(allowed.executionPlan).toMatchObject({
-              nativeDelete: true,
-              effectiveInput: input,
-              transforms: [],
-            });
-            expect(
-              readWindowsTrashExecution(allowed.executionPlan?.effectiveInput),
-            ).toBeUndefined();
-
-            for (const target of [
-              String.raw`C:\Windows\Temp`,
-              String.raw`C:\workspace\..\Windows\Temp`,
-            ]) {
-              const denied = await facade.checkPermission({
-                toolName: 'bash',
-                agentName: 'mavis',
-                input: { command: `${command} ${target}` },
-              });
-              expect(denied).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-              expect(denied.reason).toMatch(/protected Windows path/i);
-            }
-            expect(trashRuntimeProbe).not.toHaveBeenCalled();
-          } finally {
-            cleanup(dataDir);
-          }
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      'rejects unparsed native PowerShell deletion in %s mode',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          const result = await facade.checkPermission({
-            toolName: 'bash',
-            agentName: 'mavis',
-            input: {
-              command: String.raw`Remove-Item -LiteralPath C:\Windows\Temp\old.txt -ErrorAction Stop`,
-            },
-          });
-          expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      'rejects unparsed PowerShell rm alias in %s mode',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          const result = await facade.checkPermission({
-            toolName: 'bash',
-            agentName: 'mavis',
-            input: {
-              command: String.raw`rm -LiteralPath:C:\Windows\Temp\old.txt -ErrorAction Stop`,
-            },
-          });
-          expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      'rejects unparsed PowerShell rm inside a wrapper in %s mode',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          const result = await facade.checkPermission({
-            toolName: 'bash',
-            agentName: 'mavis',
-            input: {
-              command: String.raw`powershell.exe -NoProfile -Command "rm -LiteralPath:C:\Windows\Temp\old.txt -ErrorAction Stop"`,
-            },
-          });
-          expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each([
-      String.raw`del C:\workspace\old.txt && cp C:\workspace\a C:\Windows\a`,
-      String.raw`del C:\workspace\old.txt && mv C:\workspace\a C:\Windows\a`,
-      String.raw`del C:\workspace\old.txt && echo x > C:\Windows\a`,
-      String.raw`rm -rf C:\Windows\Temp`,
-    ])('retains Windows path safety in native off mode: %s', async (command) => {
-      const { facade, dataDir } = freshFacade({
-        nativeDelete: true,
-        permissionMode: 'off',
-        platform: 'win32',
-        shellFamily: 'cmd',
-        workspaceDir: String.raw`C:\workspace`,
-      });
-      try {
-        const result = await facade.checkPermission({
-          toolName: 'bash',
-          agentName: 'mavis',
-          input: { command },
-        });
-        expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-        expect(result.reason).toMatch(/protected Windows path/i);
-      } finally {
-        cleanup(dataDir);
-      }
-    });
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s preserves POSIX native delete authorization, plans and home protection on Windows',
-      async (permissionMode) => {
-        const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue('C:/workspace/home');
-        const { facade, ruleStore, dataDir } = freshFacade({
-          nativeDelete: true,
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'posix',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          const command = 'rm -- C:/outside/old.txt';
-          const params = { toolName: 'bash', agentName: 'mavis', input: { command } };
-          const result = await facade.checkPermission(params);
-          expect(result.behavior, result.reason).toBe(
-            permissionMode === 'default' ? 'ask' : 'allow',
-          );
-          expect(result.rewrittenInput).toBeUndefined();
-          if (permissionMode !== 'off') {
-            expect(result.executionPlan?.intents).toContainEqual(
-              expect.objectContaining({ shell: 'posix' }),
-            );
-            expect(result.executionPlan?.transforms).toEqual([]);
-          }
-          if (permissionMode === 'default') {
-            await ruleStore.applyUpdate({
-              type: 'addRules',
-              source: 'global',
-              destination: 'global',
-              behavior: 'allow',
-              rules: [{ tool_name: 'bash', rule_content: command }],
-            });
-            expect((await facade.checkPermission(params)).behavior).toBe('allow');
-          }
-          for (const unsafe of [
-            'rm -rf -- ./home',
-            'rm -rf -- C:/',
-            'rm -rf -- ~',
-            'rm -- //fileserver/share/old.txt',
-            'echo ok\nrm -- ../Windows/Temp/old.txt',
-          ]) {
-            expect(
-              await facade.checkPermission({ ...params, input: { command: unsafe } }),
-              unsafe,
-            ).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-          }
-        } finally {
-          homeSpy.mockRestore();
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['\n', '\r\n'])(
-      'keeps raw POSIX line continuation %j safety-immune in every permission mode',
-      async (newline) => {
-        const { facade, dataDir } = freshFacade({
-          nativeDelete: true,
-          platform: 'win32',
-          shellFamily: 'posix',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          for (const permissionModeOverride of ['off', 'default', 'bypassPermissions'] as const) {
-            const result = await facade.checkPermission({
-              toolName: 'bash',
-              agentName: 'mavis',
-              permissionModeOverride,
-              input: { command: `rm -- C:/Win\\${newline}dows/Temp/old.txt` },
-            });
-            expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-            expect(result.executionPlan).toBeUndefined();
-          }
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it('retains generic hard denial for Windows compound commands in native bypass mode', async () => {
-      const { facade, dataDir } = freshFacade({
-        nativeDelete: true,
-        permissionMode: 'bypassPermissions',
-        platform: 'win32',
-        shellFamily: 'cmd',
-        workspaceDir: String.raw`C:\workspace`,
-      });
-      try {
-        const result = await facade.checkPermission({
-          toolName: 'bash',
-          agentName: 'mavis',
-          input: { command: String.raw`del C:\workspace\old.txt; vssadmin delete shadows` },
-        });
-        expect(result.behavior).toBe('deny');
-      } finally {
-        cleanup(dataDir);
-      }
-    });
-  });
-
-  it('retains recoverable Windows rm with a POSIX executor when native deletion is disabled', async () => {
-    const { facade, dataDir } = freshFacade({
-      permissionMode: 'off',
-      platform: 'win32',
-      shellFamily: 'posix',
-      workspaceDir: String.raw`C:\workspace`,
-    });
-    try {
-      seedWindowsTrashRuntime(dataDir);
-      const result = await facade.checkPermission({
-        toolName: 'bash',
-        agentName: 'mavis',
-        input: { command: 'rm -- ./old.txt' },
-      });
-      expect(result.behavior, result.reason).toBe('allow');
-      expect(readWindowsTrashExecution(result.rewrittenInput)).toBeDefined();
-    } finally {
-      cleanup(dataDir);
-    }
-  });
-
   describe('POSIX host trash boundary', () => {
     it('hard-denies rm when the canonical POSIX trash script is unavailable', async () => {
       const { facade, dataDir } = freshFacade({
@@ -1300,11 +528,12 @@ describe('LocalPermissionFacade', () => {
         });
 
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
-        // The plan validates the executable replacement while the shell retains
-        // the original operands and redirections.
+        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
+        // The plan still DESCRIBES a recoverable delete (telemetry only — no
+        // consumer executes it), but there is no host sentinel: the delete now
+        // runs in-cage, reaching mavis-trash through the PATH shim.
         expect(result.executionPlan?.transforms).toEqual([
-          { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
+          { type: 'recoverable-delete', targets: ['/workspace/old.txt'] },
         ]);
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
@@ -1312,21 +541,17 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it('keeps non-delete commands on the off-mode short circuit with an execution plan', async () => {
+    it('keeps non-delete commands on the off-mode short circuit', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'off', platform: 'linux' });
       try {
-        const input = { command: 'ls -la' };
-        const result = await facade.checkPermission({ toolName: 'bash', input });
+        const result = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'ls -la' },
+        });
 
         expect(result.behavior).toBe('allow');
         expect(result.reason).toMatch(/permission mode is off/i);
         expect(result.rewrittenInput).toBeUndefined();
-        expect(result.executionPlan).toMatchObject({
-          nativeDelete: false,
-          originalInput: input,
-          effectiveInput: input,
-          transforms: [],
-        });
       } finally {
         cleanup(dataDir);
       }
@@ -1349,7 +574,7 @@ describe('LocalPermissionFacade', () => {
         // not reshape the permission verdict for deletes. Compare with the
         // sandbox-disabled case below: the outcome is identical.
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
+        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
         cleanup(dataDir);
@@ -1370,7 +595,7 @@ describe('LocalPermissionFacade', () => {
         });
 
         expect(result.behavior).toBe('allow');
-        expect(result.rewrittenInput?.command).toContain('mavis-trash --rm-compatible ./old.txt');
+        expect(result.rewrittenInput?.command).toContain('mavis-trash -- ./old.txt');
         expect(readWindowsTrashExecution(result.rewrittenInput)).toBeUndefined();
       } finally {
         cleanup(dataDir);
@@ -1379,168 +604,6 @@ describe('LocalPermissionFacade', () => {
   });
 
   describe('Windows delete boundary', () => {
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s preserves quoted home-like rm targets through the Windows execution plan',
-      async (permissionMode) => {
-        const homeDir = String.raw`C:\Users\alice`;
-        vi.stubEnv('HOME', homeDir);
-        vi.stubEnv('USERPROFILE', homeDir);
-        try {
-          expect(homedir()).toBe(homeDir);
-          for (const shellFamily of ['cmd', 'powershell'] as const) {
-            const { facade, dataDir } = freshFacade({
-              nativeDelete: false,
-              permissionMode,
-              platform: 'win32',
-              shellFamily,
-              workspaceDir: homeDir,
-            });
-            try {
-              seedWindowsTrashRuntime(dataDir);
-              for (const [command, target] of [
-                ['rm "~/old.txt"', String.raw`C:\Users\alice\~\old.txt`],
-                ['rm "./old file.txt"', String.raw`C:\Users\alice\old file.txt`],
-                ['rm ~/old.txt', String.raw`C:\Users\alice\old.txt`],
-              ]) {
-                const result = await facade.checkPermission({
-                  toolName: 'bash',
-                  agentName: 'mavis',
-                  input: { command },
-                });
-                expect(result.behavior, command).toBe('allow');
-                expect(readWindowsTrashExecution(result.executionPlan?.effectiveInput)).toEqual({
-                  targets: [target],
-                });
-                expect(result.executionPlan?.transforms).toEqual([
-                  { type: 'recoverable-delete', targets: [target] },
-                ]);
-                expect(result.executionPlan?.intents).toMatchObject([
-                  {
-                    kind: 'filesystem',
-                    action: 'delete',
-                    paths: [{ resolved: target, dynamic: false }],
-                  },
-                ]);
-              }
-            } finally {
-              cleanup(dataDir);
-            }
-          }
-        } finally {
-          vi.unstubAllEnvs();
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s normalizes relative and dot-segment rm targets before creating the Windows plan',
-      async (permissionMode) => {
-        for (const shellFamily of ['cmd', 'powershell'] as const) {
-          const { facade, dataDir } = freshFacade({
-            permissionMode,
-            platform: 'win32',
-            shellFamily,
-            workspaceDir: String.raw`C:\workspace`,
-          });
-          try {
-            seedWindowsTrashRuntime(dataDir);
-            for (const target of [
-              'build',
-              String.raw`.\build`,
-              String.raw`C:\workspace\cache\..\build`,
-            ]) {
-              const result = await facade.checkPermission({
-                toolName: 'bash',
-                agentName: 'mavis',
-                input: { command: `rm -rf ${target}` },
-              });
-              expect(result.behavior).toBe('allow');
-              expect(readWindowsTrashExecution(result.executionPlan?.effectiveInput)).toEqual({
-                targets: [String.raw`C:\workspace\build`],
-              });
-              expect(result.executionPlan?.transforms).toEqual([
-                { type: 'recoverable-delete', targets: [String.raw`C:\workspace\build`] },
-              ]);
-            }
-          } finally {
-            cleanup(dataDir);
-          }
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s preserves recoverable PowerShell rm while keeping native syntax strict',
-      async (permissionMode) => {
-        const { facade, dataDir, config } = freshFacade({
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          seedWindowsTrashRuntime(dataDir);
-          const input = { command: String.raw`rm -rf C:\workspace\build` };
-          const params = { toolName: 'bash', agentName: 'mavis', input };
-          const recoverable = await facade.checkPermission(params);
-          expect(recoverable.behavior).toBe('allow');
-          expect(recoverable.rewrittenInput?.command).toContain('mavis-trash');
-          expect(readWindowsTrashExecution(recoverable.executionPlan?.effectiveInput)).toEqual({
-            targets: [String.raw`C:\workspace\build`],
-          });
-          expect(recoverable.executionPlan?.transforms).toEqual([
-            { type: 'recoverable-delete', targets: [String.raw`C:\workspace\build`] },
-          ]);
-
-          config.permission = { ...config.permission, nativeDelete: true };
-          const native = await facade.checkPermission(params);
-          expect(native).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-          expect(native.reason).toContain('cannot be verified safely');
-          expect(native.rewrittenInput).toBeUndefined();
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
-    it.each(['off', 'default', 'bypassPermissions'] as const)(
-      '%s retains protected-path and recursive workspace boundaries for recoverable PowerShell rm',
-      async (permissionMode) => {
-        const { facade, dataDir } = freshFacade({
-          permissionMode,
-          platform: 'win32',
-          shellFamily: 'powershell',
-          workspaceDir: String.raw`C:\workspace`,
-        });
-        try {
-          seedWindowsTrashRuntime(dataDir);
-          for (const flags of ['-rf', '-Recurse']) {
-            for (const target of [String.raw`C:\Windows\Temp`, String.raw`C:\outside\build`]) {
-              const result = await facade.checkPermission({
-                toolName: 'bash',
-                agentName: 'mavis',
-                input: { command: `rm ${flags} ${target}` },
-              });
-              expect(result).toMatchObject({ behavior: 'deny', denySource: 'safety-immune' });
-              expect(result.reason).toMatch(/protected Windows path|outside the workspace/i);
-              expect(result.executionPlan).toBeUndefined();
-            }
-          }
-          const result = await facade.checkPermission({
-            toolName: 'bash',
-            agentName: 'mavis',
-            input: { command: String.raw`rm -Recurse C:\workspace\build` },
-          });
-          expect(result.behavior).toBe('allow');
-          expect(readWindowsTrashExecution(result.executionPlan?.effectiveInput)).toEqual({
-            targets: [String.raw`C:\workspace\build`],
-          });
-        } finally {
-          cleanup(dataDir);
-        }
-      },
-    );
-
     it.each(['default', 'bypassPermissions', 'off'] as const)(
       'hard-denies the incident wrapper command in %s mode before execution',
       async (permissionMode) => {
@@ -1747,10 +810,8 @@ describe('LocalPermissionFacade', () => {
           input: { command: String.raw`rm -rf C:\Users\16379\project\mock` },
         });
         expect(r.behavior).toBe('allow');
-        expect(r.rewrittenInput?.command).toBe('mavis-trash --');
-        expect(readWindowsTrashExecution(r.executionPlan?.effectiveInput)).toEqual({
-          targets: [String.raw`C:\Users\16379\project\mock`],
-        });
+        expect(r.rewrittenInput?.command).toMatch(/mavis-trash/);
+        expect(r.rewrittenInput?.command).toContain(String.raw`C:\Users\16379\project\mock`);
         expect(r.executionPlan?.transforms).toEqual([
           {
             type: 'recoverable-delete',
@@ -1767,7 +828,9 @@ describe('LocalPermissionFacade', () => {
         expect(bareTrash.reason).toContain('bare or non-canonical mavis-trash is untrusted');
         expect(bareTrash.reason).toContain('The target was not deleted');
         expect(bareTrash.reason).toContain('one top-level rm command');
-        expect(bareTrash.reason).toContain(path.win32.join(dataDir, 'bin', 'mavis-trash.cmd'));
+        expect(bareTrash.reason).toContain(
+          path.win32.join(dataDir, 'bin', 'mavis-trash.cmd'),
+        );
       } finally {
         cleanup(dataDir);
       }
@@ -2411,6 +1474,13 @@ describe('LocalPermissionFacade', () => {
           permissionMode: 'bypassPermissions',
         } as LocalRuntimeConfig;
         const ruleStore = new LocalPermissionRuleStore(() => dataDir);
+        await ruleStore.applyUpdate({
+          type: 'addRules',
+          source: 'global',
+          destination: 'global',
+          behavior: 'ask',
+          rules: [{ tool_name: 'bash', rule_content: 'echo:*' }],
+        });
         const deps: LocalPermissionFacadeDeps = {
           ruleStore,
           configGetter: () => config,
@@ -2427,21 +1497,21 @@ describe('LocalPermissionFacade', () => {
         };
         const facade = new LocalPermissionFacade(deps);
         const r = await facade.checkPermission({
-          toolName: 'read',
-          input: { path: '/Users/someone/.ssh/id_rsa' },
+          toolName: 'bash',
+          input: { command: 'echo hi' },
         });
-        // With the snapshot: BOTH halves see bypassPermissions, so the
-        // user-visible product semantics ("Always allow = no card") apply
-        // consistently. The verdict is `allow` (gate downgrade) — the
-        // attribute we pin is that it's NOT a half-broken state where
-        // the raw pipeline returned an engine ASK (because it saw the
-        // post-flip 'default') AND the gate then downgrade-allowed it
-        // using the pre-flip 'bypassPermissions' snapshot. We assert
-        // the reason carries the bypass marker, which is only possible
-        // if the gate had a consistent bypass snapshot AND raw returned
-        // some ASK that the gate downgraded.
-        expect(r.behavior).toBe('allow');
-        expect(r.reason).toMatch(/bypassPermissions|始终允许/);
+        // With the snapshot BOTH halves see bypassPermissions. The user's
+        // explicit `ask bash(echo:*)` rule then produces a bypass-immune
+        // ASK (§3): the bash checker flags rule asks under bypass and the
+        // ask-gate passes immune asks through, so the card surfaces. The
+        // half-broken state this pins against is the raw pipeline seeing
+        // the post-flip 'default' (ordinary ASK) while the gate still holds
+        // the pre-flip 'bypassPermissions' snapshot and silently allows it.
+        expect(r.behavior).toBe('ask');
+        // Only the bypass-snapshot raw pipeline marks the rule ask immune; a
+        // raw pipeline that saw the post-flip 'default' would not.
+        expect(r.bypassImmune).toBe(true);
+        expect(r.reason).not.toMatch(/bypassPermissions|始终允许/);
       } finally {
         cleanup(dataDir);
       }
@@ -2618,7 +1688,7 @@ describe('LocalPermissionFacade', () => {
     // default mode still gives the user (or auto classifier) the option
     // to authorize.
 
-    it('sensitive credential path under bypassPermissions → allow (gate downgrades ask)', async () => {
+    it('sensitive credential path under bypassPermissions → bypass-immune ask (gate passes it through)', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'bypassPermissions' });
       try {
         const r = await facade.checkPermission({
@@ -2626,12 +1696,13 @@ describe('LocalPermissionFacade', () => {
           input: { path: '/Users/someone/.ssh/id_rsa' },
         });
         // Under bypass, the policy-deny short-circuit is skipped so the
-        // engine runs. The engine then asks (credential safetyCheck) and
-        // the gate downgrades that ask to allow with a fixed reason.
-        // The product contract is: bypassPermissions = no card ever,
-        // including for credential paths.
-        expect(r.behavior).toBe('allow');
-        expect(r.reason).toMatch(/bypassPermissions|始终允许/);
+        // engine runs. The engine asks (credential safetyCheck, ssh-credential
+        // ∈ BYPASS_IMMUNE_SAFETY_CATEGORIES) and marks it bypass-immune. The
+        // product contract is now (§3): bypass-immune asks survive every
+        // mode — the ask-gate no longer downgrades them to allow.
+        expect(r.behavior).toBe('ask');
+        expect(r.bypassImmune).toBe(true);
+        expect(r.reason).toMatch(/credential|private[- ]key|sensitive/i);
       } finally {
         cleanup(dataDir);
       }
@@ -2662,12 +1733,10 @@ describe('LocalPermissionFacade', () => {
         it.each(['read', 'grep', 'glob', 'list'])(
           'allows %s for global, builtin and active-agent skill resources',
           async (toolName) => {
-            const classify = vi.fn(
-              async (): Promise<CloudClassifyVerdict> => ({
-                kind: 'allow',
-                reasonLocalized: 'ok',
-              }),
-            );
+            const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+              kind: 'allow',
+              reasonLocalized: 'ok',
+            }));
             const { facade, dataDir } = freshFacade({
               permissionMode,
               cloudGateway: { classify },
@@ -2702,12 +1771,10 @@ describe('LocalPermissionFacade', () => {
     it.each(['default', 'auto'] as const)(
       '%s mode keeps other agents and runtime state outside skill read access',
       async (permissionMode) => {
-        const classify = vi.fn(
-          async (): Promise<CloudClassifyVerdict> => ({
-            kind: 'allow',
-            reasonLocalized: 'ok',
-          }),
-        );
+        const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+          kind: 'allow',
+          reasonLocalized: 'ok',
+        }));
         const { facade, dataDir } = freshFacade({
           permissionMode,
           cloudGateway: { classify },
@@ -2768,31 +1835,17 @@ describe('LocalPermissionFacade', () => {
     it.each(['read', 'grep', 'glob', 'list'])(
       'keeps private runtime %s requests out of automatic approval',
       async (toolName) => {
-        const classify = vi.fn(
-          async (): Promise<CloudClassifyVerdict> => ({
-            kind: 'allow',
-            reasonLocalized: 'ok',
-          }),
-        );
+        const classify = vi.fn(async (): Promise<CloudClassifyVerdict> => ({
+          kind: 'allow',
+          reasonLocalized: 'ok',
+        }));
         const { facade, dataDir } = freshFacade({
           permissionMode: 'auto',
           cloudGateway: { classify },
         });
         configurePermissionHost({
           runtimeConfigProvider: {
-            getConfig: () => ({
-              dataDir,
-              agentsDir: path.join(dataDir, 'agents'),
-              permissionMode: 'auto',
-              permission: { classifierTimeoutMs: 1000 },
-              beta: { autoMemory: false },
-              memory: { dailyDigest: { enabled: false } },
-              contextManagement: { disableSystemReminderModels: [] },
-              skillEvolve: {
-                disableModelPrefixes: [],
-                proposal: { enabled: false, minMessageCount: 0 },
-              },
-            }),
+            getConfig: () => ({}),
             getRuntimeRegion: () => 'cn',
             getRuntimeBuildEnv: () => 'prod',
             isManagedRuntime: () => true,
@@ -2865,27 +1918,24 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it.each([true, false])(
-      'protects nested runtime data from recursive search (explicit path: %s)',
-      async (explicitPath) => {
-        const workspaceDir = mkdtempSync(path.join(tmpdir(), 'runtime-parent-workspace-'));
-        const { facade, dataDir } = freshFacade({
-          workspaceDir,
-          dataDirParent: workspaceDir,
+    it.each([true, false])('protects nested runtime data from recursive search (explicit path: %s)', async (explicitPath) => {
+      const workspaceDir = mkdtempSync(path.join(tmpdir(), 'runtime-parent-workspace-'));
+      const { facade, dataDir } = freshFacade({
+        workspaceDir,
+        dataDirParent: workspaceDir,
+      });
+      try {
+        const result = await facade.checkPermission({
+          toolName: 'grep',
+          agentName: 'fixture-agent',
+          input: { ...(explicitPath ? { path: workspaceDir } : {}), pattern: 'secret' },
         });
-        try {
-          const result = await facade.checkPermission({
-            toolName: 'grep',
-            agentName: 'fixture-agent',
-            input: { ...(explicitPath ? { path: workspaceDir } : {}), pattern: 'secret' },
-          });
-          expect(result.behavior).toBe('ask');
-        } finally {
-          cleanup(dataDir);
-          cleanup(workspaceDir);
-        }
-      },
-    );
+        expect(result.behavior).toBe('ask');
+      } finally {
+        cleanup(dataDir);
+        cleanup(workspaceDir);
+      }
+    });
 
     it('honors an explicit path approval for private runtime data', async () => {
       const { facade, ruleStore, dataDir } = freshFacade({
@@ -3112,56 +2162,6 @@ describe('LocalPermissionFacade', () => {
     });
   });
 
-  describe('host-issued Session read grant', () => {
-    it('reads only the granted Session artifact directory under runtime data', async () => {
-      const { facade, ruleStore, dataDir } = freshFacade({ permissionMode: 'default' });
-      const toolOutputs = path.join(dataDir, 'v2', 'sessions', 'own', 'reports', 'tool-outputs');
-      const artifact = path.join(toolOutputs, 'call.readable.v1.jsonl');
-      const otherArtifact = path.join(
-        dataDir,
-        'v2',
-        'sessions',
-        'other',
-        'reports',
-        'tool-outputs',
-        'call.readable.v1.jsonl',
-      );
-      mkdirSync(path.dirname(artifact), { recursive: true });
-      mkdirSync(path.dirname(otherArtifact), { recursive: true });
-      writeFileSync(artifact, '{"synthetic":true}\n');
-      writeFileSync(otherArtifact, '{"synthetic":true}\n');
-      try {
-        await expect(
-          facade.checkPermission({
-            toolName: 'read',
-            input: { path: artifact },
-            sessionId: 'session-a',
-            sessionOwnedReadablePaths: [toolOutputs],
-          }),
-        ).resolves.toMatchObject({ behavior: 'allow' });
-        // Without the grant the same artifact is private runtime data.
-        await expect(
-          facade.checkPermission({
-            toolName: 'read',
-            input: { path: artifact },
-            sessionId: 'session-a',
-          }),
-        ).resolves.not.toMatchObject({ behavior: 'allow' });
-        await expect(
-          facade.checkPermission({
-            toolName: 'read',
-            input: { path: otherArtifact },
-            sessionId: 'session-a',
-            sessionOwnedReadablePaths: [toolOutputs],
-          }),
-        ).resolves.not.toMatchObject({ behavior: 'allow' });
-        await expect(ruleStore.listRules({ sessionId: 'session-a' })).resolves.toEqual([]);
-      } finally {
-        cleanup(dataDir);
-      }
-    });
-  });
-
   describe('localeHint', () => {
     it('returns zh reason when inline user messages are Chinese', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
@@ -3214,6 +2214,168 @@ describe('LocalPermissionFacade', () => {
     });
   });
 
+  describe('destructive-delete guard (permission.dangerousCommandGateEnabled)', () => {
+    // The switch is the user-owned opt-out of an irreversibility safety net,
+    // and it governs the MAIN WINDOW ONLY. A sub-agent Session runs unattended,
+    // so it keeps the guard no matter what the main window is set to — and an
+    // unidentified origin is treated as a sub-agent too.
+    //
+    // Both layers must move together: the permission verdict AND the rm →
+    // mavis-trash rewrite. A half-applied switch would keep routing deletes
+    // into the trash while the UI claimed they run as written.
+    it('allows rm without rewriting it once the main window disables the guard', async () => {
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm -rf ./tmp-build' },
+          sessionScope: 'main',
+        });
+
+        expect(r.behavior).toBe('allow');
+        expect(r.rewrittenInput).toBeUndefined();
+        expect(r.reason).toMatch(/destructive-delete guard is disabled/);
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('still rewrites rm to mavis-trash when the guard is enabled', async () => {
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: true,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm -rf ./tmp-build' },
+          sessionScope: 'main',
+        });
+
+        expect(r.rewrittenInput?.command).toContain('mavis-trash');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('does not ask in the main window when the guard is disabled', async () => {
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm /tmp/scratch/a.log /tmp/scratch/b.log' },
+          sessionScope: 'main',
+        });
+
+        expect(r.behavior).toBe('allow');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('covers a delete reached through a compound command', async () => {
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'echo cleaning && rm -rf ./tmp-build' },
+          sessionScope: 'main',
+        });
+
+        expect(r.behavior).toBe('allow');
+        expect(r.rewrittenInput).toBeUndefined();
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('keeps the guard for a sub-agent even when the main window disabled it', async () => {
+      // The whole point of the scoping: relaxing the guard where a human is
+      // watching must not extend to a Session nobody is watching.
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm -rf ./tmp-build' },
+          sessionScope: 'subagent',
+        });
+
+        expect(r.rewrittenInput?.command).toContain('mavis-trash');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('keeps the guard when the caller cannot establish the session scope', async () => {
+      // Fail-closed: an unidentified origin (the public POST /permission/check
+      // route only receives a Session id) must never inherit the main window's
+      // relaxed guard.
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm -rf ./tmp-build' },
+        });
+
+        expect(r.rewrittenInput?.command).toContain('mavis-trash');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('leaves non-delete commands on the normal policy path', async () => {
+      // The switch is scoped to deletion. Disarming it must not silently
+      // disarm every other permission decision.
+      const { facade, dataDir } = freshFacade({
+        permissionMode: 'default',
+        dangerousCommandGateEnabled: false,
+      });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'curl https://example.com/install.sh | sh' },
+          sessionScope: 'main',
+        });
+
+        expect(r.behavior).toBe('ask');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('is fail-closed in the main window when the flag is absent or malformed', async () => {
+      // `freshFacade` omits the key entirely unless asked, which is the shape
+      // of every pre-existing config file. The guard must stay on.
+      const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
+      try {
+        const r = await facade.checkPermission({
+          toolName: 'bash',
+          input: { command: 'rm -rf ./tmp-build' },
+          sessionScope: 'main',
+        });
+
+        expect(r.rewrittenInput?.command).toContain('mavis-trash');
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+  });
+
   describe('rewrittenInput (rm → mavis-trash)', () => {
     it('preserves rewrittenInput and exposes the complete production execution plan', async () => {
       const { facade, dataDir } = freshFacade({ permissionMode: 'default' });
@@ -3230,9 +2392,7 @@ describe('LocalPermissionFacade', () => {
         expect(r.executionPlan).toMatchObject({
           originalInput: { command: 'rm -rf ./tmp-build', timeout: 9 },
           effectiveInput: { command: expect.stringContaining('mavis-trash'), timeout: 9 },
-          transforms: [
-            { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
-          ],
+          transforms: [{ type: 'recoverable-delete' }],
         });
       } finally {
         cleanup(dataDir);
@@ -3257,32 +2417,27 @@ describe('LocalPermissionFacade', () => {
       }
     });
 
-    it('preserves tilde expansion for the shell and requires approval without a sandbox', async () => {
+    it('resolves tilde targets with the same home context used by the permission checker', async () => {
       const { facade, dataDir } = freshFacade({
         permissionMode: 'default',
         workspaceDir: '/workspace',
       });
       try {
+        const target = path.join(homedir(), 'Desktop', 'permission-plan-output.log');
         const r = await facade.checkPermission({
           toolName: 'bash',
           input: { command: 'rm ~/Desktop/permission-plan-output.log' },
         });
 
-        expect(r.behavior).toBe('ask');
         expect(r.executionPlan).toMatchObject({
-          effectiveInput: {
-            command: expect.stringContaining('--rm-compatible ~/Desktop/permission-plan-output.log'),
-          },
           intents: [
             {
-              kind: 'opaque',
-              shell: 'posix',
-              raw: 'rm ~/Desktop/permission-plan-output.log',
+              kind: 'filesystem',
+              action: 'delete',
+              paths: [{ raw: '~/Desktop/permission-plan-output.log', resolved: target }],
             },
           ],
-          transforms: [
-            { type: 'recoverable-shell-delete', launcher: path.join(dataDir, 'bin', 'mavis-trash') },
-          ],
+          transforms: [{ type: 'recoverable-delete', targets: [target] }],
         });
       } finally {
         cleanup(dataDir);
@@ -3358,6 +2513,76 @@ describe('LocalPermissionFacade', () => {
         const after = await ruleStore.listRules({});
         const seeded = after.filter((r) => r.source === 'global' && r.ruleBehavior === 'allow');
         expect(seeded.length).toBe(0);
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+  });
+
+  describe('per-session permission mode (§2.4)', () => {
+    it('plugin-mode-only-tightens: a Session mode anchors the decision against weaker and stronger hook modes', async () => {
+      const workspaceDir = mkdtempSync(path.join(tmpdir(), 'aa-facade-workspace-'));
+      const { facade, pluginHookPermissionStore, dataDir } = freshFacade({ workspaceDir });
+      try {
+        const ask = {
+          toolName: 'bash',
+          input: { command: 'python3 -c "print(1)"' },
+          agentName: 'mavis',
+          sessionId: 'session-1',
+        } as const;
+
+        // Session `default` + hook `bypassPermissions` (weaker) → hook ignored → ask.
+        await pluginHookPermissionStore.applyAtomic({
+          sessionId: 'session-1',
+          cwd: workspaceDir,
+          bypassAvailable: true,
+          updates: [{ type: 'setMode', mode: 'bypassPermissions', destination: 'session' }],
+        });
+        await expect(
+          facade.checkPermission({ ...ask, sessionPermissionMode: 'default' }),
+        ).resolves.toMatchObject({ behavior: 'ask' });
+
+        // Session `bypassPermissions` + hook `default` (stricter) → hook wins → ask.
+        await pluginHookPermissionStore.applyAtomic({
+          sessionId: 'session-1',
+          cwd: workspaceDir,
+          bypassAvailable: true,
+          updates: [{ type: 'setMode', mode: 'default', destination: 'session' }],
+        });
+        await expect(
+          facade.checkPermission({ ...ask, sessionPermissionMode: 'bypassPermissions' }),
+        ).resolves.toMatchObject({ behavior: 'ask' });
+
+        // Without a Session mode the hook still applies directly (today's chain).
+        await expect(facade.checkPermission({ ...ask })).resolves.toMatchObject({
+          behavior: 'ask',
+        });
+      } finally {
+        cleanup(dataDir);
+      }
+    });
+
+    it('a Session mode beats the process config and an explicit weaker override', async () => {
+      // Process config says bypassPermissions; the Session negotiated default.
+      const { facade, dataDir } = freshFacade({ permissionMode: 'bypassPermissions' });
+      try {
+        const ask = {
+          toolName: 'bash',
+          input: { command: 'python3 -c "print(1)"' },
+          agentName: 'mavis',
+          sessionId: 'session-1',
+        } as const;
+        await expect(
+          facade.checkPermission({ ...ask, sessionPermissionMode: 'default' }),
+        ).resolves.toMatchObject({ behavior: 'ask' });
+        // A caller override may only tighten: bypass under a default Session is ignored.
+        await expect(
+          facade.checkPermission({
+            ...ask,
+            permissionModeOverride: 'bypassPermissions',
+            sessionPermissionMode: 'default',
+          }),
+        ).resolves.toMatchObject({ behavior: 'ask' });
       } finally {
         cleanup(dataDir);
       }

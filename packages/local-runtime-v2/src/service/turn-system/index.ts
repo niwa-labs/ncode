@@ -8,8 +8,6 @@ export type {
   ConversationEditAdmissionResult,
   ContinueTurnInput,
   ContinueTurnResult,
-  HistoryForkBoundaryInput,
-  HistoryForkBoundaryInspection,
   HistoryForkInput,
   HistoryForkResult,
   HistoryRewindInput,
@@ -38,10 +36,29 @@ export type {
 export type { TurnOutputContract } from './agent-host/contracts.js';
 export { isUserSteeringProducer } from './agent-host/contracts.js';
 export { digestTurnInput } from './execution/turn-input-identity.js';
+export { parseBackgroundTaskOriginMetadata } from './agent-host/contracts.js';
 export {
-  parseBackgroundTaskDeliveryOrigin,
-  parseBackgroundTaskOriginMetadata,
-} from './agent-host/contracts.js';
+  createPromptSuggestionService,
+  type PromptSuggestionReadResult,
+  type PromptSuggestionReadStatus,
+  type PromptSuggestionResult,
+  type PromptSuggestionTurnPort,
+} from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
+export {
+  evaluatePromptSuggestionPolicy,
+  PROMPT_SUGGESTION_VERSION,
+  promptSuggestionInstruction,
+  type PromptSuggestionPolicy,
+  type PromptSuggestionPolicyDecision,
+  type PromptSuggestionPolicyRefusal,
+} from './agent-host/runner/prompt-suggestion/prompt-suggestion-policy.js';
+/** W4 (§4.4/R5): the per-session toolEnv provider seam (daemon installs it). */
+export {
+	clearSessionToolEnvProvider,
+	readSessionToolEnv,
+	setSessionToolEnvProvider,
+} from './session-tool-env.js';
+export type { SessionToolEnvSnapshot } from './session-tool-env.js';
 export { queueClaimDeliveryInput } from './queue.dispatcher.js';
 export { composeTurnAdmissionPolicies } from './admission-contracts.js';
 export { initializeTurnSystem } from './initialize.js';
@@ -84,6 +101,12 @@ export type {
 export type { ToolResultCompactionConfig } from './compaction/contracts.js';
 export type { AgentHostRuntimeLifecycle } from './agent-host/native-production-dependencies.js';
 export {
+  createSessionCacheWarming,
+  MCODE_CACHE_WARMING_ENV,
+  resolveCacheWarmingMode,
+} from './agent-host/runner/index.js';
+export type { SessionCacheWarming } from './agent-host/runner/index.js';
+export {
   ModelRouteAvailabilityError,
   createSessionModelRepair,
   type SessionModelRecordMutator,
@@ -92,10 +115,11 @@ export {
 } from './agent-host/preparation/config/session-model-selection.js';
 export {
   AgentHostTurnCapabilityLifecycle,
+  createPluginAgentRoster,
+  type AgentHostTurnPluginAgent,
   type AgentHostTurnCapabilityPreparation,
   type AgentHostTurnCapabilityProvider,
   type AgentHostTurnCapabilityView,
-  type AgentHostTurnPluginAgent,
   type AgentHostTurnPublicationPort,
   type AgentHostTurnRuntimeToolBinding,
   type AgentHostTurnToolMode,
@@ -103,8 +127,6 @@ export {
 export {
   createLocalAgentCapabilitySelector,
   filterLocalTurnCapabilityInventory,
-  isAgentSelectorMcpToolName,
-  resolveToolsAllowlistScope,
   type FilteredLocalTurnCapabilityInventory,
   type LocalAgentCapabilitySelector,
   type LocalTurnAgentProfileFacts,
@@ -140,18 +162,3 @@ export {
 export { buildLocalTurnPayloadTransform } from './agent-host/index.js';
 
 export { normalizeModelSelection, type UserModelSelection } from './agent-host/index.js';
-export {
-  createPromptSuggestionService,
-  type PromptSuggestionReadResult,
-  type PromptSuggestionReadStatus,
-  type PromptSuggestionResult,
-  type PromptSuggestionTurnPort,
-} from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
-export {
-  evaluatePromptSuggestionPolicy,
-  PROMPT_SUGGESTION_VERSION,
-  promptSuggestionInstruction,
-  type PromptSuggestionPolicy,
-  type PromptSuggestionPolicyDecision,
-  type PromptSuggestionPolicyRefusal,
-} from './agent-host/runner/prompt-suggestion/prompt-suggestion-policy.js';

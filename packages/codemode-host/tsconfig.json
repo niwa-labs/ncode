@@ -1,0 +1,78 @@
+{
+  "//": "NodeNext module (the pinned pi sources use import attributes; Node16 rejects them) + the full pi path families, so vendored sources compile from source without duplicate type identities + the path families this package compiles (full pi-ai/pi-agent-core/pi-codemode subpath maps, so vendored sources never fall through to dist types and duplicate identities). erasableSyntaxOnly off to match the vendored pin's parameter-property syntax.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": [
+      "ES2024"
+    ],
+    "target": "ES2024",
+    "noUncheckedIndexedAccess": false,
+    "noImplicitOverride": false,
+    "erasableSyntaxOnly": false,
+    "paths": {
+      "@earendil-works/pi-agent-core": [
+        "../../third_party/pi-mono/packages/agent/src/index.ts"
+      ],
+      "@earendil-works/pi-agent-core/package.json": [
+        "../../third_party/pi-mono/packages/agent/package.json"
+      ],
+      "@earendil-works/pi-ai": [
+        "../../third_party/pi-mono/packages/ai/src/index.ts"
+      ],
+      "@earendil-works/pi-ai/api/*": [
+        "../../third_party/pi-mono/packages/ai/src/api/*.ts"
+      ],
+      "@earendil-works/pi-ai/bedrock-provider": [
+        "../../third_party/pi-mono/packages/ai/src/bedrock-provider.ts"
+      ],
+      "@earendil-works/pi-ai/bun-oauth": [
+        "../../third_party/pi-mono/packages/ai/src/bun-oauth.ts"
+      ],
+      "@earendil-works/pi-ai/compat": [
+        "../../third_party/pi-mono/packages/ai/src/compat.ts"
+      ],
+      "@earendil-works/pi-ai/models": [
+        "../../third_party/pi-mono/packages/ai/src/models.ts"
+      ],
+      "@earendil-works/pi-ai/oauth": [
+        "../../third_party/pi-mono/packages/ai/src/oauth.ts"
+      ],
+      "@earendil-works/pi-ai/providers/*": [
+        "../../third_party/pi-mono/packages/ai/src/providers/*.ts"
+      ],
+      "@earendil-works/pi-ai/utils/*": [
+        "../../third_party/pi-mono/packages/ai/src/utils/*.ts"
+      ],
+      "@earendil-works/pi-codemode": [
+        "../../third_party/pi-mono/packages/codemode/src/index.ts"
+      ],
+      "@earendil-works/pi-codemode/cloudflare": [
+        "../../third_party/pi-mono/packages/codemode/src/cloudflare.ts"
+      ],
+      "@earendil-works/pi-codemode/declarations": [
+        "../../third_party/pi-mono/packages/codemode/src/declarations.ts"
+      ],
+      "@earendil-works/pi-codemode/portable": [
+        "../../third_party/pi-mono/packages/codemode/src/portable.ts"
+      ],
+      "@earendil-works/pi-codemode/source": [
+        "../../third_party/pi-mono/packages/codemode/src/source.ts"
+      ],
+      "@earendil-works/pi-codemode/worker": [
+        "../../third_party/pi-mono/packages/codemode/src/runtime/worker.ts"
+      ],
+      "@mavis/agent-core": [
+        "../packages/agent-core/src/index.ts"
+      ]
+    },
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": [
+    "src",
+    "test",
+    "vitest.config.ts",
+    "../../third_party/pi-mono/packages/coding-agent/src/utils/highlight-js.d.ts"
+  ]
+}

@@ -1,5 +1,6 @@
 import type { RuntimeEvent } from '@mavis/agent-core/protocol';
 import type {
+  LLMContextOverflowRecovery,
   PiAfterToolCallHook,
   PiBeforeLlmCallHook,
   PiBeforeLlmCallHookInput,
@@ -11,12 +12,7 @@ import type {
   TurnEventReporter,
   UserMessageInput,
 } from '@mavis/agent-core/pi-turn-runner';
-import type {
-  PtcToolFactCollector,
-  PtcToolResultProjection,
-  RuntimeTool,
-  ToolExecutionContext,
-} from '@mavis/agent-core/tools';
+import type { RuntimeTool, ToolExecutionContext } from '@mavis/agent-core/tools';
 
 import type { InputSafetyDecision } from '../../../content-safety/index.js';
 import type {
@@ -25,6 +21,9 @@ import type {
   AgentHostChannelContext,
   ContextUsagePromptRange,
 } from '../preparation/contracts.js';
+import type { CheckpointBarrier } from './turn-checkpoint-policy.js';
+import type { TurnLlmCallObservation } from './llm-logging.js';
+import type { PromptSuggestionTurnPort } from '../runner/prompt-suggestion/prompt-suggestion-service.js';
 import type { SessionRecord } from '../../../session-system/index.js';
 import type {
   AgentHostFileChangeObservation,
@@ -33,8 +32,7 @@ import type {
   LocalTurnOutputTokenCapResolver,
   LocalTurnToolPolicyGuard,
 } from '../runner/contracts.js';
-import type { PromptSuggestionTurnPort } from '../runner/prompt-suggestion/prompt-suggestion-service.js';
-import type { PtcMetrics, PtcSurface, PtcTurnObserver } from '../runner/ptc/ptc-observability.js';
+import type { LocalTurnPermissionMarkSink } from '../runner/index.js';
 import type {
   FileApiUploadStoreSource,
   MessagesFileApiPatcherLogger,
@@ -43,6 +41,7 @@ import type {
   LocalTurnEventWriter,
   RuntimeEventProjector,
 } from '../events/runtime-event-writer.js';
+import type { TurnContextWire } from '../../compaction/context-wire.js';
 import type { InputReviewResolvedObserver } from '../runner/policy/input-review-runner-options.js';
 import type { BackgroundReminderFacts } from '../assembly/local-turn-input-preparation.js';
 
@@ -63,8 +62,6 @@ export type LocalRuntimeTurnRunnerInput<
 > = Omit<RunTurnInput<TContext>, 'eventWriter' | 'toolConfig'> & {
   readonly eventWriter: LocalTurnEventWriter;
   readonly tools?: readonly RuntimeTool[];
-  /** Hidden PTC child catalog after the same process-local result policy as visible tools. */
-  readonly ptcTools?: readonly RuntimeTool[];
   readonly disableBuiltinToolFallback?: boolean;
   readonly toolContext?: TContext;
   readonly reviewUserInput?: string;
@@ -123,18 +120,13 @@ export interface LocalRuntimeTurnToolContext extends ToolExecutionContext {
   /** Native files materialized from user attachments during this active Turn. */
   readonly browserAssets?: readonly AgentHostBrowserAsset[];
   /**
-   * Host runner logger, present only on PTC turns. run_code writes one
-   * structured line per program with it, and the runner two lines per direct
-   * call of a run_code child (the call, then its argument repair); guest code
-   * can never reach it.
+   * W4 (§4.4/R5): the per-session tool-env snapshot the window attached with
+   * (`session.attach.toolEnv`, "last owner attach wins"). The daemon overlays
+   * it onto the spawn env/cwd BEFORE the always-on sanitizer, so `MCODE_*`/
+   * `MINIMAX_*` stay stripped regardless of the snapshot. Absent (embedded
+   * TUI, tests): tools run with the daemon's env — today's behavior.
    */
-  readonly ptcLogger?: Pick<PiTurnRunnerLogger, 'info'>;
-  /**
-   * Present only on PTC turns. run_code and the direct-call wiring report
-   * programs, children and direct calls to it, and the runner closes it with
-   * one `ptc turn summary` line; guest code can never reach it.
-   */
-  readonly ptcObserver?: PtcTurnObserver;
+  readonly toolEnv?: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> };
 }
 
 export type LocalRuntimeTurnReconcileSignal =
@@ -142,14 +134,8 @@ export type LocalRuntimeTurnReconcileSignal =
       readonly kind: 'output-recall';
       readonly source?: 'input-review' | 'output-review';
       readonly variant: 'content' | 'network' | 'auth';
-      readonly slowNetworkRead?: true;
     }
-  | {
-      readonly kind: 'network-reconcile';
-      readonly approvedContent?: string;
-      readonly slowNetworkRead?: true;
-    }
-  | { readonly kind: 'safety-reconcile'; readonly approvedContent: string }
+  | { readonly kind: 'network-reconcile'; readonly approvedContent?: string }
   | { readonly kind: 'abort-reconcile'; readonly approvedContent?: string };
 
 export interface LocalRuntimeTurnRunnerResult {
@@ -175,12 +161,6 @@ export interface LocalRuntimeTurnRuntimeOutcome {
   readonly errorDetail?: string;
   readonly errorProviderId?: string;
   readonly messageId?: string;
-  /**
-   * The last assistant message that carried visible text: the reply the user
-   * reads, copies and rates. Unlike `messageId`, tool-call-only frames, user
-   * frames and system events never count.
-   */
-  readonly replyMessageId?: string;
   readonly waitingForUser?: boolean;
 }
 
@@ -199,6 +179,12 @@ export interface LocalTurnPermissionResolution<TContext extends ToolExecutionCon
   readonly disableBuiltinToolFallback: boolean;
   /** Host-owned fail-closed permission policy applied to every executable tool. */
   readonly permissionGuard: PiBeforeToolCallHook;
+  /**
+   * §4 per-turn permission-mark sink shared by the permission guard (writer)
+   * and the turn runner (reader: forwarded to the event bridge so tool-call
+   * statuses carry who decided). Absent on hosts that never wired the guard.
+   */
+  readonly permissionMarks?: LocalTurnPermissionMarkSink;
 }
 
 export interface LocalToolResultHistoryFinalizerInput {
@@ -232,13 +218,21 @@ export interface LocalTurnHookMergeOptions<
   readonly toolResolution: LocalTurnPermissionResolution<TContext>;
   readonly pendingToolResultTailClaims: Set<string>;
   readonly hostBeforeLlmCallHooks: readonly PiBeforeLlmCallHook[];
+  /** SE-SW-002: fail-closed durability flush before every provider request. */
+  readonly checkpointBarrier?: CheckpointBarrier;
+  /**
+   * Ш4 context-wire handle: canonical commits of the turn feed the session's
+   * wire window from the merged history hook. Absent (default): no feed.
+   */
+  readonly contextWire?: TurnContextWire;
   readonly readTaskOutputTaskIds: Set<string>;
   readonly terminalTaskOutputReadIds?: Set<string>;
   readonly toolsDisabled: boolean;
   readonly toolSafetyGuard?: LocalTurnToolSafetyGuard;
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
   readonly finalizeToolResultForHistory?: LocalToolResultHistoryFinalizer;
-  readonly ptcFactCollector?: PtcToolFactCollector;
+  /** mcode:llm observers (request/first token/completion); logging-only. */
+  readonly llmObservation?: TurnLlmCallObservation;
 }
 
 export interface LocalTurnExecutionPreparation<TContext extends ToolExecutionContext> {
@@ -299,6 +293,7 @@ export interface BackgroundCadenceReminder {
     readonly hookInput: PiBeforeLlmCallHookInput;
     readonly loadFacts: () => Promise<BackgroundReminderFacts>;
     readonly hasSuccessfulTaskOutputRead: () => boolean;
+    readonly readTaskIds?: () => ReadonlySet<string>;
   }): Promise<{
     readonly beforeUserMessages: NonNullable<RunTurnInput['beforeUserMessages']>;
     readonly hook: PiBeforeLlmCallHook;
@@ -315,9 +310,9 @@ export interface LocalRuntimeTurnExecutorOptions<
   TContext extends ToolExecutionContext,
 > {
   readonly runtime: LocalRuntimeTurnRunnerPort<TContext>;
+  /** The suggestion port is host-owned; the executor only forwards the relay to it. */
+  readonly promptSuggestion?: PromptSuggestionTurnPort;
   readonly backgroundCadenceReminder?: BackgroundCadenceReminder;
-  /** Read when preparing a new Turn's Bash guidance, not during the model loop. */
-  readonly nativeDelete?: () => boolean;
   readonly canAppendExecutionBudgetReminder?: ExecutionBudgetReminderAdmission;
   /** Exact child Turn scope; notifications join this Turn and never independently reactivate it. */
   readonly createChildBashLifecycle?: (input: {
@@ -336,8 +331,6 @@ export interface LocalRuntimeTurnExecutorOptions<
       }
     | undefined;
   readonly executionPreparation: LocalTurnExecutionPreparationSource<TAgent, TContext>;
-  /** Optional next-message suggestion. Absent or disabled collects no context. */
-  readonly promptSuggestion?: PromptSuggestionTurnPort;
   readonly fileChanges: LocalTurnFileChangeLifecycle;
   readonly nowMs?: () => number;
   readonly attemptRecall: {
@@ -352,29 +345,74 @@ export interface LocalRuntimeTurnExecutorOptions<
   readonly cliProductPolicy?: boolean;
   /** Immutable policy selected only by the new TUI Runtime composition. */
   readonly tuiProductPolicy?: boolean;
-  /** Product surface named in PTC state logs and metrics; absent reads `other`. */
-  readonly ptcSurface?: PtcSurface;
-  /**
-   * Borrowed from the runner. Used only for PTC metrics: `ptc_turn_total` on
-   * Turns of a PTC-mode Session and program-level metrics on PTC Turns.
-   */
-  readonly metricsClient?: PtcMetrics;
   /** TUI-only region policy: only CN TUI hosts review MiniMax-managed turns. */
   readonly contentReviewEnabled?: boolean;
   readonly disableTools?: boolean;
+  /**
+   * SE-SW-002 checkpoint policy: the durability barrier composed around a
+   * durable storage worker. When present, every provider request is preceded
+   * by a fail-closed flush (`beforeLlmRequest`) and every tool effect of the
+   * turn runs under the barrier (`runToolEffect`): an interrupted call is
+   * recorded as `TOOL_OUTCOME_UNKNOWN` and never re-run implicitly.
+   * Compositions without a durable storage worker omit it; the turn path
+   * behaves exactly as before.
+   */
+  readonly checkpointBarrier?: CheckpointBarrier;
+  /**
+   * Ш3 durable mode: the canonical history provider hands the turn path
+   * ownership-transferred snapshots (`withSnapshotTransform`) that are already
+   * validated and Pi-compatible, so the turn consumes them directly instead of
+   * re-validating and copying every message on every turn. Absent (default):
+   * the legacy per-turn copy path stays exact.
+   */
+  readonly piCompatibleHistorySnapshots?: boolean;
+  /**
+   * Ш4 context-wire: the composition-owned memoized payload-assembly bridge
+   * over the canonical history (`createTurnContextWire`, composed only when
+   * `MCODE_CONTEXT_WIRE=1`). Present, the executor seeds and feeds it from
+   * the canonical history commits and hands the runner input a per-session
+   * `ContextWireProjection`; the provider payload is then compiled by the
+   * wire pipeline instead of the legacy per-request conversion. Absent
+   * (default): the turn path behaves exactly as before.
+   */
+  readonly contextWire?: TurnContextWire;
+  /**
+   * В1 (opus-decisions-20261101): the overflow-recovery factory for the
+   * llm-retry seam (`RunTurnInput.llmRetry.contextOverflowRecovery`). Built
+   * over the unified compaction seam + the wire handle by the composition;
+   * the executor resolves it per turn alongside the base `resolveLlmRetry`
+   * options. `undefined` (jsonl mode, or no unified seam): the executor
+   * attaches nothing and the turn path behaves exactly as before.
+   */
+  readonly contextOverflowRecoveryFor?: (input: {
+    readonly sessionId: string;
+    readonly signal?: AbortSignal;
+  }) => LLMContextOverflowRecovery | undefined;
+  /**
+   * Reactive subagents §1.7 (wave 3): the accepted-owner-input generation
+   * probe factory for the pin's sequential-executor yield seam. Resolved per
+   * turn over the steering composition's native wait binding; `undefined`
+   * (jsonl mode, embeddings, no native binding) attaches nothing and the
+   * batch behavior stays exactly as before.
+   */
+  readonly resolveOwnerInputGeneration?: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+  }) => (() => number | Promise<number>) | undefined;
+  /**
+   * Explicit recovery decision of the checkpoint policy: allows re-running a
+   * tool call whose earlier recorded outcome was `TOOL_OUTCOME_UNKNOWN`.
+   * Default: forbidden — the previous attempt may have taken effect already.
+   */
+  readonly checkpointAllowAfterUnknownOutcome?: boolean;
   /** Creates isolated safety state once for each admitted product Turn. */
   readonly createTurnToolSafetyGuard?: () => LocalTurnToolSafetyGuard;
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
-  /** Concrete product projection is composed outside the neutral executor. */
-  readonly createPtcResultProjection?: (
-    collector: PtcToolFactCollector,
-  ) => PtcToolResultProjection;
   readonly finalizeToolResultForHistory?: LocalToolResultHistoryFinalizer;
   /** Host budget bound to this turn's provider requests; absent for ordinary turns. */
   readonly outputTokenCap?: LocalTurnOutputTokenCapResolver;
   readonly reportFailure?: (sessionId: string, message: string) => void;
-  /** warn: the PTC reminder restorer reports its own failures (fail-open). */
-  readonly logger?: Pick<PiTurnRunnerLogger, 'info' | 'warn'>;
+  readonly logger?: Pick<PiTurnRunnerLogger, 'info'>;
   readonly projectRuntimeEvent?: RuntimeEventProjector;
   readonly fileApi?: {
     readonly uploadStores: FileApiUploadStoreSource;

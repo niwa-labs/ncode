@@ -107,6 +107,11 @@ export interface TranscriptUsageVisualization {
   readonly outputTokens: number;
   readonly totalTokens: number;
   readonly cacheMetrics?: TuiSessionCacheMetrics;
+  /**
+   * W10 `/session` warmer status: the `formatCacheWarmingStatus` render of
+   * the session's prompt-cache warmer, when the runtime keeps one.
+   */
+  readonly cacheWarming?: string;
   readonly context: {
     readonly usedTokens: number;
     readonly windowTokens: number;
@@ -138,13 +143,6 @@ export interface TranscriptInspectionReport {
   readonly visualization?: TranscriptInspectionVisualization;
 }
 
-/** Child calls of a PTC program hidden by the turn fold. */
-export interface TranscriptPtcFoldedChildren {
-  readonly calls: number;
-  readonly failed: number;
-  readonly interrupted: number;
-}
-
 export interface TranscriptCell {
   id: string;
   kind: TranscriptCellKind;
@@ -162,15 +160,8 @@ export interface TranscriptCell {
   title?: string;
   detail?: string;
   toolErrorCode?: string;
-  /** Runtime Tool Call id of a `tool` cell. */
-  toolCallId?: string;
-  /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
+  /** Outer tool call id when this cell is a nested PTC child (run_code). */
   parentToolCallId?: string;
-  /**
-   * Projection only: child calls of this `run_code` program that a long turn
-   * folded away, so its summary still counts every call and failure.
-   */
-  ptcFoldedChildren?: TranscriptPtcFoldedChildren;
   toolPayloadBudget?: TranscriptToolPayloadBudget;
   durationMs?: number;
   outputTokensPerSecond?: number;
@@ -206,9 +197,7 @@ export interface CreateTranscriptCellInput {
   title?: string;
   detail?: string;
   toolErrorCode?: string;
-  /** Runtime Tool Call id of a `tool` cell. */
-  toolCallId?: string;
-  /** Outer `run_code` Tool Call id when this tool ran inside a PTC program. */
+  /** Outer tool call id when this cell is a nested PTC child (run_code). */
   parentToolCallId?: string;
   toolPayloadBudget?: TranscriptToolPayloadBudget;
   durationMs?: number;

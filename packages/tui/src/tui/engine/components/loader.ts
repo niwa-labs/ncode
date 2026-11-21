@@ -40,7 +40,7 @@ export class Loader extends Text {
 		this.setIndicator(indicator);
 	}
 
-	override render(width: number): string[] {
+	render(width: number): string[] {
 		return ["", ...super.render(width)];
 	}
 
@@ -58,6 +58,11 @@ export class Loader extends Text {
 
 	setMessage(message: string): void {
 		this.message = message;
+		this.updateDisplay();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
 		this.updateDisplay();
 	}
 
@@ -80,10 +85,14 @@ export class Loader extends Text {
 		}, this.intervalMs);
 	}
 
-	private updateDisplay(): void {
+	protected getRenderedIndicator(): string {
 		const frame = this.frames[this.currentFrame] ?? "";
-		const renderedFrame = this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
-		const indicator = frame.length > 0 ? `${renderedFrame} ` : "";
+		return this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
+	}
+
+	private updateDisplay(): void {
+		const renderedFrame = this.getRenderedIndicator();
+		const indicator = renderedFrame.length > 0 ? `${renderedFrame} ` : "";
 		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
 		if (this.ui) {
 			this.ui.requestRender();

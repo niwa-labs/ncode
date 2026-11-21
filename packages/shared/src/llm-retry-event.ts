@@ -25,3 +25,12 @@ export interface SessionLLMRetryEventPayload {
     message: string;
   };
 }
+
+/** Informational product text; these notices are never conversation input. */
+export function subscriptionWaitText(event: Pick<SessionLLMRetryEventPayload, 'status' | 'nextRetryAtMs'>): string {
+  if (event.status === 'recovered') return 'Subscription access restored. Resuming the current turn.';
+  if (event.status === 'cancelled') return 'Subscription wait cancelled.';
+  if (event.status === 'exhausted') return 'Subscription wait ended.';
+  const next = event.nextRetryAtMs !== undefined ? ` Next automatic attempt: ${new Date(event.nextRetryAtMs).toLocaleString()}.` : '';
+  return `Subscription usage limit reached. Waiting to resume the current turn automatically.${next} Stop to cancel.`;
+}

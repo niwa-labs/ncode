@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { versionFromTag, cliReleaseTargets } from './lib/cli-release.mjs';
+import { assertUpstreamCliPublication, versionFromTag, cliReleaseTargets } from './lib/cli-release.mjs';
 
 export function validateReleaseReports({ archive, reports, version, revision }) {
   const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
@@ -28,6 +28,7 @@ export function validateReleaseReports({ archive, reports, version, revision }) 
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  assertUpstreamCliPublication(fileURLToPath(new URL('../', import.meta.url)));
   const tag = process.env.MCODE_RELEASE_TAG;
   const version = versionFromTag(tag);
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

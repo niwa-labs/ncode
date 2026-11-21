@@ -1,11 +1,8 @@
 import {
   BoundedRing,
-  SubscriberRegistry,
   measureValue,
   type BoundedRingOptions,
   type RingEntry,
-  type StreamSubscription,
-  type SubscriberRegistryOptions,
 } from '../../../infra/sse/index.js';
 import type { DisplayMessageRecord, MessageReplayResult } from '../messages/index.js';
 import type {
@@ -28,7 +25,6 @@ export interface SessionMessageReplaySource {
 export interface SessionStreamServiceOptions {
   readonly messages: SessionMessageReplaySource;
   readonly ring?: BoundedRingOptions;
-  readonly subscribers?: SubscriberRegistryOptions;
   readonly nowMs?: () => number;
 }
 
@@ -53,8 +49,9 @@ export interface SessionStreamReservation {
 }
 
 interface SessionStreamState {
+  readonly sessionId: string;
   readonly ring: BoundedRing<RetainedSessionFrame>;
-  readonly subscribers: SubscriberRegistry<SessionFrame>;
+  readonly readers: Set<SessionLiveReader>;
   readonly retention: SessionFrameRetention;
   readonly measure: (value: unknown) => number;
   hasFrames: boolean;
@@ -100,13 +97,13 @@ export class SessionStreamService implements SessionStreamWriter {
     });
     state.hasFrames = true;
     const frame: SessionFrame = { ...appended.value.frame, cursor: appended.cursor };
-    if (appended.appended) state.subscribers.publish(frame, appended.byteSize);
+    if (appended.appended) state.readers.forEach((reader) => reader.wake());
     return { appended: appended.appended, retained: appended.retained, frame };
   }
 
   reserve(sessionId: string): SessionStreamReservation {
     const state = this.state(sessionId);
-    const subscription = state.subscribers.subscribe();
+    const subscription = new SessionLiveReader(state, this.nowMs);
     state.reservationCount += 1;
     let closed = false;
     const close = () => {
@@ -152,14 +149,14 @@ export class SessionStreamService implements SessionStreamWriter {
     const state = this.states.get(sessionId);
     if (!state) return;
     state.deleted = true;
-    state.subscribers.close();
+    [...state.readers].forEach((reader) => reader.close());
     this.states.delete(sessionId);
   }
 
   dispose(): void {
     this.states.forEach((state) => {
       state.deleted = true;
-      state.subscribers.close();
+      [...state.readers].forEach((reader) => reader.close());
     });
     this.states.clear();
   }
@@ -169,6 +166,7 @@ export class SessionStreamService implements SessionStreamWriter {
     if (existing) return existing;
     const retention = new SessionFrameRetention();
     const created = {
+      sessionId,
       ring: new BoundedRing<RetainedSessionFrame>(
         {
           ...sessionRingOptions(this.options.ring),
@@ -176,7 +174,7 @@ export class SessionStreamService implements SessionStreamWriter {
         },
         (snapshot) => retention.selectEvictionCount(snapshot),
       ),
-      subscribers: new SubscriberRegistry<SessionFrame>(this.options.subscribers),
+      readers: new Set<SessionLiveReader>(),
       retention,
       measure: this.options.ring?.measure ?? measureValue,
       hasFrames: false,
@@ -188,8 +186,112 @@ export class SessionStreamService implements SessionStreamWriter {
   }
 }
 
+/**
+ * The session ring is the sole live backlog. A credit-paused client retains a
+ * cursor, not a second 128-frame queue that can overflow ahead of the ring.
+ * Falling behind retention is an explicit replay gap, never silent data loss.
+ */
+class SessionLiveReader implements AsyncIterableIterator<SessionFrame> {
+  private cursor: string;
+  private pending?: (result: IteratorResult<SessionFrame>) => void;
+  private filter?: (frame: SessionFrame) => boolean;
+  private closed = false;
+  private completed = false;
+  private completedCursor?: string;
+
+  constructor(
+    private readonly state: SessionStreamState,
+    private readonly nowMs: () => number,
+  ) {
+    this.cursor = state.ring.latestCursor();
+    state.readers.add(this);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterableIterator<SessionFrame> {
+    return this;
+  }
+
+  next(): Promise<IteratorResult<SessionFrame>> {
+    if (this.pending)
+      return Promise.reject(
+        new Error('Concurrent subscription reads are invalid'),
+      );
+    const available = this.read();
+    if (available) return Promise.resolve(available);
+    return new Promise((resolve) => {
+      this.pending = resolve;
+    });
+  }
+
+  setFilter(filter: (frame: SessionFrame) => boolean): void {
+    this.filter = filter;
+  }
+
+  skipThrough(cursor: string | undefined): void {
+    if (cursor && this.state.ring.isAfter(cursor, this.cursor))
+      this.cursor = cursor;
+  }
+
+  wake(): void {
+    if (!this.pending) return;
+    const available = this.read();
+    if (!available) return;
+    const resolve = this.pending;
+    this.pending = undefined;
+    resolve(available);
+  }
+
+  complete(): void {
+    this.completed = true;
+    this.completedCursor = this.state.ring.latestCursor();
+    this.state.readers.delete(this);
+    this.wake();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.state.readers.delete(this);
+    this.wake();
+  }
+
+  return(): Promise<IteratorResult<SessionFrame>> {
+    this.close();
+    return Promise.resolve(done());
+  }
+
+  private read(): IteratorResult<SessionFrame> | undefined {
+    if (this.closed || this.state.deleted) return done();
+    const replay = this.state.ring.replay(this.cursor);
+    if (replay.status !== 'ok') {
+      this.closed = true;
+      this.state.readers.delete(this);
+      return {
+        done: false,
+        value: resyncFrame(
+          this.state.sessionId,
+          replay.status,
+          this.state.ring.latestCursor(),
+          this.nowMs(),
+        ),
+      };
+    }
+    for (const entry of replay.entries) {
+      if (
+        this.completedCursor &&
+        this.state.ring.isAfter(entry.cursor, this.completedCursor)
+      )
+        return done();
+      this.cursor = entry.cursor;
+      const frame = { ...entry.value.frame, cursor: entry.cursor };
+      if (!this.filter || this.filter(frame))
+        return { done: false, value: frame };
+    }
+    return this.completed ? done() : undefined;
+  }
+}
+
 class SessionResumeIterator implements AsyncIterableIterator<SessionFrame> {
-  private readonly live: StreamSubscription<SessionFrame>;
+  private readonly live: SessionLiveReader;
   private readonly initialized: Promise<void>;
   private readonly initializationObserver: Promise<void>;
   private replay: SessionFrame[] = [];
@@ -202,7 +304,7 @@ class SessionResumeIterator implements AsyncIterableIterator<SessionFrame> {
     private readonly messages: SessionMessageReplaySource,
     private readonly nowMs: () => number,
   ) {
-    this.live = state.subscribers.subscribe();
+    this.live = new SessionLiveReader(state, this.nowMs);
     this.initialized = this.initialize();
     this.initializationObserver = observeInitialization(this.initialized);
   }
@@ -318,6 +420,7 @@ class SessionResumeIterator implements AsyncIterableIterator<SessionFrame> {
   }
 
   private filterLiveAfterReplay(entries: readonly SessionRingEntry[]): void {
+    this.live.skipThrough(entries.at(-1)?.cursor);
     const replayedCursors = new Set(entries.map(({ cursor }) => cursor));
     this.live.setFilter((frame) => !frame.cursor || !replayedCursors.has(frame.cursor));
   }

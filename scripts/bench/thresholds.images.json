@@ -1,0 +1,16 @@
+{
+  "comment": "Thresholds for the ~100 MB images corpus. Same acceptance budgets as thresholds.json, except `open.rssDeltaMb`: bench-open MATERIALIZES the whole 100 MB corpus (the legacy path), which inherently holds several hundred MB of heap — the Ф1 'RSS <= 500 MB' budget belongs to the lazy open (resume capsule) path and is enforced there, not on the legacy materialization. As in thresholds.json, the Ф1 'append <= 1 ms p99 (enqueue frozen entry)' budget is gated on `offthread.enqueueP99Ms` (bench-worker-commit.mjs); bench-append.mjs is the legacy simulation and its write/total/degradation metrics are unthresholded. The Ф2 rows mirror thresholds.json on this corpus, with the picture-specific payload gate: `resume.totalMs`/`resume.rssDeltaMb` gate the lazy open (≤1 с, RSS ≤ 500 МБ — enforced HERE because this bench's legacy materialization is exempt), `prep.p95Ms`/`prep.warmP95Ms` gate prep, and `prep.payloadBytes` gates 'на картинковой fixture ≤12 МБ' over the provider payload bytes (the dialect reduces inline base64 to cas:// placeholders, so the compiled body — not the raw file size — is what is gated). `resume-backend.totalMs` gates the lazy open on the REAL indexed backend path (bench-open-backend.mjs). CI normalization (approved): the four shared-runner-noise rows (`append.stallP99Ms`, `offthread.stallP99Ms`, `bridge.stallP99Ms`, `prep.warmP95Ms`) are scaled x1.6 over their local-machine calibration of 5 ms — shared macos-15 runners measurably flap them around the line on unchanged code (prep.warmP95Ms 2.98/3.66 vs 5.44/5.58 across runs; bridge.stallP99Ms 4.74 vs 9.05). Real regressions survive the normalized budget; the flapping stopped. ARCHITECTURAL residency scale (~10 MB resident payload — the CI bench-gates 'residency scale' step: MMU_RESIDENT_BYTES=9437184, ~151/200 window images resident, ~9.9 MB on the wire): BOTH timing budgets are gated on that scale. WARM: `prep.warmP95Ms <= 8` (this file's normalized warm row; warm p95 ~1.8 ms locally). COLD: `prep.p95Ms <= 50` — the Ф2 acceptance verbatim (final-architecture.md:404 'prep <=50 мс p95 на любой длине истории'), enforced by the residency-scale CI step. The wave-2 round-3 fix removed the byte-dominated cold rework that previously kept the cold row report-only (55.64 ms local / 56.6 ms judge-run): resident-image record segments are content-addressed by the CAS page sha256 (`ContextWireResidency.segments` in local-runtime-v2 context-wire.ts — pages immutable, no second truth), so a fresh pipeline seeds its compiler cache from the store and never re-serializes + re-hashes ~9.9 MB of resident data URLs per cold start (measured ~27 ms after the fix, ~2x headroom). `prep.p95Ms: 50` in this file applies to the DEFAULT 256 KiB residency scale that run-all.mjs gates.\"",
+  "open.totalMs": 1000,
+  "append.stallP99Ms": 8,
+  "offthread.enqueueP99Ms": 1,
+  "offthread.commitP95Ms": 5,
+  "offthread.stallP99Ms": 8,
+  "bridge.stallP99Ms": 8,
+  "resume.totalMs": 1000,
+  "resume.rssDeltaMb": 500,
+  "prep.p95Ms": 50,
+  "prep.warmP95Ms": 8,
+  "prep.payloadBytes": 12582912,
+  "resume-backend.totalMs": 1000,
+  "resume-backend.rssDeltaMb": 500
+}

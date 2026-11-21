@@ -158,6 +158,12 @@ export function normalizeAccountStatus(raw: Record<string, unknown>): TuiAccount
     modelSource,
     tokenPlanQuotaState,
     tokenPlanQuota,
+    // The daemon's identity fields (opus 2026-11-01, правка 5). `profile` is
+    // null-preserving: `null` IS the default profile, while `undefined`
+    // (field absent on an older daemon) stays absent.
+    profile: raw.profile === null || typeof raw.profile === 'string' ? raw.profile : undefined,
+    dataDir: typeof raw.dataDir === 'string' ? raw.dataDir : undefined,
+    loginEpoch: typeof raw.loginEpoch === 'string' ? raw.loginEpoch : undefined,
     warnings,
   });
 }

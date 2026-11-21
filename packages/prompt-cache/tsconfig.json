@@ -1,0 +1,24 @@
+{
+  "//": "Generated paths mirror tsconfig.standalone.json (rewritten ../../ from this package): neighbor-package SOURCES are compiled, so mirror the flags tsconfig.standalone.json overrides for that source tree (.ts extension imports, override modifiers). The vendored pi sources need @types/node ^22 (W04 finding: fs.globSync/zlib.zstdCompressSync).",
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024"],
+    "target": "ES2024",
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@earendil-works/pi-agent-core": ["../../third_party/pi-mono/packages/agent/src/index.ts"],
+      "@earendil-works/pi-agent-core/package.json": ["../../third_party/pi-mono/packages/agent/package.json"],
+      "@earendil-works/pi-ai": ["../../third_party/pi-mono/packages/ai/src/index.ts"],
+      "@earendil-works/pi-ai/api/*": ["../../third_party/pi-mono/packages/ai/src/api/*.ts"],
+      "@earendil-works/pi-ai/compat": ["../../third_party/pi-mono/packages/ai/src/compat.ts"],
+      "@earendil-works/pi-ai/models": ["../../third_party/pi-mono/packages/ai/src/models.ts"],
+      "@earendil-works/pi-ai/providers/*": ["../../third_party/pi-mono/packages/ai/src/providers/*.ts"],
+      "@earendil-works/pi-ai/utils/*": ["../../third_party/pi-mono/packages/ai/src/utils/*.ts"],
+      "@mavis/logging": ["../../packages/logging/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

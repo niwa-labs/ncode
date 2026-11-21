@@ -753,6 +753,69 @@ describe("QueueRepository GOAL-05 head-of-line yield through Turn admission", ()
  * belongs to the invalidated epoch — which is then cancelled for being stale,
  * so the Goal stops. This pins the Queue-side half of that contract.
  */
+describe("TurnRepository busy admission names the holding turn", () => {
+  it("attaches the accepted holder turn id to an active-turn rejection", async () => {
+    // Incident 2026-11-15: a resume prompt racing a task-delivery turn got a
+    // bare local_session_busy — the caller could not tell a ~20s delivery
+    // turn from a dead session. The durable rejection names the holder.
+    const { client } = await setup();
+    const turns = createTurnRepository({
+      db: client.db,
+      priorityFence: createQueueTurnAdmissionPriorityFence(),
+      sessionAdmission: { rejectionInTransaction: () => undefined },
+      nowMs: () => 10,
+      makeLeaseId: () => "lease-holder",
+    });
+
+    await expect(
+      turns.admit({
+        sessionId: "s-holder",
+        turnId: "turn_task_delivery_holder",
+        busyReason: "turn",
+        inputDigest: "digest:holder",
+        inputMetadata: { attachmentCount: 0, hasContent: true },
+        candidateCreatedAtMs: 10,
+        priority: { kind: "fifo", candidateCreatedAtMs: 10 },
+      }),
+    ).resolves.toMatchObject({ status: "accepted" });
+
+    await expect(
+      turns.admit({
+        sessionId: "s-holder",
+        turnId: "turn-resumed",
+        busyReason: "turn",
+        inputDigest: "digest:resumed",
+        inputMetadata: { attachmentCount: 0, hasContent: true },
+        candidateCreatedAtMs: 20,
+        priority: { kind: "fifo", candidateCreatedAtMs: 20 },
+      }),
+    ).resolves.toMatchObject({
+      status: "rejected",
+      reason: "active-turn",
+      activeTurnId: "turn_task_delivery_holder",
+    });
+
+    // After the holder settles, admission opens again with no stale id.
+    await turns.settle({
+      sessionId: "s-holder",
+      turnId: "turn_task_delivery_holder",
+      leaseId: "lease-holder",
+      outcome: "completed",
+    });
+    await expect(
+      turns.admit({
+        sessionId: "s-holder",
+        turnId: "turn-after-settle",
+        busyReason: "turn",
+        inputDigest: "digest:after",
+        inputMetadata: { attachmentCount: 0, hasContent: true },
+        candidateCreatedAtMs: 40,
+        priority: { kind: "fifo", candidateCreatedAtMs: 40 },
+      }),
+    ).resolves.toMatchObject({ status: "accepted" });
+  });
+});
+
 describe("QueueRepository re-armed follow-up idempotency", () => {
   it("folds a repeated key onto one row but admits a new row for a new epoch key", async () => {
     const { queue } = await setup();

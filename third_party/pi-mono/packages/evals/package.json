@@ -1,0 +1,15 @@
+{
+	"name": "@earendil-works/pi-evals",
+	"version": "1.5.2",
+	"private": true,
+	"type": "module",
+	"devDependencies": {
+		"@earendil-works/pi-ai": "workspace:*",
+		"@earendil-works/pi-coding-agent": "workspace:*",
+		"@types/node": "22.19.19",
+		"@vitest-evals/core": "0.15.0",
+		"vitest": "4.1.12",
+		"vitest-evals": "0.15.0"
+	},
+	"license": "MIT"
+}

@@ -1,4 +1,4 @@
-import type { LocalPluginAgentRoster } from '@mavis/agent-tools/desktop';
+import type { PluginAgentsRegistry } from '@mavis/agent-tools/desktop';
 import {
   resolveTaskTarget,
   type AgentReferenceResolver,
@@ -18,22 +18,29 @@ export interface LocalTaskAgentResolverHost {
   emitBusEvent?: (type: string, payload: Record<string, unknown>) => void;
 }
 
-/** Built-in owner that stores Plugin Agent Task Sessions; the frozen definition is authoritative. */
-export const PLUGIN_AGENT_STORAGE_OWNER = 'worker';
-
 export async function resolveLocalTaskAgentTarget(
   host: LocalTaskAgentResolverHost,
   agentName: string | undefined,
-  pluginAgents?: LocalPluginAgentRoster,
+  pluginAgents?: PluginAgentsRegistry,
 ): Promise<LocalTaskTargetFacts | undefined> {
   if (!agentName) return undefined;
   const requested = agentName.trim();
   if (!requested) return undefined;
-  const explicitAgent = requested.toLowerCase().startsWith('agent:');
-  // Custom Agent display names may contain `:`; only a roster hit claims the name.
-  const scoped =
-    !explicitAgent && requested.includes(':') ? pluginAgents?.resolve(requested) : undefined;
-  if (scoped) return resolvePluginTarget(host, requested, scoped);
+
+  // Upstream resolution order: a scoped "<plugin>:<agent>" name resolves from
+  // the plugin registry without consulting the persisted roster; the persisted
+  // resolver runs next; a bare name falls back to the plugin registry only when
+  // exactly one declaration matches.
+  if (isPluginScopedName(requested)) {
+    const pluginAgent = pluginAgents?.resolve(requested);
+    if (pluginAgent) {
+      emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, {
+        source: 'plugin',
+        success: true,
+      });
+      return pluginTargetFacts(requested, pluginAgent);
+    }
+  }
 
   let source = inferNameResolutionSource(requested);
   try {
@@ -42,18 +49,50 @@ export async function resolveLocalTaskAgentTarget(
     emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, { source, success: true });
     return resolved;
   } catch (error) {
-    if (isUnknownAgentError(error) && !explicitAgent) {
-      const bare = uniqueBarePluginAgent(pluginAgents, requested);
-      if (bare) return resolvePluginTarget(host, requested, bare);
+    const notFound =
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      ((error as { code?: unknown }).code === 'UNKNOWN_AGENT_NAME' ||
+        (error as { code?: unknown }).code === 'AGENT_NOT_FOUND');
+    if (notFound && !requested.toLowerCase().startsWith('agent:')) {
+      const pluginAgent = pluginAgents?.resolveByBareName(requested);
+      if (pluginAgent) {
+        emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, {
+          source: 'plugin',
+          success: true,
+        });
+        return pluginTargetFacts(requested, pluginAgent);
+      }
     }
     emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, {
       source,
       success: false,
       ...(telemetryErrorCode(error) ? { error_code: telemetryErrorCode(error)! } : {}),
     });
-    if (isUnknownAgentError(error)) return undefined;
+    if (notFound) return undefined;
     throw error;
   }
+}
+
+function isPluginScopedName(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return name.includes(':') && !lowered.startsWith('agent:');
+}
+
+function pluginTargetFacts(
+  requested: string,
+  pluginAgent: NonNullable<ReturnType<PluginAgentsRegistry['resolve']>>,
+): LocalTaskTargetFacts {
+  return {
+    requestedName: requested,
+    exactOwnerName: pluginAgent.name,
+    resolvedAgentName: pluginAgent.name,
+    canonicalViewName: pluginAgent.name,
+    trustedBuiltin: false,
+    source: 'plugin',
+    pluginAgent,
+  };
 }
 
 export async function resolveLocalTaskAgentName(
@@ -61,53 +100,4 @@ export async function resolveLocalTaskAgentName(
   agentName: string | undefined,
 ): Promise<string | undefined> {
   return (await resolveLocalTaskAgentTarget(host, agentName))?.resolvedAgentName;
-}
-
-/** Session creation fields for a resolved Task target. */
-export function taskSessionOwner(target: LocalTaskTargetFacts): {
-  readonly agentName: string;
-  readonly pluginAgentDefinition?: NonNullable<LocalTaskTargetFacts['pluginAgent']>;
-} {
-  if (!target.pluginAgent) return { agentName: target.resolvedAgentName };
-  return { agentName: PLUGIN_AGENT_STORAGE_OWNER, pluginAgentDefinition: target.pluginAgent };
-}
-
-function resolvePluginTarget(
-  host: LocalTaskAgentResolverHost,
-  requested: string,
-  agent: ReturnType<LocalPluginAgentRoster['resolve']>,
-): LocalTaskTargetFacts | undefined {
-  emitSubagentTelemetry(host, SUBAGENT_TELEMETRY_EVENT.resolve, {
-    source: 'plugin',
-    success: agent !== undefined,
-    ...(agent ? {} : { error_code: 'UNKNOWN_AGENT_NAME' }),
-  });
-  if (!agent) return undefined;
-  return {
-    requestedName: requested,
-    exactOwnerName: agent.scopedName,
-    resolvedAgentName: agent.scopedName,
-    canonicalViewName: agent.scopedName,
-    trustedBuiltin: false,
-    source: 'plugin',
-    pluginAgent: agent,
-  };
-}
-
-function uniqueBarePluginAgent(
-  pluginAgents: LocalPluginAgentRoster | undefined,
-  requested: string,
-): ReturnType<LocalPluginAgentRoster['resolve']> {
-  if (!pluginAgents) return undefined;
-  const key = requested.normalize('NFKC').toLowerCase();
-  const matches = pluginAgents
-    .list()
-    .filter((agent) => agent.agentName.normalize('NFKC').toLowerCase() === key);
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function isUnknownAgentError(error: unknown): boolean {
-  if (!error || typeof error !== 'object' || !('code' in error)) return false;
-  const code = (error as { code?: unknown }).code;
-  return code === 'UNKNOWN_AGENT_NAME' || code === 'AGENT_NOT_FOUND';
 }

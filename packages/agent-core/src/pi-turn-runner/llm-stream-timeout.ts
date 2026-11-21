@@ -1,4 +1,6 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry, not the
+// root index; compat re-exports the root surface plus the simple helpers.
 import {
   createAssistantMessageEventStream,
   streamSimple,
@@ -7,7 +9,7 @@ import {
   type AssistantMessageEventStream,
   type Model,
   type Api,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import {
   LLM_FIRST_EVENT_TIMEOUT_MS,
   LLM_FIRST_EVENT_TIMEOUT_ENV,
@@ -99,8 +101,14 @@ export function withLLMStreamTimeouts(
       timer = undefined;
     };
     const onCallerAbort = () => {
-      clearTimer();
+      if (finished) return;
+      finish();
       controller.abort(callerSignal?.reason);
+      out.push({
+        type: 'error', reason: 'aborted',
+        error: { ...snapshot(lastPartial, model), stopReason: 'aborted' },
+      });
+      out.end();
     };
     const finish = () => {
       finished = true;
@@ -129,7 +137,8 @@ export function withLLMStreamTimeouts(
     };
 
     if (callerSignal?.aborted) {
-      controller.abort(callerSignal.reason);
+      onCallerAbort();
+      return out;
     } else {
       callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
       arm(timeouts.firstEventTimeoutMs, 'first');
@@ -165,13 +174,30 @@ export function withLLMStreamTimeouts(
         }
         if (!finished) {
           // Inner stream ended without a terminal event; mirror its result.
+          // EOF does not guarantee result() has settled. Keep the watchdog
+          // and caller cancellation alive while waiting for that promise.
+          const final = await Promise.race([stream.result(), stopped]);
+          if (final === STOPPED || finished) return;
           finish();
-          const final = await stream.result();
-          out.push(
+          // `result()` resolves from done/error events only, so a final
+          // message is terminal by the pi contract; a `pending` final is a
+          // stream-contract violation and degrades to an explicit error
+          // instead of an impossible done event.
+          const terminal =
             final.stopReason === 'error' || final.stopReason === 'aborted'
-              ? { type: 'error', reason: final.stopReason, error: final }
-              : { type: 'done', reason: final.stopReason, message: final },
-          );
+              ? ({ type: 'error', reason: final.stopReason, error: final } as const)
+              : final.stopReason === 'pending'
+                ? ({
+                    type: 'error',
+                    reason: 'error',
+                    error: {
+                      ...final,
+                      stopReason: 'error',
+                      errorMessage: 'inner stream ended in a non-terminal (pending) state',
+                    },
+                  } as const)
+                : ({ type: 'done', reason: final.stopReason, message: final } as const);
+          out.push(terminal);
           out.end();
         }
       } catch (error) {

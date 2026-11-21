@@ -1,4 +1,18 @@
-import { streamSimple, type Api, type Context, type Model } from '@earendil-works/pi-ai';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry; streamFns
+// take the normalized TranscriptContext, where the system prompt and tool
+// declarations fold into the leading system message.
+import {
+  getCurrentTools,
+  getInitialSystemMessage,
+  getSystemMessageText,
+  normalizeContext,
+  streamSimple,
+  type Api,
+  type Context,
+  type Model,
+  type Tool,
+  type TranscriptContext,
+} from '@earendil-works/pi-ai/compat';
 import type { AgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
 import { LLM_RETRY_CALL_IDENTITY } from '@mavis/agent-core/pi-turn-runner';
 import { createDefaultTokenEstimator, resolveDynamicMaxTokens } from '@mavis/context-manager';
@@ -20,18 +34,42 @@ interface DynamicBudget {
 interface BudgetedCall {
   readonly stream: StreamFn;
   readonly model: Model<Api>;
-  readonly context: Context;
+  readonly context: Context | TranscriptContext;
   readonly options: Parameters<StreamFn>[2];
   readonly budget: DynamicBudget;
 }
 
-function estimatePiContextTokens(context: Context): number {
+/** Raw `Context` shape or a normalized transcript — the prompt/tools differ per shape. */
+type StreamContext = Context | TranscriptContext;
+
+/**
+ * The prompt and tool declarations of a stream context. A normalized
+ * transcript folds them into the leading system message (`normalizeContext`),
+ * so they are read back from there instead of the absent raw fields — without
+ * this the budget estimator would silently undercount by the whole system
+ * prompt plus tool schemas.
+ */
+function contextPromptAndTools(context: StreamContext): {
+  readonly systemPrompt?: string;
+  readonly tools?: Tool[];
+} {
+  if ('systemPrompt' in context || 'tools' in context) {
+    return { systemPrompt: context.systemPrompt, tools: context.tools };
+  }
+  const messages = (context as TranscriptContext).messages;
+  const initial = getInitialSystemMessage(messages);
+  return {
+    systemPrompt: initial ? getSystemMessageText(initial) : undefined,
+    tools: getCurrentTools(messages),
+  };
+}
+
+function estimatePiContextTokens(context: StreamContext): number {
   const estimator = createDefaultTokenEstimator();
   const messages = [...(context.messages ?? [])] as AgentMessage[];
-  const systemTokens = context.systemPrompt
-    ? estimator.estimateTextTokens(context.systemPrompt)
-    : 0;
-  const toolTokens = (context.tools ?? []).reduce(
+  const { systemPrompt, tools } = contextPromptAndTools(context);
+  const systemTokens = systemPrompt ? estimator.estimateTextTokens(systemPrompt) : 0;
+  const toolTokens = (tools ?? []).reduce(
     (tokens, tool) =>
       tokens +
       estimator.estimateTextTokens(
@@ -72,7 +110,7 @@ export function withLocalDynamicMaxTokens(inner?: StreamFn): StreamFn {
 
 function resolveCallBudget(input: {
   readonly model: Model<Api>;
-  readonly context: Context;
+  readonly context: StreamContext;
   readonly options: Parameters<StreamFn>[2];
   readonly contextWindow: number;
   readonly configured: number;
@@ -99,7 +137,9 @@ function resolveCallBudget(input: {
 }
 
 function callWithBudget(input: BudgetedCall) {
-  return input.stream(input.model, input.context, {
+  // pi 48c8f322: StreamFn takes the normalized TranscriptContext; re-folding a
+  // normalized transcript is the identity.
+  return input.stream(input.model, normalizeContext(input.context), {
     ...(input.options ?? {}),
     maxTokens: input.budget.maxTokens,
     ...(input.budget.disableReasoning ? { reasoning: undefined } : {}),

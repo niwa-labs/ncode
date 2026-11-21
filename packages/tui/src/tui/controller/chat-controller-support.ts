@@ -15,12 +15,7 @@ export type TuiChatRuntimeLike = Pick<TuiSessionPort, 'createSession'> &
   Partial<
     Pick<
       TuiSessionPort,
-      | 'listSessions'
-      | 'getSession'
-      | 'getMessages'
-      | 'listMessagePage'
-      | 'renameSession'
-      | 'archiveSession'
+      'listSessions' | 'getSession' | 'getMessages' | 'renameSession' | 'archiveSession'
     >
   > &
   Partial<Pick<TuiConfigurationPort, 'getAccountStatus'>> &
@@ -32,6 +27,8 @@ export interface TuiActiveTurn {
   id: string;
   cancelling: boolean;
   retracted: boolean;
+  runtimeAccepted?: boolean;
+  deliveryRetired?: boolean;
   abortPromise?: Promise<boolean>;
   sessionDeliveryAbort: AbortController;
 }

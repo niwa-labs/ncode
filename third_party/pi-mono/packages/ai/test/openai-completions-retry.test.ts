@@ -1,20 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
-import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
-import type { Context, Model } from "../src/types.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
+import type { Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const mockState = vi.hoisted(() => ({
-	clientOptions: [] as unknown[],
 	requestOptions: [] as unknown[],
-	terminalError: undefined as unknown,
+	requestErrors: [] as Error[],
 }));
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
-		constructor(options: unknown) {
-			mockState.clientOptions.push(options);
-		}
-
 		chat = {
 			completions: {
 				create: (_params: unknown, options: unknown) => {
@@ -38,7 +33,8 @@ vi.mock("openai", () => {
 						}>;
 					};
 					promise.withResponse = async () => {
-						if (mockState.terminalError !== undefined) throw mockState.terminalError;
+						const error = mockState.requestErrors.shift();
+						if (error) throw error;
 						return {
 							data: stream,
 							response: { status: 200, headers: new Headers() },
@@ -46,38 +42,6 @@ vi.mock("openai", () => {
 					};
 					return promise;
 				},
-			},
-		};
-
-		responses = {
-			create: (_params: unknown, options: unknown) => {
-				mockState.requestOptions.push(options);
-				const stream = {
-					async *[Symbol.asyncIterator]() {
-						yield {
-							type: "response.completed",
-							response: {
-								id: "resp-test",
-								status: "completed",
-								usage: {
-									input_tokens: 1,
-									output_tokens: 1,
-									total_tokens: 2,
-									input_tokens_details: { cached_tokens: 0 },
-								},
-							},
-						};
-					},
-				};
-				return {
-					withResponse: async () => {
-						if (mockState.terminalError !== undefined) throw mockState.terminalError;
-						return {
-							data: stream,
-							response: { status: 200, headers: new Headers() },
-						};
-					},
-				};
 			},
 		};
 	}
@@ -97,43 +61,14 @@ const model: Model<"openai-completions"> = {
 	maxTokens: 100,
 };
 
-const responsesModel: Model<"openai-responses"> = {
-	id: "test-responses-model",
-	name: "Test Responses Model",
-	api: "openai-responses",
-	provider: "openai",
-	baseUrl: "https://api.openai.com/v1",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 1000,
-	maxTokens: 100,
-};
-
-const context: Context = {
+const context = normalizeContext({
 	systemPrompt: "",
 	messages: [{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 0 }],
 	tools: [],
-};
+});
 
-async function consume(options?: {
-	maxRetries?: number;
-	fetch?: typeof globalThis.fetch;
-	onProviderError?: (error: unknown, model: Model) => void;
-	onProviderStreamEvent?: (event: unknown, model: Model) => void;
-}) {
+async function consume(options?: { maxRetries?: number; maxRetryDelayMs?: number }) {
 	const stream = streamOpenAICompletions(model, context, { apiKey: "test", ...options });
-	for await (const _event of stream) {
-		void _event;
-	}
-	return stream.result();
-}
-
-async function consumeResponses(options?: {
-	fetch?: typeof globalThis.fetch;
-	onProviderStreamEvent?: (event: unknown, model: Model) => void;
-}) {
-	const stream = streamOpenAIResponses(responsesModel, context, { apiKey: "test", ...options });
 	for await (const _event of stream) {
 		void _event;
 	}
@@ -142,9 +77,12 @@ async function consumeResponses(options?: {
 
 describe("openai-completions provider retries", () => {
 	beforeEach(() => {
-		mockState.clientOptions = [];
 		mockState.requestOptions = [];
-		mockState.terminalError = undefined;
+		mockState.requestErrors = [];
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
 	});
 
 	it("disables SDK retries by default", async () => {
@@ -152,90 +90,51 @@ describe("openai-completions provider retries", () => {
 		expect(mockState.requestOptions).toEqual([expect.objectContaining({ maxRetries: 0 })]);
 	});
 
-	it("honors explicit provider retry settings", async () => {
-		await consume({ maxRetries: 2 });
-		expect(mockState.requestOptions).toEqual([expect.objectContaining({ maxRetries: 2 })]);
-	});
+	it("honors provider retries while keeping SDK retries disabled", async () => {
+		vi.useFakeTimers();
+		mockState.requestErrors = [
+			Object.assign(new Error("rate limited"), {
+				status: 429,
+				headers: new Headers({ "retry-after-ms": "100" }),
+			}),
+			Object.assign(new Error("server error"), {
+				status: 500,
+				headers: new Headers({ "retry-after-ms": "100" }),
+			}),
+		];
 
-	it("passes custom fetch to the OpenAI completions SDK client", async () => {
-		const fetchImpl = (async () => new Response()) as typeof globalThis.fetch;
-		await consume({ fetch: fetchImpl });
-		expect(mockState.clientOptions[0]).toEqual(expect.objectContaining({ fetch: fetchImpl }));
-	});
+		const result = consume({ maxRetries: 2, maxRetryDelayMs: 100 });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockState.requestOptions).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(99);
+		expect(mockState.requestOptions).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(mockState.requestOptions).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(99);
+		expect(mockState.requestOptions).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		await result;
 
-	it("passes custom fetch to the OpenAI responses SDK client", async () => {
-		const fetchImpl = (async () => new Response()) as typeof globalThis.fetch;
-		await consumeResponses({ fetch: fetchImpl });
-		expect(mockState.clientOptions[0]).toEqual(expect.objectContaining({ fetch: fetchImpl }));
-	});
-
-	it("delivers parsed Chat Completions chunks to the provider observer", async () => {
-		const observed: unknown[] = [];
-
-		await consume({ onProviderStreamEvent: (event) => observed.push(event) });
-
-		expect(observed).toEqual([
-			{
-				id: "chatcmpl-test",
-				choices: [{ index: 0, delta: { content: "ok" } }],
-			},
-			{
-				id: "chatcmpl-test",
-				choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-			},
+		expect(mockState.requestOptions).toEqual([
+			expect.objectContaining({ maxRetries: 0 }),
+			expect.objectContaining({ maxRetries: 0 }),
+			expect.objectContaining({ maxRetries: 0 }),
 		]);
 	});
 
-	it("delivers parsed Responses events through the shared processor observer", async () => {
-		const observed: unknown[] = [];
+	it("fails immediately when a provider-requested retry delay exceeds the limit", async () => {
+		mockState.requestErrors = [
+			Object.assign(new Error("rate limited"), {
+				status: 429,
+				headers: new Headers({ "retry-after": "277403" }),
+			}),
+		];
 
-		await consumeResponses({ onProviderStreamEvent: (event) => observed.push(event) });
-
-		expect(observed).toEqual([
-			{
-				type: "response.completed",
-				response: {
-					id: "resp-test",
-					status: "completed",
-					usage: {
-						input_tokens: 1,
-						output_tokens: 1,
-						total_tokens: 2,
-						input_tokens_details: { cached_tokens: 0 },
-					},
-				},
-			},
-		]);
-	});
-
-	it("把 provider 捕获到的原始异常交给宿主回调", async () => {
-		const cause = Object.assign(new Error("getaddrinfo ENOTFOUND missing.example.com"), {
-			code: "ENOTFOUND",
-			hostname: "missing.example.com",
-		});
-		const original = new Error("Connection error.", { cause });
-		const onProviderError = vi.fn();
-		mockState.terminalError = original;
-
-		const result = await consume({ onProviderError });
+		const result = await consume({ maxRetries: 2, maxRetryDelayMs: 1000 });
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Connection error.");
-		expect(onProviderError).toHaveBeenCalledOnce();
-		expect(onProviderError).toHaveBeenCalledWith(original, model);
-	});
-
-	it("宿主错误回调抛错时仍保留原 provider 失败", async () => {
-		const original = new Error("provider failed");
-		mockState.terminalError = original;
-
-		const result = await consume({
-			onProviderError: () => {
-				throw new Error("observer failed");
-			},
-		});
-
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("provider failed");
+		expect(result.errorMessage).toContain("Server requested 277403s retry delay (max: 1s)");
+		expect(result.errorMessage).toContain("rate limited");
+		expect(mockState.requestOptions).toEqual([expect.objectContaining({ maxRetries: 0 })]);
 	});
 });

@@ -28,13 +28,6 @@ type ActivationSubmission = Parameters<
   ReturnType<InitializeTurnSystemOptions['createMessageDelivery']>['activation']['execute']
 >[0];
 
-function clientRequestFields(input: ActivationSubmission) {
-  return {
-    ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
-    ...(input.receiptAliases?.length ? { receiptAliases: input.receiptAliases } : {}),
-  };
-}
-
 function activationDeliveryFields(delivery: ActivationSubmission['delivery']) {
   return {
     ...(delivery?.messageKey ? { messageKey: delivery.messageKey } : {}),
@@ -89,7 +82,7 @@ export function createTurnSystemMessageDelivery(
               ...((input.userMessageId ?? input.delivery?.userMessageId)
                 ? { userMessageId: input.userMessageId ?? input.delivery?.userMessageId }
                 : {}),
-              ...clientRequestFields(input),
+              ...(input.clientRequestId ? { clientRequestId: input.clientRequestId } : {}),
               ...(input.admissionPriority ? { admissionPriority: input.admissionPriority } : {}),
               ...(input.resume ? { resume: input.resume } : {}),
               ...(input.delivery?.preDelivery ? { preDelivery: input.delivery.preDelivery } : {}),

@@ -1,20 +1,18 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/utils/image-resize.js", () => {
-	class MockImageProcessorUnavailableError extends Error {}
-	return {
-		ImageProcessorUnavailableError: MockImageProcessorUnavailableError,
-		resizeImage: vi.fn(),
-		formatDimensionNote: vi.fn(() => undefined),
-	};
-});
+vi.mock("../src/utils/image-resize.js", () => ({
+	resizeImage: vi.fn(),
+	formatDimensionNote: vi.fn(() => undefined),
+}));
 
 import { processFileArguments } from "../src/cli/file-processor.ts";
-import { createReadTool } from "../src/core/tools/read.ts";
-import { ImageProcessorUnavailableError, resizeImage } from "../src/utils/image-resize.ts";
+import type { ExtensionToolContext } from "../src/core/extensions/types.ts";
+import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
+import { resizeImage } from "../src/utils/image-resize.ts";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -55,29 +53,43 @@ describe("image resize callers", () => {
 		expect(result.text).toContain("Image omitted");
 	});
 
-	it("read tool reports a missing image processor separately from the inline size limit", async () => {
+	it("passes the current model resize profile to the read tool", async () => {
 		const imagePath = join(testDir, "test.png");
 		writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-		vi.mocked(resizeImage).mockRejectedValue(new ImageProcessorUnavailableError());
+		const resize = { maxWidth: 1234, maxHeight: 1000, maxBytes: 500000, jpegQuality: 70 };
+		const model: Model<Api> = {
+			id: "vision-model",
+			name: "Vision model",
+			api: "test",
+			provider: "test",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text", "image"],
+			inputLimits: { images: { resize } },
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
+			maxTokens: 100,
+		};
+		const ctx = { cwd: testDir, model } as unknown as ExtensionToolContext;
 
-		const tool = createReadTool(testDir);
-		const result = await tool.execute("test-read-image", { path: imagePath });
-		const output = (result.content[0] as { type: "text"; text: string }).text;
+		await createReadToolDefinition(testDir).execute(
+			"test-read-model-profile",
+			{ path: imagePath },
+			undefined,
+			undefined,
+			ctx,
+		);
 
-		expect(result.content).toHaveLength(1);
-		expect(output).toContain("image processing runtime is unavailable");
-		expect(output).not.toContain("inline image size limit");
+		expect(resizeImage).toHaveBeenCalledWith(expect.any(Uint8Array), "image/png", resize);
 	});
 
-	it("file processor reports a missing image processor separately from the inline size limit", async () => {
+	it("can defer resizing file attachments until prompt dispatch", async () => {
 		const imagePath = join(testDir, "test.png");
 		writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-		vi.mocked(resizeImage).mockRejectedValue(new ImageProcessorUnavailableError());
 
-		const result = await processFileArguments([imagePath]);
+		const result = await processFileArguments([imagePath], { autoResizeImages: false });
 
-		expect(result.images).toHaveLength(0);
-		expect(result.text).toContain("image processing runtime is unavailable");
-		expect(result.text).not.toContain("inline image size limit");
+		expect(result.images).toHaveLength(1);
+		expect(resizeImage).not.toHaveBeenCalled();
 	});
 });

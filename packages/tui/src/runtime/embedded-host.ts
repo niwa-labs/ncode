@@ -1,3 +1,5 @@
+import { getRuntimeRegion, getRuntimeBuildEnv } from '@mavis/config';
+import { TuiMatrixAccountClient, subscriptionQuotaResetAtMs } from '../account/matrix-account-client.js';
 import { createLocalRuntimeHostV2, getDefaultLocalRuntimeConfig } from '@mavis/local-runtime-v2';
 import type {
   CreateLocalRuntimeHostOptions,
@@ -55,12 +57,6 @@ export function projectEmbeddedRuntimeConfig(
       ...config.memory,
       enabled: false,
     },
-    // The TUI offers next-message suggestions by default in every build; an
-    // explicit `promptSuggestion.enabled` in config.yaml still wins.
-    promptSuggestion:
-      typeof config.promptSuggestion?.enabled === 'boolean'
-        ? config.promptSuggestion
-        : { ...config.promptSuggestion, enabled: true },
   };
 }
 
@@ -75,8 +71,19 @@ export async function createEmbeddedRuntimeHost(
   }
   const { productCapabilities, ...runtimeOptions } = options;
   const configGetter = runtimeOptions.configGetter ?? getDefaultLocalRuntimeConfig;
+  const quotaClient = new TuiMatrixAccountClient({
+    authContextGetter: options.authContextGetter ?? (() => undefined),
+    region: getRuntimeRegion(), buildEnv: getRuntimeBuildEnv(),
+    ...(options.routingContextGetter ? { routingContextGetter: options.routingContextGetter } : {}),
+  });
   const host = await factory({
     ...runtimeOptions,
+    subscriptionQuota: options.subscriptionQuota ?? (async ({ provider, signal }) => {
+      if (provider !== 'minimax') return undefined;
+      const status = await quotaClient.getTokenPlanAccountStatus(signal, { forceRefresh: true });
+      const resetAtMs = subscriptionQuotaResetAtMs(status.quota);
+      return resetAtMs !== undefined ? { resetAtMs } : {};
+    }),
     reviewPromptDir: runtimeOptions.reviewPromptDir ?? resolveTuiReviewPromptDir(),
     // Product ceilings belong to the embedded host rather than user config:
     // TUI owns Matrix tooling and does not expose the Desktop relationship

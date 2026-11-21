@@ -57,6 +57,7 @@ function buildResponsesCounterRequest(
     url: buildResponsesInputTokensUrl(baseUrl, {
       stripMessagesCompatibilityPrefix: isMinimaxApi,
     }),
+    unsupportedCacheKey: `responses:${baseUrl}`,
     body,
     headers: {
       authorization: `Bearer ${apiKey}`,

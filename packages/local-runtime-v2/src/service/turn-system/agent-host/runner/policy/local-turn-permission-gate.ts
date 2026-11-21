@@ -1,10 +1,16 @@
 import type { PiBeforeToolCallHook, PiTurnRunnerLogger } from '@mavis/agent-core/pi-turn-runner';
+import type {
+  RuntimePermissionMark,
+  TurnPermissionMarkSource,
+} from '@mavis/agent-core/protocol/runtime-event';
 import type { PluginHookPermissionUpdate } from '@mavis/plugin-hooks';
-import { withPermissionExecutionPlan } from '@mavis/agent-tools';
+import {
+  localPermissionVerdictKey,
+  takeLocalPermissionVerdict,
+} from '@mavis/local-runtime';
 
 import type { AgentHostChannelContext } from '../../preparation/contracts.js';
 import { assertAgentHostCapabilityAvailable } from '../../empty-dependencies.js';
-import { observePtcChildPermission, type PtcMetrics } from '../ptc/ptc-observability.js';
 import {
   SIDE_SESSION_APPROVAL_REASON,
   sideSessionRequiresApproval,
@@ -17,7 +23,6 @@ interface LocalTurnPermissionExecutionPlan {
   readonly effectiveInput: Readonly<Record<string, unknown>>;
   readonly intents: readonly unknown[];
   readonly transforms: readonly unknown[];
-  readonly nativeDelete?: boolean;
 }
 
 type LocalTurnPermissionRuleMatcher =
@@ -36,10 +41,17 @@ export type LocalTurnPermissionDecision =
       readonly behavior: 'allow';
       readonly reason: string;
       readonly executionPlan?: Readonly<LocalTurnPermissionExecutionPlan>;
+      /** §4 mark attribution (see {@link LocalTurnPermissionMarkAttribution}). */
+      readonly decidedBy?: LocalTurnPermissionMarkAttribution['decidedBy'];
+      readonly ruleKind?: LocalTurnPermissionMarkAttribution['ruleKind'];
+      readonly mode?: LocalTurnPermissionMarkAttribution['mode'];
     }
   | {
       readonly behavior: 'deny';
       readonly reason: string;
+      readonly decidedBy?: LocalTurnPermissionMarkAttribution['decidedBy'];
+      readonly ruleKind?: LocalTurnPermissionMarkAttribution['ruleKind'];
+      readonly mode?: LocalTurnPermissionMarkAttribution['mode'];
     }
   | {
       readonly behavior: 'ask';
@@ -49,7 +61,53 @@ export type LocalTurnPermissionDecision =
       readonly executionPlan?: Readonly<LocalTurnPermissionExecutionPlan>;
       /** Only ordinary fallback prompts may be answered by a compatible Hook. */
       readonly hookAutoApprovalEligible?: boolean;
+      /**
+       * Bypass-immune ask ("неотключаемый", §3): no mode may silently
+       * auto-allow it and no Hook — including `any_prompt` auto-approval or a
+       * PreToolUse allow — may answer it on the user's behalf. Only the user
+       * replies (one-time allow/deny; the approval surface offers no
+       * allow-always / deny-always).
+       */
+      readonly bypassImmune?: true;
+      readonly decidedBy?: LocalTurnPermissionMarkAttribution['decidedBy'];
+      readonly ruleKind?: LocalTurnPermissionMarkAttribution['ruleKind'];
+      readonly mode?: LocalTurnPermissionMarkAttribution['mode'];
     };
+
+/**
+ * §4 check-side mark attribution carried on every decision variant. A
+ * decision source that fills these fields wins; the gate otherwise falls
+ * back to the facade's per-process verdict ledger (see
+ * `local-runtime/src/permissions/verdict-ledger.ts`) — and a decision with
+ * neither source of attribution emits no wire mark at all.
+ */
+export interface LocalTurnPermissionMarkAttribution {
+  readonly decidedBy: 'classifier' | 'rule' | 'mode';
+  readonly ruleKind: RuntimePermissionMark['ruleKind'];
+  readonly mode: RuntimePermissionMark['mode'];
+}
+
+/**
+ * Per-turn §4 mark store: the gate records one `RuntimePermissionMark` per
+ * resolved tool call (key: `toolContext.toolCall.id`) and the event bridge
+ * reads them to stamp the `permission` field onto every status event of
+ * that call. Created fresh per Turn by the execution preparation, so the
+ * map dies with the Turn — no explicit cleanup is needed.
+ */
+export interface LocalTurnPermissionMarkSink
+  extends Pick<TurnPermissionMarkSource, 'get'> {
+  record(toolCallId: string, mark: RuntimePermissionMark): void;
+}
+
+export function createLocalTurnPermissionMarkSink(): LocalTurnPermissionMarkSink {
+  const marks = new Map<string, RuntimePermissionMark>();
+  return {
+    record: (toolCallId, mark) => {
+      marks.set(toolCallId, mark);
+    },
+    get: (toolCallId) => marks.get(toolCallId),
+  };
+}
 
 export interface LocalTurnPermissionDecisionSource {
   check(input: {
@@ -62,13 +120,6 @@ export interface LocalTurnPermissionDecisionSource {
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
     readonly trustedExactWritePaths: readonly string[];
-    /**
-     * Host-issued directories the active Session owns and may READ, e.g. the
-     * Session's own recoverable tool-output artifacts.
-     */
-    readonly sessionOwnedReadablePaths?: readonly string[];
-    /** First validated plan's setting; recheck input/rules while keeping this call's policy. */
-    readonly nativeDeleteSnapshot?: boolean;
   }): Promise<LocalTurnPermissionDecision>;
 }
 
@@ -85,11 +136,9 @@ export interface LocalTurnPermissionApprovalOwner {
     readonly ruleMatchers?: readonly LocalTurnPermissionRuleMatcher[];
     readonly signal?: AbortSignal;
     readonly channelContext?: AgentHostChannelContext;
-    /** Present only for a trusted PTC child call. */
-    readonly parentToolCallId?: string;
-    readonly parentToolDescription?: string;
-    readonly stopPtcOnDeny?: boolean;
-  }): Promise<'allowOnce' | 'allowAlways' | 'deny'>;
+    /** Bypass-immune ask: the surfaced question is one-time allow/deny only. */
+    readonly bypassImmune?: true;
+  }): Promise<'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways'>;
 }
 
 export interface LocalTurnPermissionMutationOwner {
@@ -113,22 +162,7 @@ export interface LocalTurnPermissionGateOptions {
     ): Readonly<LocalTurnPermissionExecutionPlan>;
   };
   readonly logger?: PiTurnRunnerLogger;
-  /** Counts run_code children's permission outcomes only (`ptc_child_permission_total`). */
-  readonly metricsClient?: Pick<PtcMetrics, 'counter'>;
   readonly mutations?: LocalTurnPermissionMutationOwner;
-  /**
-   * Resolves the directories the active Session owns and may READ, e.g. the
-   * Session's own recoverable tool-output artifacts.
-   *
-   * The runtime hands the Agent a path when it externalizes an oversized tool
-   * result, so the Agent must be able to read that artifact back. Those
-   * artifacts live under the private runtime tree, which the permission engine
-   * otherwise refuses to read. The runtime — not the engine — owns that path,
-   * so it is injected here instead of being derived from a Session id.
-   */
-  readonly resolveSessionOwnedReadablePaths?: (
-    sessionId: string,
-  ) => Promise<readonly string[]>;
   /** Optional isolated-host override; product hosts keep Desktop's built-in tool policy. */
   readonly enforceBuiltinTools?: boolean;
   /**
@@ -162,12 +196,8 @@ interface BeforeToolCallInput {
   readonly signal?: AbortSignal;
   readonly channelContext?: AgentHostChannelContext;
   readonly trustedExactWritePaths?: readonly string[];
-  /**
-   * Host-issued directories the active Session owns and may READ, e.g. the
-   * Session's own recoverable tool-output artifacts.
-   */
-  readonly sessionOwnedReadablePaths?: readonly string[];
-
+  /** Per-turn §4 mark sink; absent hosts get no wire marks. */
+  readonly permissionMarks?: LocalTurnPermissionMarkSink;
   /** Compatible-compatible PreToolUse permission request. Policy deny always wins. */
   readonly preToolPermission?: {
     readonly behavior: 'allow' | 'ask';
@@ -203,7 +233,7 @@ export class LocalTurnPermissionGate {
     );
   }
 
-  async beforeToolCall(callInput: BeforeToolCallInput): Promise<
+  async beforeToolCall(input: BeforeToolCallInput): Promise<
     | {
         readonly block: true;
         readonly reason: string;
@@ -213,37 +243,33 @@ export class LocalTurnPermissionGate {
     | undefined
   > {
     const request = readPermissionToolRequest(
-      callInput.toolContext,
+      input.toolContext,
       this.options.executionPlans?.snapshotInput,
     );
     // The side-Session lookup runs before the built-in bypass so that a
     // mutation-capable built-in (write/edit/bash) cannot skip the mandatory
     // side-Session confirmation.
-    const sideSession = await this.resolveSideSessionApprovalRequirement(callInput, request);
+    const sideSession = await this.resolveSideSessionApprovalRequirement(input, request);
     if (sideSession?.block) return { ...sideSession.block, blockedBy: 'permission' };
     const sideApprovalRequired = sideSession?.approvalRequired === true;
-    if (shouldSkipPermissionCheck(this.options, callInput)) {
+    if (shouldSkipPermissionCheck(this.options, input)) {
       // Desktop's built-in tool policy owns these tools elsewhere; the
       // side-Session confirmation is the only gate-level requirement here.
       if (!sideApprovalRequired) return undefined;
-      const blocked = await this.resolveSideSessionApproval(callInput, request);
+      const blocked = await this.resolveSideSessionApproval(input, request);
       return blocked ? { ...blocked, blockedBy: 'permission' } : undefined;
     }
-    // Resolve the Session's read grant once and carry it through every policy
-    // check of this call, including the recheck after a Hook rewrites input.
-    const input: BeforeToolCallInput = {
-      ...callInput,
-      ...(await this.resolveSessionOwnedReadablePaths(callInput.sessionId)),
-    };
     let decision = await checkPermissionDecision(this.options.decisions, input, request);
     if (sideApprovalRequired && decision.behavior === 'allow') {
       // A policy or mode auto-approval is not enough inside a side Session:
       // downgrade it to an ordinary ask so exactly one user approval happens.
-      // Hook auto-approval eligibility is deliberately not granted.
+      // Hook auto-approval eligibility is deliberately not granted. The §4
+      // check attribution survives so the eventual user mark keeps its mode.
       decision = {
         behavior: 'ask',
         reason: SIDE_SESSION_APPROVAL_REASON,
         ...(decision.executionPlan ? { executionPlan: decision.executionPlan } : {}),
+        ...markAttributionFields(decision),
       };
     }
     const executionPlan = readDecisionExecutionPlan(
@@ -254,30 +280,6 @@ export class LocalTurnPermissionGate {
     const blocked = await this.resolveCheckedPermission(input, request, decision, executionPlan);
     // This trusted marker describes admission, not an error produced by tool execution.
     return blocked ? { ...blocked, blockedBy: 'permission' } : undefined;
-  }
-
-  /**
-   * The runtime owns the Session's artifact layout, so the read grant for the
-   * Session's own recoverable artifacts is resolved here — never derived from
-   * the Session id inside the permission engine. A resolver failure must not
-   * widen access: the Session keeps the ordinary protected behavior, and the
-   * failure is logged so a missing grant is diagnosable.
-   */
-  private async resolveSessionOwnedReadablePaths(
-    sessionId: string,
-  ): Promise<{ readonly sessionOwnedReadablePaths?: readonly string[] }> {
-    const resolve = this.options.resolveSessionOwnedReadablePaths;
-    if (!resolve) return {};
-    try {
-      const paths = await resolve(sessionId);
-      return paths.length > 0 ? { sessionOwnedReadablePaths: paths } : {};
-    } catch (error) {
-      this.options.logger?.warn?.(
-        { session_id: sessionId, error: boundedPermissionError(error) },
-        'permission.session_owned_readable_paths_unavailable',
-      );
-      return {};
-    }
   }
 
   private async resolveSideSessionApprovalRequirement(
@@ -328,11 +330,27 @@ export class LocalTurnPermissionGate {
     input: BeforeToolCallInput,
     request: PermissionToolRequest,
   ): Promise<{ readonly block: true; readonly reason: string } | undefined> {
-    const approval = await this.requestApproval(input, request, {
+    const ask: Extract<LocalTurnPermissionDecision, { readonly behavior: 'ask' }> = {
       behavior: 'ask',
       reason: SIDE_SESSION_APPROVAL_REASON,
-    });
-    if (approval === 'deny') {
+    };
+    const outcome = await this.requestApprovalOutcome(input, request, ask);
+    if (outcome.kind === 'unanswered') {
+      // No permission check ran on this skip path, so there is no check mode
+      // and the §4 mark is omitted rather than fabricated.
+      this.logEnforcement(input, request, {
+        policy_behavior: 'ask',
+        gate_result: 'blocked',
+        decision_source: 'approval_or_abort',
+        approval_decision: 'deny',
+        unanswered: outcome.cause,
+        rewrite_applied: false,
+        side_session: true,
+      });
+      return permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
+    }
+    const approval = outcome.reply;
+    if (approval === 'deny' || approval === 'denyAlways') {
       this.logEnforcement(input, request, {
         policy_behavior: 'ask',
         gate_result: 'blocked',
@@ -341,9 +359,7 @@ export class LocalTurnPermissionGate {
         rewrite_applied: false,
         side_session: true,
       });
-      return input.toolContext.parentToolCallId
-        ? userDeniedBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON)
-        : permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
+      return permissionBlock(request.toolName, SIDE_SESSION_APPROVAL_REASON, 'user');
     }
     this.logEnforcement(input, request, {
       policy_behavior: 'ask',
@@ -365,6 +381,7 @@ export class LocalTurnPermissionGate {
     { readonly block: true; readonly reason: string; readonly terminateAgent?: boolean } | undefined
   > {
     if (decision.behavior === 'deny') {
+      this.recordPermissionMark(input, request, permissionMarkFromCheckDecision(decision));
       this.logEnforcement(input, request, {
         policy_behavior: 'deny',
         gate_result: 'blocked',
@@ -375,6 +392,7 @@ export class LocalTurnPermissionGate {
     }
     const approvalDecision = toApprovalDecision(decision, input.preToolPermission);
     if (!approvalDecision) {
+      this.recordPermissionMark(input, request, permissionMarkFromCheckDecision(decision));
       applyExecutionPlan(input.toolContext, executionPlan);
       this.logEnforcement(input, request, {
         policy_behavior: 'allow',
@@ -387,6 +405,17 @@ export class LocalTurnPermissionGate {
       return undefined;
     }
     if (preToolHookAllowsWithoutApproval(input, approvalDecision)) {
+      // §4: the PreToolUse allow answered the prompt — the hook decided.
+      this.recordPermissionMark(
+        input,
+        request,
+        permissionMarkFromDecision(approvalDecision, {
+          decision: 'allow',
+          decidedBy: 'hook',
+          ruleKind: null,
+          reason: input.preToolPermission?.reason?.trim() || 'plugin hook',
+        }),
+      );
       applyExecutionPlan(input.toolContext, executionPlan);
       this.logEnforcement(input, request, {
         policy_behavior: 'ask',
@@ -418,6 +447,17 @@ export class LocalTurnPermissionGate {
     );
     const pluginBlock = toPluginBlock(request, pluginDecision);
     if (pluginBlock) {
+      // §4: a PermissionRequest hook denied the call — the hook decided.
+      this.recordPermissionMark(
+        input,
+        request,
+        permissionMarkFromDecision(approvalDecision, {
+          decision: 'deny',
+          decidedBy: 'hook',
+          ruleKind: null,
+          reason: pluginBlock.reason,
+        }),
+      );
       this.logEnforcement(input, request, {
         policy_behavior: 'ask',
         gate_result: 'blocked',
@@ -429,6 +469,16 @@ export class LocalTurnPermissionGate {
     if (pluginDecision.updatedPermissions?.length) {
       const mutationBlock = await this.applyPluginPermissionUpdates(input, request, pluginDecision);
       if (mutationBlock) {
+        this.recordPermissionMark(
+          input,
+          request,
+          permissionMarkFromDecision(approvalDecision, {
+            decision: 'deny',
+            decidedBy: 'hook',
+            ruleKind: null,
+            reason: mutationBlock.reason,
+          }),
+        );
         this.logEnforcement(input, request, {
           policy_behavior: 'ask',
           gate_result: 'blocked',
@@ -439,7 +489,7 @@ export class LocalTurnPermissionGate {
       }
     }
     if (pluginDecision.updatedInput || pluginDecision.updatedPermissions?.length) {
-      return this.resolveRewrittenPermission(input, pluginDecision, executionPlan);
+      return this.resolveRewrittenPermission(input, pluginDecision);
     }
     return this.resolveApproval({
       input,
@@ -492,25 +542,20 @@ export class LocalTurnPermissionGate {
   private async resolveRewrittenPermission(
     input: BeforeToolCallInput,
     pluginDecision: PluginPermissionDecision,
-    previousPlan: Readonly<LocalTurnPermissionExecutionPlan> | undefined,
   ): Promise<{ readonly block: true; readonly reason: string } | undefined> {
     applyHookUpdatedInput(input.toolContext, pluginDecision.updatedInput);
     const request = readPermissionToolRequest(
       input.toolContext,
       this.options.executionPlans?.snapshotInput,
     );
-    const policyDecision = await checkPermissionDecision(
-      this.options.decisions,
-      input,
-      request,
-      previousPlan?.nativeDelete,
-    );
+    const policyDecision = await checkPermissionDecision(this.options.decisions, input, request);
     const executionPlan = readDecisionExecutionPlan(
       policyDecision,
       request.toolInput,
       this.options.executionPlans?.validate,
     );
     if (policyDecision.behavior === 'deny') {
+      this.recordPermissionMark(input, request, permissionMarkFromCheckDecision(policyDecision));
       this.logEnforcement(input, request, {
         policy_behavior: 'deny',
         gate_result: 'blocked',
@@ -521,6 +566,7 @@ export class LocalTurnPermissionGate {
     }
     const approvalDecision = toApprovalDecision(policyDecision, input.preToolPermission);
     if (!approvalDecision) {
+      this.recordPermissionMark(input, request, permissionMarkFromCheckDecision(policyDecision));
       applyExecutionPlan(input.toolContext, executionPlan);
       this.logEnforcement(input, request, {
         policy_behavior: 'allow',
@@ -546,6 +592,17 @@ export class LocalTurnPermissionGate {
   ): Promise<{ readonly block: true; readonly reason: string } | undefined> {
     const { input, request, decision, pluginDecision, executionPlan } = resolution;
     if (canPluginAutoApprove(pluginDecision, decision)) {
+      // §4: the hook's auto-approval answered the prompt — the hook decided.
+      this.recordPermissionMark(
+        input,
+        request,
+        permissionMarkFromDecision(decision, {
+          decision: 'allow',
+          decidedBy: 'hook',
+          ruleKind: null,
+          reason: pluginDecision.reason?.trim() || 'plugin hook',
+        }),
+      );
       applyExecutionPlan(input.toolContext, executionPlan);
       this.logEnforcement(input, request, {
         policy_behavior: 'ask',
@@ -558,8 +615,42 @@ export class LocalTurnPermissionGate {
       });
       return undefined;
     }
-    const approval = await this.requestApproval(input, request, decision);
-    if (approval === 'deny') {
+    const outcome = await this.requestApprovalOutcome(input, request, decision);
+    if (outcome.kind === 'unanswered') {
+      // §4: no answer ever arrived — a host that cannot prompt, or a failed
+      // approval owner. Fail-closed deny attributed to the user channel.
+      this.recordPermissionMark(
+        input,
+        request,
+        permissionMarkFromDecision(decision, {
+          decision: 'deny',
+          decidedBy: 'user',
+          ruleKind: null,
+          reason: `unanswered: ${outcome.cause}`,
+        }),
+      );
+      this.logEnforcement(input, request, {
+        policy_behavior: 'ask',
+        gate_result: 'blocked',
+        decision_source: 'approval_or_abort',
+        approval_decision: 'deny',
+        unanswered: outcome.cause,
+        rewrite_applied: false,
+      });
+      return permissionBlock(request.toolName, decision.reason, 'user');
+    }
+    const approval = outcome.reply;
+    if (approval === 'deny' || approval === 'denyAlways') {
+      this.recordPermissionMark(
+        input,
+        request,
+        permissionMarkFromDecision(decision, {
+          decision: 'deny',
+          decidedBy: 'user',
+          ruleKind: approval === 'denyAlways' ? 'global' : null,
+          reason: permissionReplyReason(approval, input),
+        }),
+      );
       this.logEnforcement(input, request, {
         policy_behavior: 'ask',
         gate_result: 'blocked',
@@ -567,10 +658,18 @@ export class LocalTurnPermissionGate {
         approval_decision: approval,
         rewrite_applied: false,
       });
-      return input.toolContext.parentToolCallId
-        ? userDeniedBlock(request.toolName, decision.reason)
-        : permissionBlock(request.toolName, decision.reason, 'user');
+      return permissionBlock(request.toolName, decision.reason, 'user');
     }
+    this.recordPermissionMark(
+      input,
+      request,
+      permissionMarkFromDecision(decision, {
+        decision: 'allow',
+        decidedBy: 'user',
+        ruleKind: approval === 'allowAlways' ? 'global' : null,
+        reason: approval === 'allowAlways' ? 'allow_always' : 'allow_once',
+      }),
+    );
     applyExecutionPlan(input.toolContext, executionPlan);
     this.logEnforcement(input, request, {
       policy_behavior: 'ask',
@@ -585,7 +684,7 @@ export class LocalTurnPermissionGate {
   }
 
   private logEnforcement(
-    input: Parameters<typeof observePtcChildPermission>[1],
+    input: { readonly sessionId: string; readonly turnId: string },
     request: PermissionToolRequest,
     fields: Readonly<Record<string, unknown>>,
   ): void {
@@ -599,8 +698,6 @@ export class LocalTurnPermissionGate {
       },
       'permission.enforcement',
     );
-    // Every final decision passes here; a run_code child also gets its PTC line.
-    observePtcChildPermission(this.options, input, request, fields);
   }
 
   private requestApproval(
@@ -615,7 +712,7 @@ export class LocalTurnPermissionGate {
     },
     request: PermissionToolRequest,
     decision: Extract<LocalTurnPermissionDecision, { readonly behavior: 'ask' }>,
-  ): Promise<'allowOnce' | 'allowAlways' | 'deny'> {
+  ): Promise<'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways'> {
     const approval = this.options.approval;
     if (!approval || typeof approval.request !== 'function') {
       assertAgentHostCapabilityAvailable('permission-approval-owner', false);
@@ -632,33 +729,137 @@ export class LocalTurnPermissionGate {
       reason: decision.reason,
       ruleContents,
       ...(decision.ruleMatchers ? { ruleMatchers: decision.ruleMatchers } : {}),
+      ...(decision.bypassImmune ? { bypassImmune: true } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
-      ...ptcApprovalContext(input.toolContext),
     });
+  }
+
+  /**
+   * §4-aware approval await: a thrown owner (a host that cannot prompt at
+   * all, or a broken approval pipeline) maps to an `unanswered` deny instead
+   * of aborting the whole turn, matching the fail-closed §4.1 row
+   * `unanswered: <no_prompt|error>`.
+   */
+  private async requestApprovalOutcome(
+    input: BeforeToolCallInput,
+    request: PermissionToolRequest,
+    decision: Extract<LocalTurnPermissionDecision, { readonly behavior: 'ask' }>,
+  ): Promise<
+    | { readonly kind: 'reply'; readonly reply: 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways' }
+    | { readonly kind: 'unanswered'; readonly cause: 'no_prompt' | 'error' | 'cancelled' }
+  > {
+    try {
+      return { kind: 'reply', reply: await this.requestApproval(input, request, decision) };
+    } catch (error) {
+      // A wait torn down by the Turn's own abort was cancelled, not failed.
+      if (input.signal?.aborted === true) return { kind: 'unanswered', cause: 'cancelled' };
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        kind: 'unanswered',
+        cause: isNoPromptHostError(message) ? 'no_prompt' : 'error',
+      };
+    }
+  }
+
+  /** §4: record the final mark for this tool call onto the per-turn sink. */
+  private recordPermissionMark(
+    input: BeforeToolCallInput,
+    request: PermissionToolRequest,
+    mark: RuntimePermissionMark | undefined,
+  ): void {
+    if (!mark) return;
+    input.permissionMarks?.record(request.toolCallId, mark);
   }
 }
 
-function ptcApprovalContext(
-  context: BeforeToolCallContext,
-): Pick<
-  Parameters<LocalTurnPermissionApprovalOwner['request']>[0],
-  'parentToolCallId' | 'parentToolDescription'
-> {
-  if (!context.parentToolCallId) return {};
-  // A denied child fails only that call and the program keeps running, as a
-  // native denial does, so the ask no longer sets `stopPtcOnDeny` (it only
-  // relabelled the deny button as "deny and stop").
+/**
+ * §4 mark fields carried on a decision, as a spreadable bag. Returns an
+ * empty object when the decision carries no attribution (the spread must
+ * not blanket the target with `undefined` keys).
+ */
+function markAttributionFields(
+  decision: LocalTurnPermissionDecision,
+): Pick<LocalTurnPermissionDecision, 'decidedBy' | 'ruleKind' | 'mode'> | Record<string, never> {
+  if (decision.decidedBy === undefined) return {};
+  return { decidedBy: decision.decidedBy, ruleKind: decision.ruleKind, mode: decision.mode };
+}
+
+/**
+ * Wire mark for an outcome the CHECK itself decided (allow/deny without any
+ * prompt): the decision's own attribution plus its rendered reason. An
+ * `ask` reaching here would be a logic error upstream — no mark is
+ * fabricated for it.
+ */
+function permissionMarkFromCheckDecision(
+  decision: LocalTurnPermissionDecision,
+): RuntimePermissionMark | undefined {
+  if (decision.behavior === 'ask') return undefined;
+  if (decision.decidedBy === undefined || decision.mode === undefined) return undefined;
   return {
-    parentToolCallId: context.parentToolCallId,
-    ...(context.parentDescription ? { parentToolDescription: context.parentDescription } : {}),
+    decision: decision.behavior === 'deny' ? 'deny' : 'allow',
+    decidedBy: decision.decidedBy,
+    ruleKind: decision.ruleKind ?? null,
+    mode: decision.mode,
+    // The wire parser drops a mark with an empty reason; keep it whole.
+    reason: decision.reason.trim() || `${decision.decidedBy} ${decision.behavior}`,
   };
+}
+
+/**
+ * Build the wire mark for a resolved call. The decision supplies the check
+ * attribution (`decidedBy`/`ruleKind`/`mode`); `overrides` re-attribute the
+ * outcome when someone other than the check decided (hook, user reply,
+ * unanswered). Without a check mode there is no honest mark — the call
+ * ships without one.
+ */
+function permissionMarkFromDecision(
+  decision: LocalTurnPermissionDecision,
+  overrides: {
+    decision: RuntimePermissionMark['decision'];
+    decidedBy: RuntimePermissionMark['decidedBy'];
+    ruleKind: RuntimePermissionMark['ruleKind'];
+    reason: string;
+  },
+): RuntimePermissionMark | undefined {
+  if (decision.mode === undefined) return undefined;
+  return {
+    decision: overrides.decision,
+    decidedBy: overrides.decidedBy,
+    ruleKind: overrides.ruleKind,
+    mode: decision.mode,
+    reason: overrides.reason,
+  };
+}
+
+/**
+ * §4.1 reason token for a deny-side approval reply. A deny that arrives
+ * with the turn signal already aborted was never answered by the user —
+ * the wait was cancelled out from under the ask.
+ */
+function permissionReplyReason(
+  reply: 'deny' | 'denyAlways',
+  input: { readonly signal?: AbortSignal },
+): string {
+  if (input.signal?.aborted === true) return 'unanswered: cancelled';
+  return reply === 'denyAlways' ? 'reject_always' : 'reject_once';
+}
+
+function isNoPromptHostError(message: string): boolean {
+  return (
+    message.includes('HOST_CAPABILITY_UNAVAILABLE') ||
+    message.includes('permission-approval-owner')
+  );
 }
 
 function preToolHookAllowsWithoutApproval(
   input: BeforeToolCallInput,
   decision: Extract<LocalTurnPermissionDecision, { readonly behavior: 'ask' }>,
 ): boolean {
+  // A bypass-immune ask is owned by the user-facing approval flow; a
+  // PreToolUse allow may not answer it even when the ask would otherwise be
+  // hook-eligible.
+  if (decision.bypassImmune === true) return false;
   return (
     input.preToolPermission?.behavior === 'allow' && decision.hookAutoApprovalEligible === true
   );
@@ -679,9 +880,8 @@ async function checkPermissionDecision(
   source: LocalTurnPermissionDecisionSource,
   input: BeforeToolCallInput,
   request: PermissionToolRequest,
-  nativeDeleteSnapshot?: boolean,
 ): Promise<LocalTurnPermissionDecision> {
-  return validatePermissionDecision(
+  const decision = validatePermissionDecision(
     await source.check({
       sessionId: input.sessionId,
       turnId: input.turnId,
@@ -690,14 +890,35 @@ async function checkPermissionDecision(
       toolName: request.toolName,
       toolInput: request.toolInput,
       trustedExactWritePaths: [...(input.trustedExactWritePaths ?? [])],
-      ...(input.sessionOwnedReadablePaths
-        ? { sessionOwnedReadablePaths: [...input.sessionOwnedReadablePaths] }
-        : {}),
-      ...(nativeDeleteSnapshot !== undefined ? { nativeDeleteSnapshot } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       ...(input.channelContext ? { channelContext: input.channelContext } : {}),
     }),
   );
+  return withLedgerMarkAttribution(decision, input, request);
+}
+
+/**
+ * §4 attribution fallback. The production decision source (the hosted
+ * capabilities adapter) passes the facade's attribution through on the
+ * decision — that always wins. The facade ALSO records each final verdict
+ * in a per-process ledger keyed by `(sessionId, toolName, input)` for
+ * sources that strip the fields. Permission checks are strictly sequential
+ * per session (pi awaits `prepareToolCall` per tool call, even in the
+ * parallel batch executor), so the entry taken here right after this call's
+ * check resolved is exactly this call's verdict. The entry is taken on
+ * every check — including when the decision already carries the fields —
+ * so the primary path drains the ledger instead of leaving it to eviction.
+ */
+function withLedgerMarkAttribution(
+  decision: LocalTurnPermissionDecision,
+  input: BeforeToolCallInput,
+  request: PermissionToolRequest,
+): LocalTurnPermissionDecision {
+  const attribution = takeLocalPermissionVerdict(
+    localPermissionVerdictKey(input.sessionId, request.toolName, request.toolInput),
+  );
+  if (decision.decidedBy !== undefined && decision.mode !== undefined) return decision;
+  return attribution ? { ...decision, ...attribution } : decision;
 }
 
 function toApprovalDecision(
@@ -768,6 +989,9 @@ function canPluginAutoApprove(
   pluginDecision: PluginPermissionDecision,
   productDecision: Extract<LocalTurnPermissionDecision, { readonly behavior: 'ask' }>,
 ): boolean {
+  // Bypass-immune asks are never hook-approvable — not even by an
+  // `any_prompt` auto-approval (§3: only the user answers them).
+  if (productDecision.bypassImmune === true) return false;
   if (pluginDecision.behavior !== 'allow') return false;
   if (pluginDecision.autoApproval === 'any_prompt') return true;
   return (
@@ -811,17 +1035,10 @@ function permissionBlock(
   };
 }
 
-function userDeniedBlock(
-  toolName: string,
-  reason: string,
-): { readonly block: true; readonly reason: string; readonly approvalStatus: 'denied' } {
-  return { ...permissionBlock(toolName, reason, 'user'), approvalStatus: 'denied' };
-}
-
 async function requestApproval(
   owner: LocalTurnPermissionApprovalOwner,
   input: Parameters<LocalTurnPermissionApprovalOwner['request']>[0],
-): Promise<'allowOnce' | 'allowAlways' | 'deny'> {
+): Promise<'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways'> {
   return validateApprovalDecision(await owner.request(input));
 }
 
@@ -829,7 +1046,32 @@ function validatePermissionDecision(decision: unknown): LocalTurnPermissionDecis
   if (!isPermissionDecisionObject(decision)) {
     throw new TypeError('Permission decision source returned an invalid decision.');
   }
-  return decision as LocalTurnPermissionDecision;
+  return withValidMarkAttribution(decision as LocalTurnPermissionDecision);
+}
+
+/**
+ * §4 attribution is diagnostic, never part of the decision's validity: a
+ * malformed `decidedBy` / `ruleKind` / `mode` drops the attribution (the
+ * call then ships without a mark, or the ledger fills it) instead of
+ * failing the whole check and the Turn with it.
+ */
+function withValidMarkAttribution(
+  decision: LocalTurnPermissionDecision,
+): LocalTurnPermissionDecision {
+  const { decidedBy, ruleKind, mode } = decision;
+  if (decidedBy === undefined && ruleKind === undefined && mode === undefined) return decision;
+  if (
+    isPermissionMarkDecidedBy(decidedBy) &&
+    (ruleKind === undefined || ruleKind === null || isPermissionMarkRuleKind(ruleKind)) &&
+    isPermissionMarkMode(mode)
+  ) {
+    return decision;
+  }
+  const stripped: Record<string, unknown> = { ...decision };
+  delete stripped.decidedBy;
+  delete stripped.ruleKind;
+  delete stripped.mode;
+  return stripped as LocalTurnPermissionDecision;
 }
 
 function isPermissionDecisionObject(decision: unknown): decision is Record<PropertyKey, unknown> {
@@ -841,6 +1083,7 @@ function isPermissionDecisionObject(decision: unknown): decision is Record<Prope
   const ruleContents = Reflect.get(decision, 'ruleContents');
   const ruleMatchers = Reflect.get(decision, 'ruleMatchers');
   const hookAutoApprovalEligible = Reflect.get(decision, 'hookAutoApprovalEligible');
+  const bypassImmune = Reflect.get(decision, 'bypassImmune');
   return (
     isPermissionBehavior(behavior) &&
     typeof reason === 'string' &&
@@ -848,7 +1091,27 @@ function isPermissionDecisionObject(decision: unknown): decision is Record<Prope
     legacyRewrite === undefined &&
     isOptionalRuleContents(ruleContents) &&
     isOptionalRuleMatchers(ruleMatchers, ruleContents) &&
-    isOptionalBoolean(hookAutoApprovalEligible)
+    isOptionalBoolean(hookAutoApprovalEligible) &&
+    (bypassImmune === undefined || bypassImmune === true)
+  );
+}
+
+function isPermissionMarkDecidedBy(value: unknown): boolean {
+  return value === 'classifier' || value === 'rule' || value === 'mode';
+}
+
+function isPermissionMarkRuleKind(value: unknown): boolean {
+  return value === 'builtin' || value === 'session' || value === 'agent' || value === 'global';
+}
+
+function isPermissionMarkMode(value: unknown): boolean {
+  return (
+    value === 'default' ||
+    value === 'auto' ||
+    value === 'bypassPermissions' ||
+    value === 'acceptEdits' ||
+    value === 'dontAsk' ||
+    value === 'off'
   );
 }
 
@@ -909,8 +1172,15 @@ function isPermissionRuleActions(
   return value.every((action) => typeof action === 'string' && validActions.has(action));
 }
 
-function validateApprovalDecision(decision: unknown): 'allowOnce' | 'allowAlways' | 'deny' {
-  if (decision !== 'allowOnce' && decision !== 'allowAlways' && decision !== 'deny') {
+function validateApprovalDecision(
+  decision: unknown,
+): 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways' {
+  if (
+    decision !== 'allowOnce' &&
+    decision !== 'allowAlways' &&
+    decision !== 'deny' &&
+    decision !== 'denyAlways'
+  ) {
     throw new TypeError('Permission approval owner returned an invalid decision.');
   }
   return decision;
@@ -941,7 +1211,6 @@ function applyExecutionPlan(
     }
   }
   Object.assign(target, plan.effectiveInput);
-  withPermissionExecutionPlan(target, plan);
   if (context.args !== target) Object.assign(context, { args: target });
 }
 

@@ -1,4 +1,9 @@
 import { createRequire } from "node:module";
+
+// W10: the durable provider is the product DEFAULT; this suite exercises the
+// runtime-composition surface over a virtual "/data" path (mocked fs), so it
+// pins the explicit jsonl compatibility mode for its fixtures.
+process.env.MCODE_HISTORY_PROVIDER = "jsonl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   LLMRetryEvent,
@@ -3877,6 +3882,7 @@ function defaultCompatibility(
       executor: { reportFailure: vi.fn() },
     } as never,
     generatedAssets: {
+      compressModelImage: vi.fn(() => undefined),
       registerGeneratedAsset: vi.fn(),
       ...generatedAssets,
     },
@@ -3898,11 +3904,10 @@ function defaultCompatibility(
     },
     backgroundTasks: {
       bindRuntimeOwner: vi.fn(),
-      bindNotificationReceipts: vi.fn(),
       recover: vi.fn(async () => undefined),
       pollRecovery: vi.fn(async () => false),
       // No cascade in this fixture: `begin` declining keeps today's stop behaviour.
-      userStop: { begin: vi.fn(() => undefined) },
+      userStop: { begin: vi.fn(async () => undefined) },
     },
     conversation: {
       bind: async (service) => {

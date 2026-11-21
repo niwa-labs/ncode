@@ -1,9 +1,8 @@
-import { parseRequestMediaConfig } from '@mavis/config';
-
 import {
   initializeBrowserUseService,
   type BrowserUseService,
 } from '../../service/browser-use/index.js';
+import { parseRequestMediaConfig, type RequestMediaSettings } from '@mavis/config';
 
 type BrowserUseServiceOptions = Parameters<typeof initializeBrowserUseService>[0];
 
@@ -21,7 +20,8 @@ export interface RuntimeBrowserUseOptions {
         readonly configBuilder: {
           config(): {
             readonly beta?: RuntimeBrowserUseBetaConfig;
-            readonly requestMedia?: unknown;
+            /** М1: parsed `requestMedia` block; the screenshot encoder reads its image limits. */
+            readonly requestMedia?: RequestMediaSettings;
           };
         };
       };
@@ -56,20 +56,20 @@ export function createRuntimeBrowserUseComposition(
         ...(beta?.filePanelBrowser === undefined
           ? {}
           : { filePanelBrowserEnabled: beta.filePanelBrowser }),
-        ...(beta?.browserUseTooling === undefined
-          ? {}
-          : { browserUseToolingEnabled: beta.browserUseTooling }),
+        // OUR b3ae3514 decision (owner bug 2026-11-07), reverted by the sync
+        // wholesale: Browser tooling is available UNLESS explicitly disabled —
+        // an absent `beta.browserUseTooling` is not an opt-out. The e2e
+        // "daemon-shape catalog carries the browser tool" pin depends on it.
+        browserUseToolingEnabled: beta?.browserUseTooling !== false,
       };
     },
+    // М1: the user's `requestMedia` block (parsed into the conversation
+    // config) drives the screenshot encoding; unset keys fall back to the
+    // strictest known provider limits inside parseRequestMediaConfig.
     getImageEncoding: () => {
-      let requestMedia: unknown;
-      try {
-        requestMedia =
-          options.compatibility.agentHost.preparation.configBuilder.config().requestMedia;
-      } catch {
-        requestMedia = undefined;
-      }
-      const { image } = parseRequestMediaConfig(requestMedia);
+      const { image } = parseRequestMediaConfig(
+        options.compatibility.agentHost.preparation.configBuilder.config().requestMedia,
+      );
       return {
         maxWidth: image.max_width,
         maxHeight: image.max_height,

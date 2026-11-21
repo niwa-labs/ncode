@@ -4,6 +4,11 @@ export {
   type CliSendMessageOptions,
   type CliServiceOptions,
 } from "./cli-service.js";
+export type {
+  AcpPermissionMode,
+  SessionPermissionModeEntry,
+  SetModeResult,
+} from "../service/permission/session-permission-mode.js";
 export {
   PermissionReply,
   QuestionnaireSelectionMode,

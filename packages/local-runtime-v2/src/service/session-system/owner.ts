@@ -37,6 +37,28 @@ import {
   type SessionHistoryLocationResolver,
   type SessionSystemCanonicalHistoryProvider,
 } from './messages/index.js';
+import {
+  createDurableSessionSystemCanonicalHistoryProvider,
+  isExplicitDurableHistoryProviderMode,
+  resolveHistoryProviderMode,
+  wrapSessionHistoryMutationForDurable,
+  type DurableHistoryStorage,
+} from './messages/history/durable-canonical-history-provider.js';
+// Wave 2 (canon 05 §2.5, item 2.1): the content-addressed image artifact
+// store of this runtime — the durable log stores references, bytes live once
+// under `<dataDir>/artifacts`.
+import {
+  ImageArtifactStore,
+  resolveArtifactsDir,
+} from './messages/history/image-artifact-store.js';
+import {
+  createDurableJsonlPublisher,
+  resolveDurableJsonlPublishingEnabled,
+  type DurableJsonlPublisher,
+  type DurableJsonlPublisherFactory,
+  type SessionPublishConflictInput,
+} from './messages/history/durable-jsonl-publisher.js';
+import { createLogger } from '@mavis/logging';
 import { createMessageRepository } from './messages/repo/drizzle.js';
 import { createSessionSourceProjectionRepository } from './messages/repo/source-query.js';
 import { createQueryCollapseProjector } from './query-collapse-projector.js';
@@ -65,7 +87,6 @@ import {
   type NativeSessionAgentDirectory,
 } from './sessions/support/native-record-factory.js';
 import type { SessionBackfillDiagnostics } from './sessions/lifecycle/record-service.js';
-import type { SessionToolCallModePolicy } from './sessions/support/tool-call-mode.js';
 import { SessionArtifactService } from './sessions/support/artifact-service.js';
 import { createPlanDocumentOwner } from './sessions/support/plan-document.js';
 import { SessionDeletionGate } from './sessions/lifecycle/deletion-gate.js';
@@ -110,8 +131,6 @@ export interface InitializeSessionSystemOptions {
   readonly defaultWorkspaceDir: () => string;
   readonly titlePolicy: SessionRecordServiceDeps['titlePolicy'];
   readonly resolveRequestedModel?: SessionRecordServiceDeps['resolveRequestedModel'];
-  /** Tool call mode for new Sessions and for Sessions after a committed summary compaction. */
-  readonly toolCallMode?: SessionToolCallModePolicy;
   readonly facts: SessionFactSink;
   readonly conversationFacts: SessionConversationFactSink;
   readonly compactionFacts?: SessionCompactionFactSink;
@@ -155,7 +174,25 @@ export interface InitializeSessionSystemOptions {
     createOwnerId(kind: 'queue-claim'): string;
     isOwnerAlive(ownerId: string): boolean | undefined;
   };
+  /**
+   * Ш1: the runtime's single durable-history storage (`services.ts` opens it
+   * only when `MCODE_HISTORY_PROVIDER=durable`). When present in durable
+   * mode, the canonical history is served by the durable provider on top of
+   * it; absent (or jsonl mode) keeps the exact legacy JSONL provider. The
+   * session-system `close()` disposes the injected storage.
+   */
+  readonly durableHistory?: DurableHistoryStorage;
+  /**
+   * W1 §3.4 (review round 1): observer for the foreign-rewrite-vs-unpublished-
+   * durable-tail conflict of the jsonl publisher. The product composition
+   * turns it into a `session.publish_conflict` global event (the window shows
+   * a banner-class warning); tests may inject a spy. Durable mode only.
+   */
+  readonly onSessionPublishConflict?: (input: SessionPublishConflictInput) => void;
 }
+
+/** Lifecycle + provider-selection seam of the session-system history composition. */
+const runtimeHistoryLog = createLogger('mcode:turn');
 
 /** One production graph over the shared AppDb; repositories never own the connection. */
 export function initializeSessionSystem(options: InitializeSessionSystemOptions) {
@@ -188,7 +225,7 @@ export function initializeSessionSystem(options: InitializeSessionSystemOptions)
   const queueFacts = new QueueCommittedFactHub(options.queueFacts);
   const stream = new SessionStreamService({ messages, nowMs });
   const queryCollapseState = createQueryCollapseState({ db: options.db, nowMs });
-  const { canonicalHistory, historyMutation, historyPersistence, llmCalls, reporting } =
+  const { canonicalHistory, historyMutation, historyPersistence, llmCalls, reporting, durableJsonlPublisher } =
     createSessionHistoryCapabilities(options, sessions, historyLocations, nowMs);
   const { legacy, onLegacyCleanupError } = createLegacySessionCapabilities({
     options,
@@ -256,7 +293,8 @@ export function initializeSessionSystem(options: InitializeSessionSystemOptions)
     onLegacyCleanupError,
     canonicalHistory,
     stream,
-    ...createSessionDirectoryOwners(historyLocations, sessions),
+    reports: createSessionReportsOwner(historyLocations, sessions),
+    snapshots: createSessionSnapshotsOwner(historyLocations, sessions),
   });
   const { agentProjection, conversationActions } = createAgentCapabilities({
     options,
@@ -342,8 +380,10 @@ export function initializeSessionSystem(options: InitializeSessionSystemOptions)
     queryCollapse: { state: queryCollapseState },
     ready,
     runStorageMaintenance: () => storageRetention.run(),
+    /** W1: the continuous durable→jsonl publisher; undefined in jsonl mode. */
+    durableJsonlPublisher,
     close: () => {
-      closePromise ??= closeSessionSystem(titles, stream);
+      closePromise ??= closeSessionSystem(titles, stream, options.durableHistory, durableJsonlPublisher);
       return closePromise;
     },
   };
@@ -404,7 +444,6 @@ function createSessionRecordService(input: {
       path.join(options.dataDir, 'sessions', sessionId, 'workspace'),
     ...(options.makeSessionId ? { makeSessionId: options.makeSessionId } : {}),
     ...(options.backfillDiagnostics ? { backfillDiagnostics: options.backfillDiagnostics } : {}),
-    ...(options.toolCallMode ? { toolCallMode: options.toolCallMode } : {}),
     nowMs,
   });
 }
@@ -447,26 +486,33 @@ function createSessionMetadataCapabilities(
   return { sessions, historyLocations, interactionMode, planDocuments };
 }
 
-function createSessionDirectoryOwners(
+
+function createSessionSnapshotsOwner(
   historyLocations: SessionHistoryLocationResolver,
   sessions: ReturnType<typeof createSessionRepository>,
 ) {
-  const locate = async (sessionId: string) => {
-    const session = await sessions.get(sessionId);
-    if (!session) throw new Error(`Session not found: ${sessionId}`);
-    return historyLocations.ensure(session);
-  };
   return {
-    reports: {
-      ensureDirectory: async (sessionId: string) => (await locate(sessionId)).reports,
-      inspectDirectory: async (sessionId: string) =>
-        (await historyLocations.inspectSession(sessionId))?.paths.reports,
+    resolveDirectory: async (sessionId: string) => {
+      const session = await sessions.get(sessionId);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      return (await historyLocations.ensure(session)).snapshots;
     },
-    snapshots: {
-      resolveDirectory: async (sessionId: string) => (await locate(sessionId)).snapshots,
-      inspectDirectory: async (sessionId: string) =>
-        (await historyLocations.inspectSession(sessionId))?.paths.snapshots,
+    inspectDirectory: async (sessionId: string) =>
+      (await historyLocations.inspectSession(sessionId))?.paths.snapshots,
+  };
+}
+function createSessionReportsOwner(
+  historyLocations: SessionHistoryLocationResolver,
+  sessions: ReturnType<typeof createSessionRepository>,
+) {
+  return {
+    ensureDirectory: async (sessionId: string) => {
+      const session = await sessions.get(sessionId);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      return (await historyLocations.ensure(session)).reports;
     },
+    inspectDirectory: async (sessionId: string) =>
+      (await historyLocations.inspectSession(sessionId))?.paths.reports,
   };
 }
 
@@ -527,7 +573,10 @@ function createLegacyMigrations(db: AppDb, nowMs: () => number) {
 }
 
 function createSessionHistoryCapabilities(
-  options: Pick<InitializeSessionSystemOptions, 'dataDir' | 'db'>,
+  options: Pick<
+    InitializeSessionSystemOptions,
+    'dataDir' | 'db' | 'durableHistory' | 'onSessionPublishConflict'
+  >,
   sessions: ReturnType<typeof createSessionRepository>,
   locations: SessionHistoryLocationResolver,
   nowMs: () => number,
@@ -542,22 +591,89 @@ function createSessionHistoryCapabilities(
   const ioLane = createSessionHistoryIoLane();
   const activity = createSessionHistoryActivity();
   const historyPersistence = createHistoryPersistenceRepository({ db: options.db });
-  const canonicalHistory = createSessionSystemCanonicalHistoryProvider({
-    dataDir: options.dataDir,
-    sessions,
-    locations,
-    legacyHistory: {
-      sources: createLegacyHistorySourceReader({
-        db: options.db,
-        readLedgerSnapshot: (sessionId) => releasedHistory.readLedgerSnapshot(sessionId),
-      }),
-      checkpoints: historyPersistence,
-    },
-    ioLane,
-    activity,
-    nowMs,
-  });
-  const historyMutation = createSessionHistoryMutationAdapter({
+  const legacyHistory = {
+    sources: createLegacyHistorySourceReader({
+      db: options.db,
+      readLedgerSnapshot: (sessionId) => releasedHistory.readLedgerSnapshot(sessionId),
+    }),
+    checkpoints: historyPersistence,
+  };
+  // Ш1: provider selection. W10 hybrid default is DURABLE; `jsonl` is the
+  // explicit compatibility mode. The durable provider requires the runtime
+  // composition to have opened the single durable-history storage: an
+  // EXPLICIT `MCODE_HISTORY_PROVIDER=durable` without it fails closed (the
+  // request cannot be honored — no silent downgrade, no implicit old-data
+  // writes); the W10 default without an injected storage keeps the jsonl
+  // fallback as the documented compatibility seam for non-product embedders
+  // (the product runtime always injects the storage).
+  const mode = resolveHistoryProviderMode();
+  // The durable→jsonl replication (W1 §3.2) is OPT-IN and OFF by default:
+  // durable sessions read entirely from the durable log, the publisher
+  // exists for legacy jsonl readers only (`MCODE_PUBLISH_JSONL=on`).
+  const publishJsonl = resolveDurableJsonlPublishingEnabled();
+  // W1 (architecture §3.2), opt-in: the composition creates the continuous
+  // jsonl publisher over the SAME storage/locations/lane the provider uses
+  // only when the knob is on. The publisher reproduces every durable commit
+  // onto `messages.jsonl` (append after the durability flush, full-rewrite
+  // on replace/compact/rewind) so legacy jsonl readers stay current; without
+  // it no jsonl is written for durable sessions.
+  const durablePublisherFactory: DurableJsonlPublisherFactory | undefined = publishJsonl
+    ? (source) =>
+        createDurableJsonlPublisher({
+          sessions,
+          locations,
+          ioLane,
+          durable: source,
+          ...(options.onSessionPublishConflict
+            ? { onSessionPublishConflict: options.onSessionPublishConflict }
+            : {}),
+          nowMs,
+        })
+    : undefined;
+  const durable =
+    options.durableHistory && mode === 'durable'
+      ? createDurableSessionSystemCanonicalHistoryProvider({
+          storage: options.durableHistory,
+          dataDir: options.dataDir,
+          sessions,
+          locations,
+          legacyHistory,
+          ioLane,
+          activity,
+          nowMs,
+          // Wave 2 (canon 05 §2.5, item 2.1): every append offloads inline
+          // image blocks into `<dataDir>/artifacts/<sha256>.<ext>` — the log
+          // stores the reference blocks and `offload` events, never base64.
+          imageArtifacts: new ImageArtifactStore({ artifactsDir: resolveArtifactsDir(options.dataDir) }),
+          ...(durablePublisherFactory ? { publisherFactory: durablePublisherFactory } : {}),
+        })
+      : undefined;
+  if (mode === 'durable' && !options.durableHistory) {
+    if (isExplicitDurableHistoryProviderMode()) {
+      throw new Error(
+        'MCODE_HISTORY_PROVIDER=durable requires the runtime composition to open the durable-history storage; refusing to serve the jsonl provider (no silent downgrade)',
+      );
+    }
+    runtimeHistoryLog.warn(
+      'durable history provider is the W10 default but no durable-history storage was injected; using the jsonl compatibility provider',
+    );
+  } else if (durable) {
+    runtimeHistoryLog.info('durable canonical history provider selected', {
+      directory: options.durableHistory?.directory,
+    });
+  }
+  const canonicalHistory: SessionSystemCanonicalHistoryProvider =
+    durable ??
+    createSessionSystemCanonicalHistoryProvider({
+      dataDir: options.dataDir,
+      sessions,
+      locations,
+      legacyHistory,
+      ioLane,
+      activity,
+      nowMs,
+    });
+  const fileMutation = createSessionHistoryMutationAdapter({
     dataDir: options.dataDir,
     sessions,
     locations,
@@ -566,7 +682,22 @@ function createSessionHistoryCapabilities(
     onRewindCommitted: (input) => llmCalls.pruneAfterRewind({ sessionId: input.sessionId }),
     onForkCommitted: (input) => llmCalls.copySnapshotCompanions(input),
   });
-  return { canonicalHistory, historyMutation, historyPersistence, llmCalls, reporting };
+  // Durable mode: full-rewrite mutations keep their JSONL publication and are
+  // mirrored into the durable log (fail-closed). Since W1 the continuous
+  // DurableJsonlPublisher keeps `messages.jsonl` current after every durable
+  // commit, so the wrapper's pre-mutation publish degrades to a cheap
+  // catch-up flush (I-PUB-1) and the mirror sees a fresh file.
+  const historyMutation = durable
+    ? wrapSessionHistoryMutationForDurable(fileMutation, durable)
+    : fileMutation;
+  return {
+    canonicalHistory,
+    historyMutation,
+    historyPersistence,
+    llmCalls,
+    reporting,
+    durableJsonlPublisher: durable?.publisher,
+  };
 }
 
 function queueRuntimeOwnerOptions(
@@ -666,9 +797,6 @@ function createAgentCapabilities(input: {
     compactionFacts: composeCompactionFactSink(input.llmCalls, input.options.compactionFacts),
     ...(input.options.compactionMetrics
       ? { compactionMetrics: input.options.compactionMetrics }
-      : {}),
-    ...(input.options.toolCallMode
-      ? { toolCallMode: { policy: input.options.toolCallMode, sessions: input.sessions } }
       : {}),
     nowMs: input.nowMs,
   });
@@ -800,9 +928,17 @@ export type SessionSystemOwner = ReturnType<typeof initializeSessionSystem>;
 async function closeSessionSystem(
   titles: Pick<SessionTitleService, 'close'>,
   stream: Pick<SessionStreamService, 'dispose'>,
+  durableHistory?: DurableHistoryStorage,
+  durableJsonlPublisher?: DurableJsonlPublisher,
 ): Promise<void> {
   const [titleResult] = await Promise.allSettled([titles.close()]);
   stream.dispose();
+  // W1: drain the jsonl publisher (flush dirty sessions) while the worker is
+  // still open, then dispose the ONE durable storage it rode.
+  await durableJsonlPublisher?.dispose();
+  // Ш1: the runtime's single durable storage rides the session-system close
+  // (turn-system owners close before the session system in the lifecycle).
+  await durableHistory?.dispose();
   if (titleResult?.status === 'rejected') throw titleResult.reason;
 }
 

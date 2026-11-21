@@ -1,4 +1,6 @@
-# Source status
+# Upstream public source status
+
+This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
 
 The current source target is **TUI 0.7.2**. This repository contains the terminal TUI, headless CLI, ACP implementation, and the public distribution tooling around them.
 

@@ -1,7 +1,6 @@
 import {
   CloudSessionReader,
   managedBackendRoutingHeaders,
-  resolveLocalBashShell,
 } from "@mavis/agent-tools/desktop";
 import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import type {
@@ -13,9 +12,10 @@ import type {
   PiLLMRequestObserver,
 } from "@mavis/agent-core/pi-turn-runner";
 import type { AgentMessage } from "@mavis/agent-core/protocol/agent-message";
-import { getConfig } from "@mavis/config";
+import { getConfig, type SandboxFilesystemMode } from "@mavis/config";
 import type { RuntimeConversation } from "@mavis/conversation-contract";
 import type { CronStorePort } from "@mavis/cron";
+import { createLogger } from "@mavis/logging";
 import type { GlobalEventInput } from "@mavis/shared/global-events";
 import { join } from "node:path";
 import type { AgentReferenceResolver } from "../agent/port.js";
@@ -28,7 +28,6 @@ import { stopBackgroundLocalBashTask } from "../background-task/bash-runner.js";
 import { closeLocalBackgroundTaskDelivery } from "../background-task/delivery.js";
 import { createLocalBackgroundTaskService } from "../background-task/index.js";
 import {
-  abortAdmittedBackgroundTask,
   beginBackgroundTaskShutdown,
   drainBackgroundTasks,
 } from "../background-task/lifecycle.js";
@@ -67,6 +66,7 @@ import {
 import { createLocalFileApiGitChangesCoordinator } from "../files/api.js";
 import { LocalHookService } from "../hooks/api.js";
 import { ensureBinInProcessPath } from "../infra/ensure-bin-in-path.js";
+import { ensurePathIntegration } from "../infra/ensure-path-integration.js";
 import { ensureRmShim } from "../infra/ensure-rm-shim.js";
 import {
   ensureTrashScript,
@@ -221,6 +221,8 @@ import {
   readLocalPermissionMode,
   type LocalRuntimeApiHostOptions,
 } from "./host-helpers.js";
+import type { LocalNativeTaskWaits } from "./native-task-wait.js";
+import type { LocalSessionPermissionModeRegistry } from "../permissions/session-permission-mode-port.js";
 import {
   isReadOnlyLegacySession,
   markMigratedLegacySessionDeleted,
@@ -289,6 +291,10 @@ import {
 
 const DEFAULT_LOCAL_AGENT_NAME = "mavis";
 const DEFAULT_LOCAL_AGENT_DISPLAY_NAME = "Mavis";
+
+/** Spec §4 registry: `mcode:runtime` is the local-runtime namespace. */
+const log = createLogger("mcode:runtime");
+
 export type { LocalRuntimeApiHostOptions };
 export class LocalRuntimeApiHost {
   public readonly controller: LocalSessionController;
@@ -302,8 +308,35 @@ export class LocalRuntimeApiHost {
   public hasPendingUserSteeringProbe?: (
     sessionId: string,
   ) => Promise<boolean> | boolean;
+  /**
+   * Native task-wait binding (verdict 09 §1.4), late-bound by the V2 runtime
+   * once its durable steering composition exists (V1-only/jsonl hosts leave
+   * it unset — the task tool keeps the legacy always-inline foreground
+   * contract and never releases on owner input).
+   */
+  public nativeTaskWaits?: LocalNativeTaskWaits;
+  /**
+   * Per-session permission-mode registry (spec §2.1), late-bound by the V2
+   * runtime (V1-only hosts leave it unset: Sessions without an entry follow
+   * the process permission mode exactly as before).
+   */
+  public sessionPermissionModes?: LocalSessionPermissionModeRegistry;
   /** Read-only projection from the V2 Pin owner for legacy Session responses. */
   public readSessionPinned?: (sessionId: string) => Promise<boolean>;
+  /**
+   * Process-local sandbox control, late-bound by the V2 runtime once its
+   * `LocalSandboxService` exists (V1-only hosts leave it unset and run no
+   * sandbox at all).
+   *
+   * The service owns both halves on purpose. `read` must report what the
+   * service actually enforces rather than what the config file says, and
+   * `apply` has to go through the service because a bare config write would
+   * persist a mode that no invocation is restricted by until the next restart.
+   */
+  public readSandboxFilesystemMode?: () => SandboxFilesystemMode | undefined;
+  public applySandboxFilesystemMode?: (
+    mode: SandboxFilesystemMode,
+  ) => Promise<SandboxFilesystemMode>;
   private legacyRuntime: LegacyHistoryReader | undefined;
   private readonly legacyOpencodeEnabled: boolean | undefined;
   private readonly runtimeMode: LocalRuntimeMode;
@@ -315,8 +348,6 @@ export class LocalRuntimeApiHost {
   public readonly metricsClient: LocalRuntimeApiHostOptions["metricsClient"];
   public readonly configGetter: () => LocalRuntimeConfig;
   public readonly shellFamily: LocalRuntimeApiHostOptions["shellFamily"];
-  /** TUI-only opt-out, frozen at startup rather than read from tool/session input. */
-  public readonly skipWindowsHardSafetyChecks: boolean;
   public readonly authContextGetter:
     | (() => LocalRuntimeAuthContext | undefined)
     | undefined;
@@ -326,6 +357,12 @@ export class LocalRuntimeApiHost {
         loginEpoch?: string,
       ) => void | Promise<void>)
     | undefined;
+  /**
+   * Profile label the owning daemon pinned for this host's data plane
+   * (`null` = the default profile); `undefined` when the embedder did not
+   * pin one — the account status then keeps the field off the wire.
+   */
+  public readonly daemonProfile: string | null | undefined;
   public readonly routingContextGetter:
     | (() => LocalRuntimeRoutingContext | undefined)
     | undefined;
@@ -467,21 +504,10 @@ export class LocalRuntimeApiHost {
     );
     this.surfaces = buildLocalRuntimeSurfaceCapabilities(this.runtimeMode);
     this.configGetter = options.configGetter ?? (() => getConfig());
-    // Use the executor's shell selection when the product entrypoint supplies no override.
-    // Keep POSIX provenance on Windows (Git Bash / sh) as well as native shells.
-    this.shellFamily =
-      options.shellFamily ??
-      (() => {
-        const shell = resolveLocalBashShell();
-        if (shell === 'powershell' || shell === 'pwsh') return 'powershell';
-        if (shell === 'bash' || shell === 'sh') return 'posix';
-        return undefined;
-      })();
-    this.skipWindowsHardSafetyChecks =
-      options.runtimeOwnerKind === 'tui' &&
-      this.configGetter().skipWindowsHardSafetyChecks === true;
+    this.shellFamily = options.shellFamily;
     this.authContextGetter = options.authContextGetter;
     this.authContextInvalidator = options.authContextInvalidator;
+    this.daemonProfile = options.daemonProfile;
     this.routingContextGetter = options.routingContextGetter;
     this.isContextWindowUsageEnabled =
       options.isContextWindowUsageEnabled ?? (() => false);
@@ -521,13 +547,12 @@ export class LocalRuntimeApiHost {
         this.metricsReporter,
       );
     }
-    const runtimeConfig = this.configGetter();
-    const runtimeDataDir = runtimeConfig.dataDir;
-    const nativeDelete = runtimeConfig.permission?.nativeDelete === true;
+    const runtimeDataDir = this.configGetter().dataDir;
     try {
-      // Keep explicit mavis-trash available in either mode.
       ensureTrashScript(runtimeDataDir);
-      if (!nativeDelete) ensureRmShim(runtimeDataDir);
+      // Seeded alongside the trash script: the shim is the execution-layer
+      // entry point that makes `rm` recoverable regardless of how it is reached.
+      ensureRmShim(runtimeDataDir);
     } catch (error) {
       const nodeError =
         error instanceof Error ? (error as NodeJS.ErrnoException) : undefined;
@@ -545,22 +570,19 @@ export class LocalRuntimeApiHost {
         "local_runtime.trash_seed_failed",
       );
     }
-    // The Runtime adds its bin directory only to its own process PATH and to the
-    // PATH of its children. It never edits the user's shell profiles or the
-    // Windows user PATH; the install script and `npm i -g` own that.
-    try {
-      ensureBinInProcessPath(runtimeDataDir);
-    } catch {
-      // PATH integration remains best-effort; deletion safety is gated separately above.
-    }
-    if (!nativeDelete) {
-      const trashRuntime = inspectTrashRuntime(runtimeDataDir);
-      if (!trashRuntime.available) {
-        logger.error(
-          { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
-          "local_runtime.trash_unavailable",
-        );
+    for (const ensure of [ensureBinInProcessPath, ensurePathIntegration]) {
+      try {
+        ensure(runtimeDataDir);
+      } catch {
+        // PATH integration remains best-effort; deletion safety is gated separately above.
       }
+    }
+    const trashRuntime = inspectTrashRuntime(runtimeDataDir);
+    if (!trashRuntime.available) {
+      logger.error(
+        { reason: trashRuntime.reason, ...trashRuntime.diagnostics },
+        "local_runtime.trash_unavailable",
+      );
     }
     this.messageStore = options.messageStore;
     const sessionStoreOptions = {
@@ -686,11 +708,6 @@ export class LocalRuntimeApiHost {
       () => this.configGetter().dataDir,
       this.nowMs,
       async (task, reason) => {
-        abortAdmittedBackgroundTask(
-          this,
-          task.taskId,
-          reason ?? (task.kind === 'bash' ? 'Background bash stopped' : 'Background task stopped'),
-        );
         await stopBackgroundLocalBashTask(task, reason);
         const childSessionId = task.metadata?.childSessionId;
         const subTurnId = task.metadata?.subTurnId;
@@ -1474,6 +1491,7 @@ export class LocalRuntimeApiHost {
   }
 
   private async closeResources(): Promise<void> {
+    const closeStartedAtMs = Date.now();
     let firstError: unknown;
     const cleanups: Array<() => void | Promise<void>> = [
       () => this.questionnaireAutoReplyScheduler.close(),
@@ -1488,7 +1506,16 @@ export class LocalRuntimeApiHost {
         firstError ??= error;
       }
     }
-    if (firstError !== undefined) throw firstError;
+    if (firstError !== undefined) {
+      log.error("runtime host close failed", { err: firstError, durationMs: Date.now() - closeStartedAtMs });
+      throw firstError;
+    }
+    log.info("runtime host closed", {
+      durationMs: Date.now() - closeStartedAtMs,
+      // Process result when the embedding CLI already fixed it before the
+      // runtime teardown; undefined is skipped by the sink (spec §1).
+      ...(process.exitCode !== undefined ? { exitCode: process.exitCode } : {}),
+    });
   }
   public ensureBuiltinAgents(): Promise<void> {
     return this.agentRuntimePort.ensureBuiltinAgents();
@@ -1527,6 +1554,46 @@ export class LocalRuntimeApiHost {
       ).syncAcceptEditsSeed();
     }
     return config.permissionMode;
+  }
+
+  /**
+   * Applies the process-local destructive-delete guard toggle. Fail-closed on
+   * the way back out too: a config the updater leaves without the field (or
+   * with a malformed one) still reports the enabled default, so the caller
+   * never renders "guard off" for a state that is not actually off.
+   */
+  public async setProcessLocalDangerousCommandGateEnabled(
+    enabled: boolean,
+  ): Promise<boolean> {
+    const { config } = await this.configUpdater({
+      field: "permission.dangerousCommandGateEnabled",
+      set: enabled,
+    });
+    return config.permission?.dangerousCommandGateEnabled !== false;
+  }
+
+  /**
+   * The filesystem level the sandbox service currently enforces, or
+   * `undefined` when this host runs no sandbox. Reporting a mode nothing
+   * enforces would let the UI claim a restriction that is not in effect, so
+   * "absent" is passed through instead of defaulted to the config value.
+   */
+  public getProcessLocalSandboxFilesystemMode(): SandboxFilesystemMode | undefined {
+    return this.readSandboxFilesystemMode?.();
+  }
+
+  /**
+   * Switches the sandbox filesystem level. Refuses on a host without a sandbox
+   * service instead of falling back to a config write: that write would look
+   * applied while the running backend kept enforcing the previous policy.
+   */
+  public async setProcessLocalSandboxFilesystemMode(
+    mode: SandboxFilesystemMode,
+  ): Promise<SandboxFilesystemMode> {
+    if (!this.applySandboxFilesystemMode) {
+      throw new Error("Sandbox is not available in this host");
+    }
+    return this.applySandboxFilesystemMode(mode);
   }
 
   /** Redacted process-local diagnostics owned by this concrete Runtime host. */
@@ -1571,6 +1638,15 @@ export class LocalRuntimeApiHost {
     });
     return {
       ...doctor,
+      // opus 2026-11-01, правка 5: the account status must answer WHOSE view
+      // it is. The daemon states the data plane it serves, the profile label
+      // it was pinned with and the loginEpoch of ITS auth session; the thin
+      // client compares that epoch against its own login before enriching
+      // /status with the client-side identity/quota, so two windows on two
+      // profiles can never blend one account's name with the other's quota.
+      dataDir: config.dataDir,
+      ...(this.daemonProfile !== undefined ? { profile: this.daemonProfile } : {}),
+      ...(authContext?.loginEpoch ? { loginEpoch: authContext.loginEpoch } : {}),
     };
   }
 

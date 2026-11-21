@@ -18,8 +18,11 @@ import type { LocalRuntimeToolContext } from '../../src/desktop/types.js';
 const piBashExecute = vi.hoisted(() => ({
   override: undefined as undefined | ((...args: unknown[]) => Promise<unknown>),
 }));
-vi.mock('@earendil-works/pi-coding-agent/tools', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent/tools')>();
+// OUR vendor 1.5.2 exposes the output-limit createBashTool from the package
+// root (the core ./tools variant has no output options), so the inner-execute
+// swap mocks the root specifier our production imports.
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>();
   return {
     ...actual,
     createBashTool: (...args: Parameters<typeof actual.createBashTool>) => {

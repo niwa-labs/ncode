@@ -1,4 +1,5 @@
 import { InvalidArgumentError, Option, type Command } from 'commander';
+import { assertValidProfileName } from '@mavis/config';
 import { parseHeadlessModelOverride } from '../headless/model-selection.js';
 import type { TuiMode } from '../tui/engine/public.js';
 import { parseTuiStartupEnvironment } from './environment.js';
@@ -13,6 +14,9 @@ import {
 
 const RETIRED_TOP_LEVEL_COMMAND_NAMES = new Set(['git', 'changes', 'projects']);
 
+const PROFILE_OPTION_DESCRIPTION =
+  'use a named profile with its own account, sessions, and settings';
+
 export interface TuiInteractiveLaunchRequest {
   readonly initialPrompt?: string;
   readonly model?: string;
@@ -23,9 +27,15 @@ export interface TuiInteractiveLaunchRequest {
   readonly resumeDraftAfterLogin?: boolean;
   readonly tuiMode?: TuiMode;
   readonly contextMode?: McodeContextMode;
-  /** `--ptc`: Programmatic Tool Calling for new Sessions in this process only. */
-  readonly ptc?: boolean;
   readonly lane?: string;
+  /** Explicit `--profile <name>`; travels with the request into the daemon targets. */
+  readonly profile?: string;
+  /**
+   * Explicit `--no-daemon`: the agent runs in THIS process (tool spawns are
+   * children of the caller — what isolated/wrapper runs need). Overrides
+   * MCODE_SERVER_MODE for this invocation.
+   */
+  readonly noDaemon?: boolean;
   readonly systemPromptOverrides?: SystemPromptOverrides;
 }
 
@@ -36,9 +46,28 @@ export interface RawTuiInteractiveOptions extends RawSystemPromptOptions {
   readonly resume?: string;
   readonly tuiMode?: TuiMode;
   readonly mode?: string;
-  readonly ptc?: boolean;
   readonly lane?: string;
+  readonly profile?: string;
   readonly env?: TuiBuildEnvironment;
+  /** Commander's negated `--no-daemon` flag (absent ⇒ true). */
+  readonly daemon?: boolean;
+}
+
+/**
+ * Add `--profile <name>` to a command.
+ *
+ * Commander does not inherit parent options, and the root program runs with
+ * `enablePositionalOptions()`, so every subcommand needs its own copy for
+ * `mcode exec --profile work` to parse. The value is validated here rather than
+ * at use time: a profile name becomes a home-directory segment, so rejecting
+ * `../../etc` before any action runs is a security boundary, not input tidying.
+ */
+export function applyProfileCliOption(command: Command): Command {
+  return command.addOption(createProfileOption());
+}
+
+function createProfileOption(): Option {
+  return new Option('--profile <name>', PROFILE_OPTION_DESCRIPTION).argParser(parseProfileOption);
 }
 
 export function applyInteractiveCliContract(
@@ -49,6 +78,7 @@ export function applyInteractiveCliContract(
     .argument('[prompt]', 'task to execute in the interactive TUI')
     .addOption(new Option('-m, --model <provider/model>', 'select the model for this Session only'))
     .addOption(new Option('--lane <lane>', 'managed backend lane for test or staging builds'))
+    .addOption(createProfileOption())
     .addOption(
       new Option('--session [id]', 'open a Session by id, or browse Sessions when id is omitted'),
     )
@@ -63,13 +93,13 @@ export function applyInteractiveCliContract(
         parseContextMode,
       ),
     )
+    .addOption(new Option('--resume <id>').hideHelp())
     .addOption(
       new Option(
-        '--ptc',
-        'use Programmatic Tool Calling (run_code) for Sessions this process creates or compacts; config.yaml is unchanged',
+        '--no-daemon',
+        'run the agent in this process without the daemon (overrides MCODE_SERVER_MODE)',
       ),
-    )
-    .addOption(new Option('--resume <id>').hideHelp());
+    );
   applySystemPromptCliOptions(configured).allowExcessArguments(false).showHelpAfterError();
   if (options.allowStartupEnvironmentSelection) {
     configured.addOption(
@@ -126,8 +156,9 @@ export function resolveInteractiveLaunchRequest(
     ...(commandOptions.continue ? { continueLatestSession: true } : {}),
     ...(commandOptions.tuiMode ? { tuiMode: commandOptions.tuiMode } : {}),
     ...(commandOptions.mode === 'lightweight' ? { contextMode: 'lightweight' as const } : {}),
-    ...(commandOptions.ptc === true ? { ptc: true } : {}),
     ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
+    ...(commandOptions.profile ? { profile: commandOptions.profile } : {}),
+    ...(commandOptions.daemon === false ? { noDaemon: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }
@@ -158,12 +189,6 @@ export function applyExecCliContract(command: Command): Command {
     .addOption(new Option('--session <id>', 'run in an existing active Session'))
     .addOption(new Option('--continue', 'continue the latest active Session in --cwd'))
     .addOption(
-      new Option(
-        '--ptc',
-        'use Programmatic Tool Calling (run_code) for Sessions this process creates or compacts; config.yaml is unchanged',
-      ),
-    )
-    .addOption(
       new Option('--config <path>', 'use an explicit Runtime config file for this process'),
     )
     .addOption(
@@ -189,6 +214,12 @@ export function applyExecCliContract(command: Command): Command {
     )
     .addOption(
       new Option('-o, --output-last-message <path>', 'write the final agent message to a file'),
+    )
+    .addOption(
+      new Option(
+        '--no-daemon',
+        'run the agent in this process without the daemon (overrides MCODE_SERVER_MODE)',
+      ),
     );
   return applySystemPromptCliOptions(configured);
 }
@@ -229,6 +260,14 @@ function parseContextMode(value: string): McodeContextMode {
 function parseStartupEnvironmentOption(value: string): TuiBuildEnvironment {
   try {
     return parseTuiStartupEnvironment(value);
+  } catch (error) {
+    throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function parseProfileOption(value: string): string {
+  try {
+    return assertValidProfileName(value);
   } catch (error) {
     throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
   }

@@ -33,7 +33,6 @@ export interface LocalTurnToolCatalogBuildInput {
   readonly userText?: string;
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
-  readonly ptcEnabled?: boolean;
 }
 
 export function createLocalTurnToolCatalogInput(
@@ -54,8 +53,6 @@ export function createLocalTurnToolCatalogInput(
     llmModel: readResolvedModel(context.model),
     effectivePluginSkills: readEffectivePluginSkills(context.agentConfig),
     ...(context.userInput ? { userText: context.userInput.text } : {}),
-    // The Session mode alone: the prompt prefix must not change with what started the Turn.
-    ...(context.agentConfig.ptc_enabled === true ? { ptcEnabled: true } : {}),
     ...(modelCapabilities ? { modelCapabilities } : {}),
     ...(agentProfile ? { agentProfile } : {}),
     ...(desktopCapabilities ? { desktopCapabilities } : {}),
@@ -153,16 +150,8 @@ function readConfigSelection(
     ...optionalStringArray(source, 'mcpServers'),
     ...optionalStringArray(source, 'skills'),
     ...optionalStringArray(source, 'extensionSkills'),
-    ...frozenSelectorVersion(source.frozenSelectorVersion),
   };
   return Object.keys(selection).length > 0 ? selection : undefined;
-}
-
-/** Diagnostics only: present when the profile was rendered from a Task snapshot. */
-function frozenSelectorVersion(
-  value: unknown,
-): Pick<NonNullable<LocalTurnAgentProfileFacts['configSelection']>, 'frozenSelectorVersion'> {
-  return value === 2 || value === 'legacy' ? { frozenSelectorVersion: value } : {};
 }
 
 function optionalStringArray(

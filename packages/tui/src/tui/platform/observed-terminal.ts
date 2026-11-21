@@ -37,6 +37,7 @@ export function createObservedTerminal(
       return terminal.outputPending;
     },
     drainOutput: () => terminal.drainOutput?.() ?? Promise.resolve(),
+    setProgramStatus: (status) => terminal.setProgramStatus?.(status),
     get focused() {
       return terminal.focused;
     },

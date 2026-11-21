@@ -19,7 +19,7 @@ import {
 } from '../compaction/context-compaction.js';
 import { AgentHostDependencyUnavailableError } from '../empty-dependencies.js';
 import { SemanticReplayRegistry } from '../events/semantic-replay-registry.js';
-import { resetPtcPrefixBaseline } from '../runner/policy/ptc-prefix-fingerprint.js';
+import { WriteLockWaitAbortedError } from '../../../../infra/db/write-transaction.js';
 import { captureSemanticSnapshot, estimateSemanticValueSize } from './semantic-identity.js';
 
 const DEFAULT_COMMITTED_HISTORY_REPLAYS = 2_048;
@@ -345,8 +345,6 @@ export class AgentHostCommittedHistoryWriter {
     compaction: CompactionEffects | undefined,
   ): Promise<void> {
     if (!metadata || !compaction) return;
-    // The replacement history is durable: the next Turn may assemble a new prefix.
-    resetPtcPrefixBaseline(context.sessionId);
     await compaction.lifecycle.completeCommittedHistory({
       context,
       attemptId: metadata.attemptId,
@@ -371,13 +369,21 @@ export class AgentHostCommittedHistoryWriter {
   private async failCommit(plan: CommitFailurePlan): Promise<never> {
     const { context, change, error, metadata, compaction } = plan;
     const failures = [...flattenFailure(error)];
-    await appendCapturedFailure(failures, () =>
-      this.dependencies.historyFailure?.fail({
-        sessionId: context.sessionId,
-        turnId: context.turnId,
-        ...(change.metadata === undefined ? {} : { metadata: change.metadata }),
-      }),
-    );
+    if (!isAbortCausedFailure(error)) {
+      // Owner-visible history-failure projection. An abort-caused failure (the
+      // user's Esc cancelled the commit pipeline) never poisons the Session:
+      // the write died because the user stopped the turn — the history stays
+      // intact and the Turn resolves aborted quietly; the masked
+      // "Conversation history could not be safely updated" surface is reserved
+      // for real refusals.
+      await appendCapturedFailure(failures, () =>
+        this.dependencies.historyFailure?.fail({
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          ...(change.metadata === undefined ? {} : { metadata: change.metadata }),
+        }),
+      );
+    }
     if (metadata && compaction) {
       await appendCapturedFailure(failures, () =>
         compaction.lifecycle.failCommittedHistory({
@@ -407,13 +413,17 @@ export class AgentHostCommittedHistoryWriter {
     if (!attemptId) throw error;
     const compaction = this.requireCompactionLifecycle();
     const failures = [...flattenFailure(error)];
-    await appendCapturedFailure(failures, () =>
-      this.dependencies.historyFailure?.fail({
-        sessionId: context.sessionId,
-        turnId: context.turnId,
-        metadata: Object.freeze({ compactionAttemptId: attemptId }),
-      }),
-    );
+    if (!isAbortCausedFailure(error)) {
+      // See failCommit: an abort-caused failure never marks the Session's
+      // history as failed — Esc is a clean cancel, not a history refusal.
+      await appendCapturedFailure(failures, () =>
+        this.dependencies.historyFailure?.fail({
+          sessionId: context.sessionId,
+          turnId: context.turnId,
+          metadata: Object.freeze({ compactionAttemptId: attemptId }),
+        }),
+      );
+    }
     await appendCapturedFailure(failures, () =>
       compaction.lifecycle.failCommittedHistory({
         context,
@@ -512,6 +522,19 @@ function asCompactionChange(change: IdentifiedHistoryChange): CanonicalHistoryCo
     reason: 'replaceMessages',
     operation: { ...change.operation, kind: 'compaction' },
   };
+}
+
+/**
+ * True when the failure IS the user's abort — not a history refusal. The
+ * cancel-before-mutation lock error carries the signal that killed the wait;
+ * a provider request/context abort surfaces as an `AbortError`. Only these
+ * skip the owner-visible history-failure projection: a REAL canonical
+ * refusal (a rejected plan, a failed validation) that merely happens to
+ * co-occur with an aborted turn still marks the Session — fail-closed.
+ */
+function isAbortCausedFailure(error: unknown): boolean {
+  if (error instanceof WriteLockWaitAbortedError) return true;
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 function validateCommittedSnapshot(snapshot: CanonicalHistorySnapshot, operationId: string): void {

@@ -1,23 +1,21 @@
 import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import type { MavisBuildEnv, MavisRegion } from '@mavis/config';
 import {
+  activateMcodeToolsHostEnvironment,
+  resolveBundledMcodeToolsCommandBinDir,
+  resolveBundledMcodeToolsResourceDir,
   startMcodeToolsAuthLeaseBroker,
   validateMcodeToolsResource,
   type McodeToolsAuthLeaseBroker,
   type McodeToolsBuildEnv,
   type McodeToolsHostAuthSession,
+  type McodeToolsHostEnvironmentActivation,
   type McodeToolsHostLogger,
   type ValidatedMcodeToolsResource,
 } from '@mavis/mcode-tools-host';
-
-import {
-  activateTuiMcodeToolsHostEnvironment,
-  type TuiMcodeToolsHostEnvironmentActivation,
-} from '../cli/mcode-tools-environment.js';
 
 export type McodeToolsReadinessCategory =
   | 'disabled'
@@ -53,29 +51,11 @@ export interface PrepareTuiMcodeToolsIntegrationDependencies {
   startBroker?: typeof startMcodeToolsAuthLeaseBroker;
   createRuntimeDir?: typeof createTuiMcodeToolsRuntimeDir;
   removeRuntimeDir?: typeof removeTuiMcodeToolsRuntimeDir;
-  activateEnvironment?: typeof activateTuiMcodeToolsHostEnvironment;
+  activateEnvironment?: typeof activateMcodeToolsHostEnvironment;
 }
 
 const NOOP_DISPOSE = async (): Promise<void> => undefined;
 const NOOP = (): void => undefined;
-
-export function resolveBundledMcodeToolsResourceDir(
-  entryUrl: string,
-  environment: Record<string, string | undefined> = process.env,
-): string {
-  if (environment.MAVIS_DEV_MCODE_TOOLS_MODE === 'published') {
-    const override = environment.MAVIS_DEV_MCODE_TOOLS_RESOURCE_DIR?.trim();
-    if (!override || !path.isAbsolute(override)) {
-      throw new Error('MAVIS_DEV_MCODE_TOOLS_RESOURCE_DIR must be an absolute path');
-    }
-    return path.normalize(override);
-  }
-  return path.join(path.dirname(fileURLToPath(entryUrl)), 'embedded', 'mcode-tools');
-}
-
-export function resolveBundledMcodeToolsCommandBinDir(entryUrl: string): string {
-  return path.join(path.dirname(fileURLToPath(entryUrl)), 'internal-bin');
-}
 
 export async function prepareTuiMcodeToolsIntegration(
   options: PrepareTuiMcodeToolsIntegrationOptions,
@@ -89,7 +69,7 @@ export async function prepareTuiMcodeToolsIntegration(
   const removeRuntimeDir = dependencies.removeRuntimeDir ?? removeTuiMcodeToolsRuntimeDir;
   let runtimeDir: string | undefined;
   let broker: McodeToolsAuthLeaseBroker | undefined;
-  let activation: TuiMcodeToolsHostEnvironmentActivation | undefined;
+  let activation: McodeToolsHostEnvironmentActivation | undefined;
   try {
     const resource = (dependencies.validateResource ?? validateMcodeToolsResource)({
       resourceDir: resolveBundledMcodeToolsResourceDir(options.entryUrl, environment),
@@ -103,7 +83,7 @@ export async function prepareTuiMcodeToolsIntegration(
     });
     const configDir = path.join(options.dataDir, 'integrations', 'mcode-tools', options.region);
     await ensurePrivateDirectory(configDir);
-    activation = (dependencies.activateEnvironment ?? activateTuiMcodeToolsHostEnvironment)(
+    activation = (dependencies.activateEnvironment ?? activateMcodeToolsHostEnvironment)(
       environment,
       {
         runtimeExecutable: process.execPath,
@@ -139,6 +119,8 @@ export async function prepareTuiMcodeToolsIntegration(
   }
 }
 
+export { resolveBundledMcodeToolsResourceDir, resolveBundledMcodeToolsCommandBinDir };
+
 export function normalizeMcodeToolsHostBuildEnv(buildEnv: MavisBuildEnv): McodeToolsBuildEnv {
   return buildEnv === 'dev' ? 'test' : buildEnv;
 }
@@ -162,7 +144,7 @@ function activeReadiness(options: {
   broker: McodeToolsAuthLeaseBroker;
   runtimeDir: string;
   removeRuntimeDir: (runtimeDir: string) => Promise<void>;
-  activation: TuiMcodeToolsHostEnvironmentActivation;
+  activation: McodeToolsHostEnvironmentActivation;
 }): McodeToolsReadiness {
   let disposed = false;
   return {

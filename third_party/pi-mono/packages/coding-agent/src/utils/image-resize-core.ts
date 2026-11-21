@@ -1,5 +1,4 @@
 import { applyExifOrientation } from "./exif-orientation.ts";
-import { readImageDimensions } from "./image-dimensions.ts";
 import { loadPhoton } from "./photon.ts";
 
 export interface ImageResizeOptions {
@@ -19,12 +18,15 @@ export interface ResizedImage {
 	wasResized: boolean;
 }
 
-export class ImageProcessorUnavailableError extends Error {
-	constructor() {
-		super("Image processing runtime is unavailable");
-		this.name = "ImageProcessorUnavailableError";
-	}
-}
+/**
+ * Tag on image resize worker replies. Node can post its own messages on the worker channel
+ * (for example `{ "watch:require": [...] }` under `node --watch`), so replies must be identifiable.
+ */
+export const IMAGE_RESIZE_WORKER_RESPONSE_TYPE = "pi:image-resize-response";
+
+export type ResizeImageWorkerResponse =
+	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; result: ResizedImage | null }
+	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; error: string };
 
 // 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
 const DEFAULT_MAX_BYTES = 4.5 * 1024 * 1024;
@@ -55,9 +57,8 @@ function encodeCandidate(buffer: Uint8Array, mimeType: string): EncodedCandidate
  * Resize an image to fit within the specified max dimensions and encoded file size.
  * Returns null if the image cannot be resized below maxBytes.
  *
- * Uses Photon (Rust/WASM) for image processing. When Photon cannot be loaded,
- * an original image that already satisfies every limit is returned unchanged;
- * images that require processing throw ImageProcessorUnavailableError.
+ * Uses Photon (Rust/WASM) for image processing. If Photon is not available,
+ * returns null.
  *
  * Strategy for staying under maxBytes:
  * 1. First resize to maxWidth/maxHeight
@@ -75,26 +76,7 @@ export async function resizeImageInProcess(
 
 	const photon = await loadPhoton();
 	if (!photon) {
-		const dimensions = readImageDimensions(inputBytes, mimeType);
-		if (
-			dimensions &&
-			dimensions.width > 0 &&
-			dimensions.height > 0 &&
-			dimensions.width <= opts.maxWidth &&
-			dimensions.height <= opts.maxHeight &&
-			inputBase64Size < opts.maxBytes
-		) {
-			return {
-				data: Buffer.from(inputBytes).toString("base64"),
-				mimeType,
-				originalWidth: dimensions.width,
-				originalHeight: dimensions.height,
-				width: dimensions.width,
-				height: dimensions.height,
-				wasResized: false,
-			};
-		}
-		throw new ImageProcessorUnavailableError();
+		return null;
 	}
 
 	let image: ReturnType<typeof photon.PhotonImage.new_from_byteslice> | undefined;
@@ -152,9 +134,11 @@ export async function resizeImageInProcess(
 		let currentHeight = targetHeight;
 
 		while (true) {
-			const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
-			for (const candidate of candidates) {
-				if (candidate.encodedSize < opts.maxBytes) {
+			const [png, jpeg, ...lowerQualityJpegs] = tryEncodings(currentWidth, currentHeight, qualitySteps);
+			// Prefer the smaller of PNG and JPEG at the configured quality; lower JPEG quality only if neither fits.
+			const preferred = jpeg && jpeg.encodedSize < png.encodedSize ? [jpeg, png] : [png, jpeg];
+			for (const candidate of [...preferred, ...lowerQualityJpegs]) {
+				if (candidate && candidate.encodedSize < opts.maxBytes) {
 					return {
 						data: candidate.data,
 						mimeType: candidate.mimeType,

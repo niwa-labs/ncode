@@ -15,6 +15,13 @@ export interface TurnStreamProjection {
   assistantByMessageId: Map<string, string>;
   thinkingByMessageId: Map<string, string>;
   streamStartedAtMs: Map<string, number>;
+  /**
+   * Host-allocated assistant message ids whose attempts a response-control
+   * hook rejected. Identity-keyed: a later event carrying one of these ids is
+   * residue of a rejected attempt and must not resurrect its cells — while a
+   * NEW id (the replacement attempt) is always projected normally.
+   */
+  discardedMessageIds: Set<string>;
 }
 
 export function createTurnStreamProjection(): TurnStreamProjection {
@@ -26,6 +33,7 @@ export function createTurnStreamProjection(): TurnStreamProjection {
     assistantByMessageId: new Map(),
     thinkingByMessageId: new Map(),
     streamStartedAtMs: new Map(),
+    discardedMessageIds: new Set(),
   };
 }
 

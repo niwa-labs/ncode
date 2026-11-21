@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The paths entries compile neighbor-package SOURCES (the same resolution
+    // the repository gate derives), mirroring packages/v2-adapter/tsconfig.json.
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"],
+      // W02: types of the vendored pi reference storage for the
+      // pi-storage-port tests. Points at the built .d.ts (same tree the pin
+      // built in W01) so this program does not recompile the vendored
+      // source chain; the vitest alias resolves the runtime to source.
+      "@earendil-works/pi-durable/storage/memory": [
+        "../../third_party/pi-durable/dist/storage/memory.d.ts"
+      ]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

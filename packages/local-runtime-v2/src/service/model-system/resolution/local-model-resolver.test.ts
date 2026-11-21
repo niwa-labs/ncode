@@ -6,7 +6,7 @@ import {
 } from '@mavis/protocol';
 import { describe, expect, it, vi } from 'vitest';
 
-import { streamSimple } from '@earendil-works/pi-ai';
+import { streamSimple } from '@earendil-works/pi-ai/compat';
 
 import { LocalModelResolver, lookupLocalModelLimits } from './local-model-resolver.js';
 import { OPENPLATFORM_THINKING_VARIANTS_CAPABILITY } from './openplatform-thinking.js';
@@ -457,7 +457,7 @@ describe('LocalModelResolver request-body byte authority', () => {
     );
 
     expect(resolved.map((model) => model.maxRequestBodyBytes)).toEqual([
-      128, 256, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368, 18_874_368,
+      128, 256, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864, 67_108_864,
     ]);
   });
 });
@@ -1005,7 +1005,7 @@ describe('LocalModelResolver credentials and thinking', () => {
         ...AGENT_CONFIG,
         model: {
           provider: 'openai-codex',
-          model_id: 'gpt-5.5',
+          model_id: 'gpt-5.6-sol',
           context_window: 65_536,
           max_tokens: 32_768,
         },
@@ -1023,7 +1023,7 @@ describe('LocalModelResolver credentials and thinking', () => {
       apiKey: 'codex-token',
       model: {
         provider: 'openai-codex',
-        id: 'gpt-5.5',
+        id: 'gpt-5.6-sol',
         api: 'openai-codex-responses',
         baseUrl: 'https://chatgpt.com/backend-api',
       },
@@ -1031,11 +1031,15 @@ describe('LocalModelResolver credentials and thinking', () => {
     expect(logger.info).toHaveBeenCalledWith(
       {
         provider: 'openai-codex',
-        modelId: 'gpt-5.5',
+        modelId: 'gpt-5.6-sol',
         route: 'oauth',
       },
       'Resolved local conversation model route',
     );
+        // The dynamic max-tokens wrapper cuts against the requested window with
+    // its own estimator and thinking reserve; that math is owned by
+    // dynamic-max-tokens tests. This test pins only that the OAuth route
+    // reaches the stream with a bounded cap.
     expect(logicalCaps).toEqual([23_488]);
   });
 
@@ -1612,111 +1616,47 @@ describe('LocalModelResolver custom provider session affinity', () => {
 });
 
 describe('LocalModelResolver request image ceiling (#425)', () => {
-  const resolveModelWith = async (
-    modelConfig: LocalModelConfig,
-    baseURL = 'https://gateway.example/v1',
-    { api = 'openai-completions', modelId = 'vision' } = {},
-  ) => {
+  const resolveWith = async (modelConfig: LocalModelConfig, baseURL = 'https://gateway.example/v1') => {
     const resolver = new LocalModelResolver({
       byokConfigGetter: () => ({
         custom_provider: {
           gateway: {
-            api,
+            api: 'openai-completions',
             options: { apiKey: 'gateway-key', baseURL },
-            models: { [modelId]: modelConfig },
+            models: { vision: modelConfig },
           },
         },
       }),
     });
-    return resolver.resolveModel({
+    const resolved = await resolver.resolveModel({
       sessionId: 'session-image-ceiling',
       turnId: 'turn-image-ceiling',
       agentConfig: {
         ...AGENT_CONFIG,
-        model: modelRefForModel('custom_provider:gateway', modelId, modelConfig),
+        model: modelRefForModel('custom_provider:gateway', 'vision', modelConfig),
       },
     });
+    return (resolved.model as { maxImagesPerRequest?: number }).maxImagesPerRequest;
   };
-  const resolveWith = async (
-    modelConfig: LocalModelConfig,
-    baseURL?: string,
-    options?: { readonly modelId?: string },
-  ) =>
-    (
-      (await resolveModelWith(modelConfig, baseURL, options)).model as {
-        maxImagesPerRequest?: number;
-      }
-    ).maxImagesPerRequest;
 
   it('carries a configured max_images_per_request onto the executor model', async () => {
-    expect(
-      await resolveWith({ capabilities: { support_image: true, max_images_per_request: 6 } }),
-    ).toBe(6);
-    expect(
-      await resolveWith({ capabilities: { support_image: true, max_images_per_request: '12' } }),
-    ).toBe(12);
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: 6 } })).toBe(6);
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: '12' } })).toBe(12);
   });
 
-  it('allows 100 images when nothing valid is declared, and 20 for MiniMax M3 models', async () => {
-    expect(await resolveWith({ capabilities: { support_image: true } })).toBe(100);
-    expect(
-      await resolveWith({ capabilities: { support_image: true, max_images_per_request: 0 } }),
-    ).toBe(100);
-    expect(
-      await resolveWith({ capabilities: { support_image: true } }, undefined, {
-        modelId: 'MiniMax-M3',
-      }),
-    ).toBe(20);
-    expect(
-      await resolveWith({ capabilities: { support_image: true } }, undefined, {
-        modelId: 'MiniMax-M3.1-Flash-Preview',
-      }),
-    ).toBe(20);
-    expect(
-      await resolveWith({ capabilities: { support_image: true } }, undefined, {
-        modelId: 'MiniMax-M30',
-      }),
-    ).toBe(100);
-  });
-
-  it('budgets the request body of known first-party hosts unless the model declares one', async () => {
-    const bodyBytes = async (
-      baseURL: string,
-      api: string,
-      capabilities: LocalModelConfig['capabilities'] = { support_image: true },
-    ) => (await resolveModelWith({ capabilities }, baseURL, { api })).maxRequestBodyBytes;
-    const mib = 1_024 * 1_024;
-
-    expect(await bodyBytes('https://gateway.example/v1', 'anthropic-messages')).toBe(18 * mib);
-    expect(await bodyBytes('https://api.anthropic.com', 'anthropic-messages')).toBe(28 * mib);
-    expect(
-      await bodyBytes('https://us-east5-aiplatform.googleapis.com/v1', 'anthropic-messages'),
-    ).toBe(26 * mib);
-    expect(await bodyBytes('https://api.openai.com/v1', 'openai-responses')).toBe(64 * mib);
-    expect(
-      await bodyBytes('https://api.anthropic.com', 'anthropic-messages', {
-        support_image: true,
-        max_request_body_bytes: 10 * mib,
-      }),
-    ).toBe(10 * mib);
+  it('leaves the shared default in charge when nothing is declared or the value is invalid', async () => {
+    expect(await resolveWith({ capabilities: { support_image: true } })).toBeUndefined();
+    expect(await resolveWith({ capabilities: { support_image: true, max_images_per_request: 0 } })).toBeUndefined();
   });
 
   it('applies the documented Mistral API limit by exact host unless the model overrides it', async () => {
+    expect(await resolveWith({ capabilities: { support_image: true } }, 'https://api.mistral.ai/v1')).toBe(8);
     expect(
-      await resolveWith({ capabilities: { support_image: true } }, 'https://api.mistral.ai/v1'),
-    ).toBe(8);
-    expect(
-      await resolveWith(
-        { capabilities: { support_image: true, max_images_per_request: 4 } },
-        'https://api.mistral.ai/v1',
-      ),
+      await resolveWith({ capabilities: { support_image: true, max_images_per_request: 4 } }, 'https://api.mistral.ai/v1'),
     ).toBe(4);
     expect(
-      await resolveWith(
-        { capabilities: { support_image: true } },
-        'https://gateway.example/api.mistral.ai/v1',
-      ),
-    ).toBe(100);
+      await resolveWith({ capabilities: { support_image: true } }, 'https://gateway.example/api.mistral.ai/v1'),
+    ).toBeUndefined();
   });
 });
 

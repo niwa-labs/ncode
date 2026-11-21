@@ -1,3 +1,4 @@
+import type { runAgentLoop } from '@earendil-works/pi-agent-core';
 /**
  * `PiTurnRunner` — assemble pi-coding-agent's runtime for a single turn
  * and bridge its event stream into canonical `RuntimeEvent`s.
@@ -31,10 +32,9 @@ import {
   type messageIDAllocator,
 } from './turn.js';
 import { setToolHooks } from './tools.js';
-import { createPtcToolExecutor } from './ptc-tool-executor.js';
-import type { PtcToolExecutor, ToolExecutionContext } from '../tools/index.js';
 import type { ToolContextSizeEstimator } from './tool-context-size.js';
 import type { PiTurnRunnerLogger, RunTurnInput as PiRunTurnInput } from './types.js';
+import type { ToolExecutionContext } from '../tools/index.js';
 
 export { LLM_REQUEST_TIMEOUT_MS } from './defaults.js';
 export { _computeFailureTerminationReasonForTest, wrapStreamFnWithTimeout };
@@ -50,6 +50,7 @@ export interface PiMessageIdAllocator extends messageIDAllocator {
 }
 
 export interface PiTurnRunnerOptions {
+  runLoopForSession?: (sessionId: string) => typeof runAgentLoop;
   messageIdAllocator?: PiMessageIdAllocator;
   nowMs?: () => number;
   metricsClient?: MetricsClient;
@@ -87,6 +88,7 @@ export class PiTurnRunner {
   private readonly logger: Required<PiTurnRunnerLogger>;
   private readonly metrics: PiTurnMetrics;
   private readonly toolContextSizeEstimator?: ToolContextSizeEstimator;
+  private readonly runLoopForSession?: PiTurnRunnerOptions['runLoopForSession'];
   private readonly llmCaptureFactory?: PiTurnRunnerOptions['llmCaptureFactory'];
   readonly metricsClient?: MetricsClient;
 
@@ -102,6 +104,7 @@ export class PiTurnRunner {
     );
     this.logger = { ...noopLogger, ...(options.logger ?? {}) };
     this.toolContextSizeEstimator = options.toolContextSizeEstimator;
+    this.runLoopForSession = options.runLoopForSession;
     this.llmCaptureFactory = options.llmCaptureFactory;
   }
 
@@ -128,7 +131,6 @@ export class PiTurnRunner {
     let termination: TurnTerminationReason | undefined;
     let llmCapture: LlmCaptureRecorder | undefined;
     let unsubscribeCaptureRelay: (() => void) | undefined;
-    let ptcExecutor: PtcToolExecutor | undefined;
     try {
       // Step 1: Build state for a single turn. `newTurn` resolves model config and creates all
       // objects that cannot be reused across turns: the tool list, composed streamFn, EventBridge
@@ -153,7 +155,7 @@ export class PiTurnRunner {
       // Step 3: Create the pi Agent (injecting system prompt, model, tools, and history),
       // and a history cursor tracking how much of `agent.state.messages` has been reported
       // to the onHistoryChanged hook.
-      const agent = newAgent(turn);
+      const agent = newAgent(turn, this.runLoopForSession?.(input.sessionId));
       if (llmCapture) {
         type CaptureListener = Parameters<LlmCaptureAgentEventSource['subscribe']>[0];
         const captureListeners = new Set<CaptureListener>();
@@ -175,6 +177,7 @@ export class PiTurnRunner {
       }
       recorder.observeAgent(agent, input.toolConfig.tools);
       const history = newHistory(turn, agent);
+      turn.history = history;
 
       // Step 4: Install Agent hooks. Tool hooks wrap tool execution; LLM hooks wrap
       // each model call and feed compaction / message rewrites back through the history cursor.
@@ -188,13 +191,6 @@ export class PiTurnRunner {
       // RuntimeEvent ordering identical to the old monolithic runner. The later `events.drain()`
       // waits for this queue.
       const events = subscribeEvents(agent, turn, history, this.now);
-      ptcExecutor = createPtcToolExecutor({
-        agent,
-        turn,
-        emit: events.dispatch,
-        nowMs: this.now,
-      });
-      input.toolConfig.context.ptcExecutor = ptcExecutor;
 
       // Step 6: Wire cancellation. If the caller's signal is already aborted, do not start
       // the Agent: unsubscribe, drain queued events, and emit the terminal `aborted` frame. Otherwise,
@@ -239,9 +235,6 @@ export class PiTurnRunner {
       termination = reason ?? events.forcedTermination() ?? { kind: 'completed' };
       await emitTerminal(turn, termination);
     } finally {
-      if (input.toolConfig.context.ptcExecutor === ptcExecutor) {
-        delete input.toolConfig.context.ptcExecutor;
-      }
       unsubscribeCaptureRelay?.();
       unsubscribeCaptureRelay = undefined;
       if (llmCapture?.drain) {

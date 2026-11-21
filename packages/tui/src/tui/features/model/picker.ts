@@ -57,7 +57,11 @@ export class TuiModelPicker implements Component, Focusable {
   private readonly effortDrafts = new Map<ModelKey, string>();
   private readonly modelByKey = new Map<ModelKey, TuiModel>();
   /** Starred models in the order they were added; new favorites go last. */
-  private favoriteKeys: ModelKey[];
+  /** Ctrl+D armed on this provider row: Enter confirms, any cancel disarms. */
+  private deleteArmedFor?: string;
+  /** Last delete rejection text (for example the selected-provider guard). */
+  private deleteStatus?: string;
+    private favoriteKeys: ModelKey[];
   private favoriteStatus: string | undefined;
   private _focused = false;
 
@@ -74,6 +78,13 @@ export class TuiModelPicker implements Component, Focusable {
         readonly onConnect: () => void;
       };
       onAddProvider?: () => void;
+      /**
+       * OUR UX extension (not upstream 0.7.2): provider deletion from the
+       * picker. Ctrl+D arms the focused custom-provider row, Enter confirms,
+       * any cancel disarms; a rejection (for example the selected-provider
+       * guard) renders as a warning banner.
+       */
+      onDeleteProvider?: (providerId: string) => Promise<void>;
       /** Persists a favorite toggle; `false` or a rejection rolls the row back. */
       onToggleFavorite?: (model: TuiModel, favorite: boolean) => Promise<boolean | void> | boolean | void;
       requestRender?: () => void;
@@ -105,12 +116,41 @@ export class TuiModelPicker implements Component, Focusable {
 
   handleInput(data: string): void {
     const keybindings = getKeybindings();
+    if (this.deleteArmedFor !== undefined && keybindings.matches(data, 'tui.select.cancel')) {
+      this.deleteArmedFor = undefined;
+      this.deleteStatus = undefined;
+      this.availability.requestRender?.();
+      return;
+    }
     if (keybindings.matches(data, 'tui.select.cancel')) {
       this.onCancel();
       return;
     }
+    if (this.deleteArmedFor !== undefined && keybindings.matches(data, 'tui.select.confirm')) {
+      const providerId = this.deleteArmedFor;
+      this.deleteArmedFor = undefined;
+      void this.availability.onDeleteProvider?.(providerId).catch(
+        (error: unknown): void => {
+          this.deleteStatus =
+            error instanceof Error ? error.message : 'Provider deletion failed.';
+          this.availability.requestRender?.();
+        },
+      );
+      return;
+    }
 
     const model = this.focusedModel();
+    if (
+      model &&
+      model.providerKind === 'custom' &&
+      this.availability.onDeleteProvider &&
+      matchesKey(data, Key.ctrl('d'))
+    ) {
+      this.deleteArmedFor = model.providerId;
+      this.deleteStatus = undefined;
+      this.availability.requestRender?.();
+      return;
+    }
     if (model && this.availability.onToggleFavorite && matchesKey(data, Key.ctrl('s'))) {
       this.toggleFavorite(model);
       return;
@@ -189,6 +229,12 @@ export class TuiModelPicker implements Component, Focusable {
         : []),
       ...(layout.bodyHeight >= 3 && this.favoriteStatus
         ? [chalk.hex(colors.warning)(this.favoriteStatus)]
+        : []),
+      ...(layout.bodyHeight >= 3 && this.deleteArmedFor !== undefined
+        ? [chalk.hex(colors.warning)('Delete provider? Press Enter to confirm, Esc to cancel')]
+        : []),
+      ...(layout.bodyHeight >= 3 && this.deleteStatus
+        ? [chalk.hex(colors.warning)(sanitizeTerminalText(this.deleteStatus))]
         : []),
       ...(layout.bodyHeight >= 2 ? [`${searchPrompt}${search}`] : []),
       ...(layout.bodyHeight >= 4 &&

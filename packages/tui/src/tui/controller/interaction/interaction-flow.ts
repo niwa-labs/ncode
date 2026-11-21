@@ -43,8 +43,6 @@ import {
   type TuiPlanReviewAction,
 } from '../../features/interaction/plan-review-panel.js';
 import { TuiPlanViewerPanel } from '../../features/interaction/plan-viewer-panel.js';
-import { formatPlanPath } from '../../features/interaction/plan-path.js';
-import { formatTuiKeybinding, type TuiKeybindingRegistry } from '../../shell/keybindings.js';
 import {
   TuiPlanEntryPanel,
   type TuiPlanEntryAction,
@@ -83,7 +81,6 @@ export interface TuiInteractionFlowOptions {
   readonly permissionSessionScope?: (activeSessionId: string) => ReadonlySet<string>;
   readonly permissionOwnerTurnId?: (ownerSessionId: string) => string | undefined;
   readonly stopTurn: () => void;
-  readonly keybindings?: TuiKeybindingRegistry;
 }
 
 export class TuiInteractionFlow {
@@ -844,10 +841,6 @@ export class TuiInteractionFlow {
         );
       },
       this.options.onChanged,
-      {
-        fullViewShortcut: () =>
-          formatTuiKeybinding('interaction.view-plan', this.options.keybindings),
-      },
     );
     this.panel = panel;
     this.options.surface.show(panel);
@@ -978,13 +971,11 @@ export class TuiInteractionFlow {
       await this.options.controller.refreshSessionMetadata(ownerSessionId).catch(() => undefined);
     }
     if (!this.isActiveSession(ownerSessionId)) return true;
-    const planPath = state.request.modePayload?.planReview?.path;
     this.updateQuestionTranscript(state.request.id, {
       status: 'resolved',
       title: state.request.modePayload?.planReview ? 'Plan Review' : 'Plan Mode',
       content,
-      // Once resolved, the frozen body leaves the Transcript; keep where to read it again.
-      detail: planPath ? `${detail}\nPlan: ${formatPlanPath(planPath)} · /plan view` : detail,
+      detail,
       ephemeral: true,
       updatedAtMs: Date.now(),
     });
@@ -1210,7 +1201,7 @@ export class TuiInteractionFlow {
     const requestId = request.requestId;
     if (decision === 'allowAlways' && request.allowAlwaysSupported === false) {
       this.options.append(
-        'This action cannot be remembered; choose Allow for this conversation or Deny.',
+        'This action cannot be remembered; choose Allow once or Deny.',
         'warning',
       );
       this.showPermissionPicker();

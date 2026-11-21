@@ -32,9 +32,6 @@ import type {
 
 export type TuiSkill = NonNullable<TuiSkillList['skills']>[number];
 
-const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1_000;
-const WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
-
 export interface TuiStatusPresentationOptions {
   readonly version?: string;
   readonly accountLoading?: boolean;
@@ -66,8 +63,7 @@ export function createTuiAccountStatusInspection(
   const sessionModel = options.model;
   const status = account?.status ?? 'unknown';
   const needsLogin = status === 'needs-login' || account?.managedTokenPresent === false;
-  // Match Desktop: show the editable profile name, falling back to the email.
-  const identity = account?.identity?.name?.trim() || account?.identity?.email?.trim();
+  const identity = account?.identity?.email?.trim() || account?.identity?.name?.trim();
   const accountLabel = options.accountLoading
     ? 'Loading…'
     : needsLogin
@@ -89,6 +85,9 @@ export function createTuiAccountStatusInspection(
         sessionModel.variant && !sessionEffort ? `#${safeInline(sessionModel.variant)}` : ''
       }`
     : safe(account?.defaultModel ?? 'not selected');
+  // opus 2026-11-01, правка 5: the profile/dataDir the SERVING daemon
+  // reports, so a window pointed at the wrong store is visible at a glance.
+  const profileRow = createAccountProfileRow(account);
   const sections: Array<TranscriptInspectionReport['sections'][number]> = [
     {
       title: 'Account',
@@ -102,6 +101,7 @@ export function createTuiAccountStatusInspection(
               ? 'warning'
               : accountStatusTone(status),
         },
+        ...(profileRow ? [profileRow] : []),
         { label: 'Provider', value: safe(account?.providerId ?? 'not configured') },
         { label: 'Auth', value: safe(account?.authMode ?? 'unknown') },
         ...(account?.tokenPlanSummary?.tier
@@ -217,6 +217,36 @@ function formatThinkingStatus(model: TuiModel | undefined): string {
   return thinking === undefined ? 'Not configurable' : thinking === 'on' ? 'On' : 'Off';
 }
 
+/**
+ * The `Profile` row of the /status Account section: «cedar (~/.minimax-
+ * cedar)» — the profile label and the data directory the SERVING daemon
+ * reports (opus 2026-11-01, правка 5). `undefined` while neither field was
+ * reported (an older daemon), so the row stays off the panel entirely.
+ */
+function createAccountProfileRow(
+  account: TuiAccountStatus | undefined,
+): { label: string; value: string } | undefined {
+  if (!account || (account.profile === undefined && account.dataDir === undefined)) {
+    return undefined;
+  }
+  const label = account.profile ?? 'default';
+  return {
+    label: 'Profile',
+    value: account.dataDir ? `${safeInline(label)} (${shortenHomePath(account.dataDir)})` : safeInline(label),
+  };
+}
+
+/** Fold the home-directory prefix of an absolute path into `~` for display. */
+function shortenHomePath(value: string): string {
+  const home = process.env['HOME'] ?? process.env['USERPROFILE'];
+  if (!home) return value;
+  const normalizedHome = home.replaceAll('\\', '/').replace(/\/+$/u, '');
+  const normalizedValue = value.replaceAll('\\', '/').replace(/\/+$/u, '');
+  return normalizedValue === normalizedHome || normalizedValue.startsWith(`${normalizedHome}/`)
+    ? `~${normalizedValue.slice(normalizedHome.length)}`
+    : value;
+}
+
 function formatWorkspaceBranch(metadata: TuiWorkspaceGitMetadata | undefined): string {
   if (!metadata) return 'Unavailable';
   if (!metadata.isGitRepo) return 'Not a Git repository';
@@ -269,12 +299,12 @@ function createTokenPlanQuotaRows(
   return [
     {
       label: '5-hour',
-      value: formatQuotaWindowDetail(quota.fiveHour, FIVE_HOUR_WINDOW_MS),
+      value: formatQuotaWindowDetail(quota.fiveHour),
       ...(quota.fiveHour.unlimited ? {} : remainingPercentRatio(quota.fiveHour.remainingPercent)),
     },
     {
       label: 'Weekly',
-      value: formatQuotaWindowDetail(quota.weekly, WEEKLY_WINDOW_MS),
+      value: formatQuotaWindowDetail(quota.weekly),
       ...(quota.weekly.unlimited ? {} : remainingPercentRatio(quota.weekly.remainingPercent)),
     },
     ...(quota.video
@@ -314,14 +344,13 @@ function remainingCountRatio(
 
 function formatQuotaWindowDetail(
   window: NonNullable<TuiAccountStatus['tokenPlanQuota']>['fiveHour'],
-  windowMs: number,
 ): string {
   if (window.unlimited) return 'Unlimited';
   const remaining =
     typeof window.remainingPercent === 'number'
       ? `${formatNumber(window.remainingPercent)}% left`
       : '—';
-  return appendResetTime(remaining, window.resetAtMs, windowMs);
+  return appendResetTime(remaining, window.resetAtMs);
 }
 
 function formatVideoQuotaDetail(
@@ -338,22 +367,17 @@ function formatVideoQuotaDetail(
   return appendResetTime(remaining, video.resetAtMs);
 }
 
-function appendResetTime(value: string, resetAtMs: number | undefined, windowMs?: number): string {
+function appendResetTime(value: string, resetAtMs: number | undefined): string {
   if (resetAtMs === undefined || !Number.isFinite(resetAtMs)) return value;
   const remainingMs = resetAtMs - Date.now();
   if (remainingMs <= 0) return `${value} · reset pending`;
-  // A quota window can never reset later than its own length; the server may
-  // round its end time up or run ahead of the local clock, so cap the countdown.
-  const boundedMs = windowMs === undefined ? remainingMs : Math.min(remainingMs, windowMs);
-  const minutes = Math.floor(boundedMs / 60_000);
+  const minutes = Math.ceil(remainingMs / 60_000);
   const duration =
-    minutes < 1
-      ? '<1m'
-      : minutes < 60
-        ? `${minutes}m`
-        : minutes < 24 * 60
-          ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-          : `${Math.floor(minutes / (24 * 60))}d ${Math.floor((minutes % (24 * 60)) / 60)}h`;
+    minutes < 60
+      ? `${minutes}m`
+      : minutes < 24 * 60
+        ? `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+        : `${Math.floor(minutes / (24 * 60))}d ${Math.floor((minutes % (24 * 60)) / 60)}h`;
   return `${value} · resets in ${duration}`;
 }
 
@@ -509,6 +533,8 @@ export interface TuiUsagePresentationOptions {
   readonly model?: TuiModel;
   readonly account?: TuiAccountStatus;
   readonly scope?: 'session' | 'account';
+  /** W10 `/session` warmer status (the `formatCacheWarmingStatus` render). */
+  readonly cacheWarming?: string;
 }
 
 export function formatTuiUsage(
@@ -525,6 +551,7 @@ export function formatTuiUsage(
     title: usageTitle(options),
     sections: [],
     visualization: presentation,
+    ...(options.cacheWarming ? { footer: `Cache warming: ${options.cacheWarming}` } : {}),
   });
 }
 
@@ -576,6 +603,7 @@ function resolveTuiUsagePresentation(
     outputTokens: summary?.outputTokens ?? 0,
     totalTokens: summary?.totalTokens ?? (summary ? sumTokenUsage(summary) : 0),
     ...(cacheMetrics ? { cacheMetrics } : {}),
+    ...(options.cacheWarming ? { cacheWarming: options.cacheWarming } : {}),
     context,
     ...(accountRows.length > 0 ? { accountRows } : {}),
   };

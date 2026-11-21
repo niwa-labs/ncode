@@ -31,8 +31,8 @@ export {
   type ToolOutputArtifactInput,
   type ToolOutputBudgetExtensionOptions,
 } from './tool-output-budget.js';
-export { requestMediaExtension, type RequestMediaExtensionOptions } from './request-media.js';
 export {
+  RUNAWAY_GUARD_REMINDER_CUSTOM_TYPE,
   runawayGuardExtension,
   runawayGuardShadowExtension,
   replayRunawayGuardTrajectory,
@@ -52,11 +52,6 @@ export {
   type TerminalRecoveryObservation,
   type TerminalResponseRecoveryExtensionOptions,
 } from './terminal-response-recovery.js';
-export {
-  outputLimitRecoveryExtension,
-  type OutputLimitRecoveryExtensionOptions,
-  type OutputLimitRecoveryObservation,
-} from './output-limit-recovery.js';
 export {
   appSourceAdapter,
   fileSourceAdapter,

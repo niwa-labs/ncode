@@ -16,14 +16,17 @@ import type {
   SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { IRuntimeEvent } from '@mavis/protocol';
+import type { TurnPermissionMarkSource } from '../protocol/runtime-event.js';
 import type {
   RuntimeTool,
   ToolCallProvenanceResolver,
   ToolExecutionContext,
 } from '../tools/index.js';
 import type { TSchema } from '@sinclair/typebox';
+import type { ContextWireProjection } from './context-wire.js';
 import type { PiBeforeLlmCallAppendMessage, PiTurnHooks } from './hooks.js';
 import type { LLMRetryOptions } from './llm-retry.js';
+import type { PrepareRequestSnapshotSupplier } from './request-snapshot.js';
 
 export type RuntimeEvent = IRuntimeEvent;
 
@@ -79,21 +82,6 @@ export interface LLMModelConfig {
 
 export interface ToolConfig<TCtx extends ToolExecutionContext = ToolExecutionContext> {
   tools?: readonly RuntimeTool<TSchema, TCtx>[];
-  /** Final authorized PTC child catalog. It may be broader than model-visible tools. */
-  ptcTools?: readonly RuntimeTool<TSchema, TCtx>[];
-  /** Host-owned migration hint for a tool hidden by this turn's catalog. */
-  missingToolMessage?: (toolName: string) => string | undefined;
-  /**
-   * Host lookup for a tool the model called directly although `tools` omits it, such as a
-   * PTC child. A returned tool with the same name runs that call like a tool in `tools`:
-   * same context, validation, hooks and events. The tools sent to the model are unchanged.
-   * Called once per such call, with the arguments as the model sent them.
-   */
-  resolveMissingTool?: (toolCall: {
-    readonly id: string;
-    readonly name: string;
-    readonly arguments: unknown;
-  }) => RuntimeTool<TSchema, TCtx> | undefined;
   disableBuiltinToolFallback?: boolean;
   context: TCtx;
 }
@@ -181,6 +169,8 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   turnId: string;
   workspaceDir: string;
   systemPrompt: string;
+  /** Host-owned named sections; replay and deltas use Pi native system messages. */
+  systemPromptSections?: Readonly<Record<string, string>>;
   userMessage: UserMessageInput;
   /** Omitted callers append `userMessage`; continuation re-enters from supplied history. */
   startMode?: RunTurnStartMode;
@@ -199,6 +189,13 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   llmRetry?: Omit<LLMRetryOptions, 'sessionId' | 'turnId' | 'scope'>;
   /** Attribution captured from the same immutable capability snapshot as this turn's tools. */
   toolCallProvenanceResolver?: ToolCallProvenanceResolver;
+  /**
+   * §4 `decidedBy`: turn-local permission-mark sink recorded by the
+   * permission gate per resolved tool call; forwarded to the event bridge so
+   * every status event of that call carries who decided it. Absent — status
+   * events ship without the `permission` field.
+   */
+  permissionMarks?: TurnPermissionMarkSource;
   /** Forwarded to {@link EventBridgeContext.captureToolTiming}; host sets it non-prod only. */
   captureToolTiming?: boolean;
   /** TUI-only wire detail used to render output throughput. */
@@ -213,10 +210,33 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
   getSteeringMessages?: (
     context?: SteeringPollContext,
   ) => readonly AgentMessage[] | Promise<readonly AgentMessage[]>;
-  /** Gracefully ends the run when host-side steering admission rejects continuation. */
+  /**
+   * Gracefully ends the run when host-side steering admission rejects continuation.
+   * Migrated to the pin's post-steering-poll veto seam (§5.1 row 15): the veto
+   * fires after messages were dequeued and BEFORE any placement/next request.
+   */
   shouldStopAfterSteering?: () => boolean | Promise<boolean>;
-  /** Gracefully ends after the current assistant/tool step and before any follow-up poll. */
-  shouldStopAfterTurn?: () => boolean | Promise<boolean>;
+  /**
+   * Reactive subagents §1.7 (wave 3): the accepted-owner-input generation of
+   * the owning conversation, forwarded to the pin's sequential-executor
+   * yield seam. A generation change between two calls of ONE tool batch
+   * makes the not-yet-started calls receive honest skipped outcomes instead
+   * of starting blind against an already-accepted instruction. Absent (jsonl
+   * mode, embeddings): the batch behaves exactly as before.
+   */
+  ownerInputGeneration?: () => number | Promise<number>;
+  /**
+   * Gracefully ends after the current assistant/tool step and before any follow-up poll.
+   * Migrated onto the pin-native `finishTurn` hook (§5.1 row 32): `true` maps to
+   * `{action:"end"}`, `false`/`undefined` preserves normal scheduling — never
+   * `{action:"continue"}` (an explicit continuation adds a request).
+   */
+  shouldStopAfterTurn?: (context: {
+    message: AgentMessage;
+    toolResults: import('@earendil-works/pi-ai').ToolResultMessage[];
+    context: import('@earendil-works/pi-agent-core').AgentContext;
+    newMessages: AgentMessage[];
+  }) => boolean | Promise<boolean>;
   /** Text returned when a provider emits a tool call the host intentionally did not expose. */
   unexpectedToolCallFallback?: string;
   /**
@@ -227,6 +247,38 @@ export interface RunTurnInput<TCtx extends ToolExecutionContext = ToolExecutionC
     /** Text from the most recent assistant message at this close boundary. */
     readonly lastAssistantMessage?: string;
   }) => boolean | Promise<boolean>;
+  /**
+   * W04 canonical request-snapshot bridge (W03 C3 RequestSnapshot over the
+   * W02 storage adapter). When present, the runner installs the pin-native
+   * `prepareRequest` hook and takes exactly one immutable canonical snapshot
+   * per logical provider request — including the first — reusing it for that
+   * request's physical retries. Absent (the default), no hook is installed and
+   * the legacy path is byte-identical.
+   */
+  prepareRequestSnapshot?: PrepareRequestSnapshotSupplier;
+  /**
+   * Ш4 context-wire projection: when present, the provider-bound payload is
+   * compiled by the composition-owned memoized pipeline instead of the legacy
+   * per-request `projectAgentMessagesForModel` assembly. Injected only by
+   * compositions that enabled the wire path (`MCODE_CONTEXT_WIRE=1`);
+   * absent (the default) the legacy conversion stays exact. A projection
+   * never throws through the request path — it returns `undefined` to
+   * degrade a single request back to the legacy conversion.
+   */
+  contextWire?: ContextWireProjection;
+  /**
+   * Host composition over the MAIN assistant stream fn (W06 cache warming):
+   * applied OUTERMOST around the fully composed product chain (host output
+   * clamp -> cacheRetention -> maxTokens -> headers -> fetch -> request
+   * timeout -> stream watchdogs), so the wrapper observes the same
+   * `(model, context, options)` triple the transport receives and its
+   * captured transport IS the composed product path. Auxiliary
+   * (compaction-scope) stream fns are NOT wrapped - they route under their
+   * own request identities. The wrapper must delegate verbatim: pass
+   * `model`, `context` and `options` to `inner` by the same object
+   * references.
+   */
+  wrapStreamFn?: (inner: StreamFn) => StreamFn;
 }
 
 /**

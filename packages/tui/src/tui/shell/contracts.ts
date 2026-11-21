@@ -16,6 +16,13 @@ export interface TuiShellState {
   workspace: string;
   workspaceGit?: TuiWorkspaceGitMetadata;
   runtimeStatus: TuiRuntimeStatus;
+  /**
+   * W4 (§4.6): the daemon connection state in server mode (`auto`/`required`).
+   * Rendered as an honest status-line line whenever it is not `ready` —
+   * plain text, never a spinner pretending a turn is alive. Absent on the
+   * default in-process path (`MCODE_SERVER_MODE=off`).
+   */
+  daemonConnection?: 'disconnected' | 'connecting' | 'ready' | 'reconnecting' | 'closed';
   agentStatus?: TuiAgentStatus;
   /** Base-36 sequence, incremented only when the machine-readable tuple changes. */
   agentSeq?: string;

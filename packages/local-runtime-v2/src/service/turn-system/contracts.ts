@@ -1,6 +1,5 @@
 import type { AppDb } from '../../infra/db/client.js';
 import type { InputSafetyDecision } from '../content-safety/index.js';
-import type { PromptSuggestionReadResult } from './agent-host/runner/prompt-suggestion/prompt-suggestion-service.js';
 import type {
   CommittedQueueCapability,
   QueueClaimAcceptanceLookup,
@@ -8,7 +7,6 @@ import type {
   QueueDispatchCapability,
   QueueDispatchClaim,
   QueueItem,
-  PtcCrashRecoveryTerminalFact,
   SessionHistoryMutationCapability,
   SessionSystemCanonicalHistoryProvider,
   SessionMaintenanceGuard,
@@ -34,11 +32,12 @@ import type {
   TurnAdmissionPolicy,
   TurnAdmissionRejectionReason,
   TurnAdmissionUserInputResume,
-  TurnClientRequestBinding,
   TurnIngressReceipt,
   TurnSessionAdmissionCapability,
 } from './admission-contracts.js';
 import type { UserMessageId } from '../session-system/shared/user-message-id.js';
+import type { LocalNativeTaskWaits } from '@mavis/local-runtime';
+import type { SteerDelegationSteering } from './execution/steering/steer-session.service.js';
 
 export type {
   AgentHostInputAttachment,
@@ -100,16 +99,6 @@ export interface AbortTurnInput {
   readonly reason: string;
   /** Runs after exact ownership accepts the abort, before waiting for release. */
   readonly onAccepted?: () => void | Promise<void>;
-  /**
-   * Called once, synchronously, at the moment the Turn this abort was accepted
-   * for releases its Session: before the abort resolves, and before the next
-   * Turn can be registered. The abort path holds no Session lock, so a caller
-   * that must tell this Turn's work from the next Turn's needs this moment, not
-   * the (later) moment the abort returns. Never called for `not-running` or
-   * `turn-mismatch`; after `abort-timeout` it still fires if the Turn releases
-   * later. Must not throw; a failure is logged and ignored.
-   */
-  readonly onReleased?: () => void;
 }
 
 export interface TurnFailureProjection {
@@ -189,16 +178,6 @@ export interface TurnActivationSubmission extends TurnMessageSubmission {
   /** Queue item identity carried onto the persisted user message. */
   readonly sourceMessageId?: string;
   readonly resume?: TurnAdmissionUserInputResume;
-  /**
-   * Stable id of the Query this submission's producer already admitted durably.
-   *
-   * Set when a delivery re-routes the same user submission to a fresh Turn, so
-   * that Turn binds the Query the user actually asked instead of admitting the
-   * same text a second time under its own id.
-   */
-  readonly admittedQueryId?: string;
-  /** Per-item receipt ids admitted with `clientRequestId` in the same ledger write. */
-  readonly receiptAliases?: readonly string[];
 }
 
 export interface ResumeUserInputSubmission extends Omit<
@@ -320,6 +299,8 @@ export type ActivateTurnResult =
       readonly accepted: false;
       readonly reason: TurnAdmissionRejectionReason;
       readonly queueDisposition?: TurnSubmissionQueueDisposition;
+      /** The turn holding the session (`active-turn` only); surfaces in busy errors. */
+      readonly activeTurnId?: string;
     }
   | { readonly accepted: false; readonly reason: 'duplicate'; readonly turnId: string };
 
@@ -390,7 +371,15 @@ export type RequestCompactionResult =
       readonly accepted: false;
       readonly reason: TurnAdmissionRejectionReason;
     }
-  | { readonly accepted: false; readonly reason: 'duplicate'; readonly turnId: string };
+  | { readonly accepted: false; readonly reason: 'duplicate'; readonly turnId: string }
+  /**
+   * Wave-0 item 0.6 (owner decision: /compact при непустой очереди — FIFO):
+   * the queue fence (or a live compaction lease) blocked the manual
+   * compaction, so it stands at the BACK of the queue instead of 409ing —
+   * the runtime re-runs it on every session release until the fence lets it
+   * through. Not a failure: the owner's explicit request WILL run.
+   */
+  | { readonly accepted: false; readonly reason: 'queue-deferred' };
 
 export interface SteerSessionInput extends TurnMessageSubmission {
   readonly createdAt?: number;
@@ -411,10 +400,20 @@ export interface SteerSessionInput extends TurnMessageSubmission {
   readonly sourceMessageId?: string;
   readonly preDelivery?: TurnSteerPreDelivery;
   /**
-   * Per-item receipt ids bound to the Turn that admits or joins this steer. Setting them
-   * makes the producer receipt durable, like `preDelivery`.
+   * Wire-safe form of {@link SteerSessionInput.preDelivery}'s Turn check: the
+   * steer may only join this exact active Turn and never activates a fresh
+   * one; a miss fails with reason "active-turn". Producers crossing a JSON
+   * boundary (daemon-mode ACP steer) cannot ship the callback and set this.
    */
-  readonly receiptAliases?: readonly string[];
+  readonly expectActiveTurnId?: string;
+  /**
+   * Read-only idempotency probe for a replayed idempotency key: answer from
+   * the durable steering receipt (duplicate with the original turnId) or
+   * refuse ("active-turn"). Never delivers, never activates a fresh Turn and
+   * never reserves a receipt, so an admission gate outside the Runtime can
+   * resolve a repeat without risking a second delivery.
+   */
+  readonly receiptLookupOnly?: boolean;
 }
 
 export type SteerSessionResult =
@@ -443,7 +442,7 @@ export interface HistoryForkInput {
   readonly targetWorkspaceDir: string;
   /** Frozen inclusive complete-prefix boundary used by side conversations. */
   readonly throughMessageId?: string;
-  /** Preferred inclusive canonical Assistant boundary, plus the results of its own tool calls. */
+  /** Preferred inclusive canonical Assistant boundary. */
   readonly throughAssistantMessageId?: string;
   /** Compatibility boundary for legacy Display rows without an Assistant identity. */
   readonly beforeUserMessageId?: UserMessageId;
@@ -567,20 +566,6 @@ export interface TurnService {
   /** Internal Queue mutation/release wake used by compatibility composition. */
   dispatchQueue(sessionId: string): Promise<void>;
   sessionDeletion(sessionId: string, cleanup: () => Promise<void>): Promise<void>;
-  /**
-   * Optional next-message suggestion control. Scoped to one exact settled Turn
-   * of one Session so a stale cancel can never affect a newer Turn.
-   */
-  readonly promptSuggestion?: {
-    /** True only when it actually cancelled that Turn's in-flight request. */
-    cancel(sessionId: string, turnId: string): boolean;
-    /**
-     * Restores an already generated suggestion. Issues no model request and
-     * spends no quota. Returns a status instead of text whenever the result must
-     * not be resurrected.
-     */
-    read(sessionId: string, turnId: string): PromptSuggestionReadResult;
-  };
 }
 
 /** Queue execution seam implemented by the TurnSystem-owned message-delivery workflow. */
@@ -620,11 +605,7 @@ export interface TurnSystemSessionCapabilities {
       recoverPreviousProcess(input: {
         readonly processStartedAtMs: number;
         readonly protectedSessionIds?: readonly string[];
-        readonly terminalFacts?: readonly PtcCrashRecoveryTerminalFact[];
-      }): Promise<{
-        readonly interruptedSessionIds: readonly string[];
-        readonly recoveredPtcTurnIds?: readonly string[];
-      }>;
+      }): Promise<{ readonly interruptedSessionIds: readonly string[] }>;
     };
     readonly deletion: {
       begin(
@@ -659,6 +640,7 @@ export interface UserStopCascadePort {
    * Runs synchronously before the abort and must not block. Its delivery window
    * becomes effective before this returns; Session scope resolution happens in
    * the returned run so the controller still aborts the Turn at arrival.
+   * (Upstream 0.7.2 sync shape — our incident-5 async variant superseded.)
    */
   begin(sessionId: string): UserStopCascadeRun | undefined;
 }
@@ -669,27 +651,12 @@ export interface UserStopCascadePort {
  */
 export type UserStopAcceptance = 'controller_accepted' | 'not_running';
 
-/**
- * Where a stop fixed its target boundary: the stopped Turn released the Session,
- * or the controller reported that nothing was running.
- */
-export type UserStopBoundarySource = 'released' | 'not_running';
-
 export interface UserStopCascadeRun {
   /**
    * Side effects a stop may only have once it is accepted (pausing the Goal).
-   * Idempotent; must never throw; resolves after Session scope resolution and
-   * the pause attempt.
+   * Idempotent; must never throw; resolves after the pause attempt.
    */
   accept(how: UserStopAcceptance): Promise<void>;
-  /**
-   * Fixes the target boundary now. Both sources are the last moment before the
-   * next Turn can be admitted — the stop itself holds no Session lock and is
-   * still pausing the Goal — so that Turn's work stays out of this stop.
-   * Synchronous (it runs inside the controller's release); the first boundary
-   * wins; must never throw.
-   */
-  markBoundary(source: UserStopBoundarySource): void;
   /** Detached follow-up; must never throw and never block the stop response. */
   complete(result: AbortTurnResult): void;
   /**
@@ -702,6 +669,16 @@ export interface UserStopCascadeRun {
 export interface InitializeTurnSystemOptions {
   readonly db: AppDb;
   /**
+   * Wave-3 delegation steering ingress (steering-design-sol.md §2.2–§2.3),
+   * structurally satisfied by `DelegationSteeringComposition`. When provided,
+   * a steer delivered to an active Turn is first committed through the
+   * durable delegation seam (the saved-ack, §6.1) and its committed-steer
+   * release runs before the Turn continues (§6.2). Absent (default): the
+   * delegation stack is not wired and the steer path keeps today's
+   * behaviour.
+   */
+  readonly delegationSteering?: SteerDelegationSteering;
+  /**
    * Host-injected user-stop cascade. Absent in embeddings/tests, which then keep
    * exactly today's behaviour: a stop aborts the Turn and nothing else.
    */
@@ -709,8 +686,6 @@ export interface InitializeTurnSystemOptions {
   readonly logger?: {
     info(fields: Record<string, unknown>, message: string): void;
     warn(fields: Record<string, unknown>, message: string): void;
-    error?(fields: Record<string, unknown>, message: string): void;
-    debug?(fields: Record<string, unknown>, message: string): void;
   };
   readonly sessions: TurnSystemSessionCapabilities;
   readonly processStartedAtMs: number;
@@ -745,6 +720,17 @@ export interface InitializeTurnSystemOptions {
     /** Called once TurnSystem has exhausted its settle retries for this Turn. */
     abandon?(input: { readonly sessionId: string; readonly turnId: string }): Promise<void>;
   };
+  /**
+   * I-PUB-1b (W1): jsonl publication flush that completes before the Turn's
+   * lease is released. Runs in `settleAndRelease` between the last durable
+   * write of the Turn and the terminal settlement; non-throwing by contract
+   * (a failed flush marks the session publish-stale and never blocks the
+   * settlement). Absent in jsonl mode and in embeddings without a publisher.
+   */
+  readonly publishBeforeRelease?: (input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+  }) => Promise<void>;
   readonly nowMs?: () => number;
   readonly makeTurnId?: () => string;
   readonly makeLeaseId?: () => string;
@@ -781,6 +767,11 @@ export interface InitializeTurnSystemOptions {
     readonly sessionId: string;
     readonly error: unknown;
   }) => void;
+  /**
+   * §2.3: the per-session permission-mode registry — locks a Session's mode
+   * at its first accepted Turn. Absent in embeddings/tests: no locking.
+   */
+  readonly sessionPermissionModes?: { lock(sessionId: string): void };
 }
 
 export interface TurnSystemOwner {
@@ -827,12 +818,6 @@ export interface TurnSystemOwner {
           readonly turnId: string;
           readonly busyReason: 'turn' | 'compaction';
           readonly locallyOwned: boolean;
-          /**
-           * Present only when another live Runtime sharing this dataDir owns the
-           * Turn. Clients project it as read-only `running`; this Runtime cannot
-           * steer or abort it.
-           */
-          readonly ownedByOtherRuntime?: true;
         }
       | undefined
     >;
@@ -849,15 +834,26 @@ export interface TurnSystemOwner {
   readonly maintenance: SessionMaintenanceGuard;
   readonly receipts: {
     findReceipt(turnId: string): Promise<TurnIngressReceipt | undefined>;
-    /** Read-only lookup of the Turn each durable client request receipt is bound to. */
-    findClientRequestBindings(input: {
-      readonly sessionId: string;
-      readonly clientRequestIds: readonly string[];
-    }): Promise<readonly TurnClientRequestBinding[]>;
   };
   readonly trustedEditSubmission: {
     submit(input: ConversationEditAdmissionInput): Promise<ConversationEditAdmissionResult>;
   };
+  /**
+   * W10 `/session` warmer status: the one-line prompt-cache warming status of
+   * a Session (the `formatCacheWarmingStatus` render), `undefined` when the
+   * session is unknown or the warming controller keeps no state for it. The
+   * product surface reads it through the process-local diagnostics port.
+   */
+  readonly cacheWarming?: {
+    describeStatus(sessionId: string): string | undefined;
+  };
+  /**
+   * Native task-wait binding (verdict 09 §1.4), present only when the durable
+   * delegation steering composition exists (durable history mode). The host
+   * binds it onto the API host so the task tool runner can register reactive
+   * foreground waits; absent on the jsonl mode (legacy always-inline task).
+   */
+  readonly nativeTaskWaits?: LocalNativeTaskWaits;
   ready(): Promise<void>;
   close(): Promise<void>;
 }

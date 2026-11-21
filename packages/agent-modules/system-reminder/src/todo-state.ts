@@ -29,6 +29,32 @@ export function summarizeTodoStatuses(todos: Array<{ status: TodoStatus }>): Tod
   return { total: todos.length, active, completed, cancelled };
 }
 
+/**
+ * Canonical comparison key for a TodoWrite snapshot (M3.1 dupe wave).
+ * JSON of `[content, status, priority]` per item after trim: object key
+ * order cannot matter by construction, while item order is kept — a
+ * reordered list counts as a change (conservative). Shared by the
+ * TodoWrite tool, the cadence projection, and analysis tooling so all
+ * three agree on what a no-op write is.
+ */
+export function todoSnapshotKey(
+  items:
+    | ReadonlyArray<{ readonly content?: unknown; readonly status?: unknown; readonly priority?: unknown }>
+    | undefined,
+): string {
+  return JSON.stringify(
+    (items ?? []).map((item) => [
+      todoSnapshotText(item?.content),
+      todoSnapshotText(item?.status),
+      todoSnapshotText(item?.priority),
+    ]),
+  );
+}
+
+function todoSnapshotText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '');
+}
+
 export function updateTodoState(
   sessionId: string,
   todos: Array<{ status: TodoStatus }>,

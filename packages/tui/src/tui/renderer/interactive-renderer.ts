@@ -10,7 +10,7 @@ import {
   type TuiMode,
   type TuiStopOptions,
 } from '../engine/public.js';
-import { captureTuiIncidentBestEffort, type TuiIncidentSink } from '../../observability/index.js';
+import { captureTuiIncidentBestEffort, type TuiIncidentSink, type TuiObservability, type TuiTranscriptPerformanceSnapshot } from '../../observability/index.js';
 
 export interface McodeInteractiveRendererOptions {
   readonly terminal: Terminal;
@@ -21,6 +21,7 @@ export interface McodeInteractiveRendererOptions {
   readonly altScreen?: TuiAltScreenOptions;
   readonly fullscreenLayoutRoot?: Component;
   readonly incidentReporter?: TuiIncidentSink;
+  readonly observability?: TuiObservability;
   readonly onRendererChanged?: (renderer: TuiMainScreen | TuiAltScreen) => void;
 }
 
@@ -59,6 +60,7 @@ export class McodeInteractiveRenderer {
   private readonly listeners = new Set<TuiInputListener>();
   private readonly listenerDisposers = new Map<TuiInputListener, () => void>();
   private fullscreenLayoutRoot: Component | undefined;
+  private transcriptPerformanceProvider: (() => TuiTranscriptPerformanceSnapshot) | undefined;
   private mainScreenRenderState: ReturnType<TuiMainScreen['captureRenderState']> | undefined;
   private resolveFirstFrame: (() => void) | undefined;
   private started = false;
@@ -288,15 +290,30 @@ export class McodeInteractiveRenderer {
         ? true
         : undefined),
   ): TuiMainScreen | TuiAltScreen {
-    if (mode === 'fullscreen') {
-      return new TuiAltScreen(
-        this.options.terminal,
-        showHardwareCursor,
-        this.options.logDirectory,
-        this.options.altScreen,
-      );
-    }
-    return new TuiMainScreen(this.options.terminal, showHardwareCursor, this.options.logDirectory);
+    const renderer =
+      mode === 'fullscreen'
+        ? new TuiAltScreen(
+            this.options.terminal,
+            showHardwareCursor,
+            this.options.logDirectory,
+            this.options.altScreen,
+          )
+        : new TuiMainScreen(this.options.terminal, showHardwareCursor, this.options.logDirectory);
+    renderer.setObservability(this.options.observability);
+    renderer.setTranscriptPerformanceProvider(this.transcriptPerformanceProvider);
+    return renderer;
+  }
+
+  /**
+   * Register the transcript projection/cache snapshot provider recorded with
+   * render observability. Kept on the renderer (not the TUI) so a main/fullscreen
+   * mode switch re-attaches it to the newly created renderer.
+   */
+  setTranscriptPerformanceProvider(
+    provider: (() => TuiTranscriptPerformanceSnapshot) | undefined,
+  ): void {
+    this.transcriptPerformanceProvider = provider;
+    this.renderer.setTranscriptPerformanceProvider(provider);
   }
 
   private mountFullscreenLayout(renderer: TuiMainScreen | TuiAltScreen): void {

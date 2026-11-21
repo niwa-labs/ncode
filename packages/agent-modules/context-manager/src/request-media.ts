@@ -5,11 +5,7 @@ import {
   type AssistantMessage,
   type Model,
 } from '@earendil-works/pi-ai';
-import {
-  formatDimensionNote,
-  ImageProcessorUnavailableError,
-  resizeImage,
-} from '@earendil-works/pi-coding-agent/image-resize';
+import { formatDimensionNote, resizeImage } from '@earendil-works/pi-coding-agent';
 import {
   isLLMImageLimitMessage,
   isLLMRequestTooLargeMessage,
@@ -335,7 +331,11 @@ async function encodeImageOrUnavailable(
     const dimensionNote = shrunk ? formatDimensionNote(resized) : undefined;
     return dimensionNote ? { ...encoded, dimensionNote } : encoded;
   } catch (error) {
-    return error instanceof ImageProcessorUnavailableError ? PROCESSOR_UNAVAILABLE : undefined;
+    // OUR vendor 1.5.2 falls back to in-process resizing internally, so a
+    // resizeImage throw means the image-processing runtime itself cannot
+    // load — the honest 'processor unavailable' outcome for every throw.
+    void error;
+    return PROCESSOR_UNAVAILABLE;
   }
 }
 

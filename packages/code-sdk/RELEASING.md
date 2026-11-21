@@ -1,4 +1,6 @@
-# Releasing `@minimax-ai/code-sdk`
+# Releasing the upstream TypeScript SDK
+
+This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
 
 The SDK is published manually by a maintainer to the public npm registry as
 `@minimax-ai/code-sdk`, with the `latest` dist-tag only. It is versioned independently of the CLI.

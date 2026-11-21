@@ -11,6 +11,7 @@ import { buildPluginSkillRuntimeName } from '@mavis/shared';
 
 import type {
   PluginAgent,
+  PluginAgentDefinition,
   PluginMcpServer,
   PluginSkill,
   ReadPluginPackage,
@@ -94,6 +95,8 @@ export interface PluginSnapshot {
   readonly skills: readonly PluginSkill[];
   readonly mcpServers: readonly PluginSnapshotMcpServer[];
   readonly diagnostics: readonly PluginSnapshotDiagnostic[];
+  /** Declared plugin subagents (deduped), independent of turn capability view. */
+  readonly agents: readonly DesktopTurnPluginAgent[];
   readonly turnCapabilities: DesktopTurnCapabilityView;
 }
 
@@ -118,6 +121,8 @@ interface SnapshotBuildState {
   readonly agents: DesktopTurnPluginAgent[];
   readonly pluginNames: Set<string>;
   readonly skillNames: Set<string>;
+  readonly agentNames: Set<string>;
+  readonly stateAgents: DesktopTurnPluginAgent[];
 }
 
 export class PluginSnapshotBuilder {
@@ -196,6 +201,7 @@ export class PluginSnapshotBuilder {
       enabledPlugins: freeze(state.enabledPlugins),
       skills: frozenSkills,
       mcpServers: freeze(state.mcpServers),
+      agents: freeze(state.stateAgents),
       diagnostics: freeze(state.diagnostics),
       turnCapabilities,
     });
@@ -244,6 +250,8 @@ function createSnapshotBuildState(reservations: PluginCapabilityReservations): S
     agents: [],
     pluginNames: new Set(),
     skillNames: new Set(reservations.skillNames.map(normalizedSkillKey)),
+    agentNames: new Set(),
+    stateAgents: [],
   };
 }
 
@@ -363,6 +371,8 @@ function capabilityCollisionState(state: SnapshotBuildState) {
   return {
     pluginNames: state.pluginNames,
     skillNames: state.skillNames,
+    agentNames: state.agentNames,
+    stateAgents: state.stateAgents,
     diagnostics: state.diagnostics,
   };
 }
@@ -374,6 +384,8 @@ interface PackageCapabilityAcceptanceInput {
   includeRuntimeCapabilities: boolean;
   pluginNames: Set<string>;
   skillNames: Set<string>;
+  agentNames: Set<string>;
+  stateAgents: DesktopTurnPluginAgent[];
   diagnostics: PluginSnapshotDiagnostic[];
 }
 
@@ -403,37 +415,66 @@ function acceptPackageCapabilities(input: PackageCapabilityAcceptanceInput):
     return { skills: [], mcpServers: [], hooks: [], hostBindings: [], agents: [] };
   }
   const skills = acceptPackageSkills(input);
+  const agents: DesktopTurnPluginAgent[] = [];
+  for (const agent of input.plugin.agents ?? []) {
+    const projected = turnPluginAgent(input, agent);
+    const key = collisionKey(projected.scopedName);
+    // First-wins on a duplicated scoped name; the loser becomes a diagnostic.
+    if (input.agentNames.has(key)) {
+      input.diagnostics.push(
+        freeze({
+          code: conflictCode(input.sourceKind, 'AGENT'),
+          pluginName: plugin.name,
+          capabilityName: projected.scopedName,
+        }),
+      );
+      continue;
+    }
+    input.agentNames.add(key);
+    input.stateAgents.push(projected);
+    agents.push(projected);
+  }
   return {
     skills,
     mcpServers: acceptPackageServers(input),
     hooks: [...(plugin.hooks ?? [])],
     hostBindings: acceptHostBindings(input, skills),
-    agents: (input.plugin.agents ?? []).map((agent) => turnPluginAgent(input, agent)),
+    agents,
   };
 }
 
 function turnPluginAgent(
   input: PackageCapabilityAcceptanceInput,
-  agent: PluginAgent,
+  agent: PluginAgent | PluginAgentDefinition,
 ): DesktopTurnPluginAgent {
   const { plugin } = input;
   return freeze({
+    name: agent.scopedName,
+    sourceKind: input.sourceKind,
     scopedName: agent.scopedName,
     pluginName: plugin.name,
     agentName: agent.name,
     sourceFormat:
-      agent.sourceFormat === 'MINIMAX' ? 'minimax' : '\u0063\u006c\u0061\u0075\u0064\u0065',
+      (agent as PluginAgent).sourceFormat === 'CLAUDE'
+        ? ('\u0063\u006c\u0061\u0075\u0064\u0065' as const)
+        : ('minimax' as const),
     origin: input.sourceKind,
     packageDigest: input.packageContentDigest,
     pluginRoot: plugin.rootPath,
     description: agent.description,
-    ...(agent.displayName ? { displayName: agent.displayName } : {}),
+    ...((agent as PluginAgent).displayName
+      ? { displayName: (agent as PluginAgent).displayName }
+      : {}),
     systemPrompt: agent.systemPrompt,
     ...(agent.model ? { model: agent.model } : {}),
     ...(agent.effort ? { effort: agent.effort } : {}),
-    ...(agent.contextWindow === undefined ? {} : { contextWindow: agent.contextWindow }),
-    ...(agent.maxOutputTokens === undefined ? {} : { maxOutputTokens: agent.maxOutputTokens }),
-    ...turnPluginAgentSelectors(agent),
+    ...((agent as PluginAgent).contextWindow === undefined
+      ? {}
+      : { contextWindow: (agent as PluginAgent).contextWindow }),
+    ...((agent as PluginAgent).maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: (agent as PluginAgent).maxOutputTokens }),
+    ...turnPluginAgentSelectors(agent as PluginAgent),
     declaredMcpServers: freeze(plugin.mcpServers.map((server) => server.name)),
   } satisfies DesktopTurnPluginAgent);
 }
@@ -539,7 +580,10 @@ function acceptPackageServers(input: PackageCapabilityAcceptanceInput): PluginSn
   );
 }
 
-function conflictCode(sourceKind: 'official' | 'local', capability: 'PLUGIN' | 'SKILL'): string {
+function conflictCode(
+  sourceKind: 'official' | 'local',
+  capability: 'PLUGIN' | 'SKILL' | 'AGENT',
+): string {
   return `${sourceKind === 'local' ? 'LOCAL' : 'OFFICIAL'}_${capability}_NAME_CONFLICT`;
 }
 

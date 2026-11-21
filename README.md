@@ -1,13 +1,7 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/wordmark-light.svg">
-    <img src="docs/assets/wordmark-light.svg" alt="MiniMax Code" width="760">
-  </picture>
-</p>
+# MCode · Niwa Labs
 
-<h1 align="center">MiniMax Code</h1>
-<p align="center">Turn a prompt into something that works. Build, test, and keep iterating from your terminal—with MiniMax or your own model.</p>
+A Niwa Labs fork of MiniMax Code for terminal, headless and ACP sessions. It adds a resident daemon, durable session history and context, and account profiles.
+
 <p align="center">
   <a href="#quick-start">Get started</a> ·
   <a href="docs/README.md">Documentation</a> ·
@@ -31,40 +25,22 @@ Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, 
 
 ## Quick start
 
-### 1. Install MCode
+### 1. Build the Niwa Labs fork
 
-Use the official installer for your platform. It installs the latest CLI, prepares a compatible Node.js runtime when needed, and does not require `sudo` or administrator privileges. Alpine / musl Linux is not supported by the one-command installer.
+From your checkout, run the following with a supported Node.js version and pnpm 9.12.0.
 
-**macOS / Linux / WSL**
-
-```bash
-curl -fsSL https://filecdn.minimax.chat/public/install.sh | bash
+```sh
+node scripts/check-windows-source-location.mjs
+pnpm install --frozen-lockfile
+pnpm build
+pnpm mcode --version
 ```
 
-**Windows (PowerShell)**
-
-```powershell
-irm https://filecdn.minimax.chat/public/install.ps1 | iex
-```
-
-The scripts install into `~/.minimax-code` on macOS / Linux / WSL and `%USERPROFILE%\.minimax-code` on Windows. The launchers are `bin/mcode` and `bin/mcode-tools` on POSIX, or `mcode.cmd` / `mcode.ps1` and `mcode-tools.cmd` / `mcode-tools.ps1` on Windows. Set `MCODE_INSTALL_DIR` before installation to choose a different location. See [Uninstall](#uninstall) to remove the CLI.
-
-**npm** — if you already have **Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26**:
-
-```bash
-npm install -g @minimax-ai/code@latest --registry=https://registry.npmjs.org/ --ignore-scripts=false --include=optional --allow-scripts=@minimax-ai/code,better-sqlite3
-```
-
-The npm command uses the public registry, includes the optional SQLite dependency, and permits the package and SQLite installation scripts. See the [installation guide](docs/installation.md) for version pinning and Node.js compatibility.
-
-Reopen your terminal and check the installation:
-
-```bash
-mcode --version
-mcode --help
-```
-
-See the official [quick start](https://agent.minimax.io/docs/cli/quick-start), [features](https://agent.minimax.io/docs/cli/features), and [troubleshooting](https://agent.minimax.io/docs/cli/faq).
+Run `pnpm mcode` from the checkout, or run its built `dist/cli.js` with Node.js
+from another directory. The examples below use `mcode` as shorthand for that
+built CLI. The official MiniMax installers, registry packages and update channel
+belong to [upstream](https://github.com/MiniMax-AI/minimax-code). Update this source
+build by rebuilding a newer checkout.
 
 ### 2. Sign in or bring your own API key
 
@@ -82,7 +58,22 @@ mcode login --region global
 
 Complete sign-in in your browser, then open `mcode` and use `/status` to check your account and `/provider` to choose a model. Run `mcode logout` to sign out.
 
-Token Plan requires an account with available credits. Builds from this repository and the published npm CLI `@minimax-ai/code@0.6.9` default to `~/.minimax` for user data (or `~/.minimax-<profile>` when a profile is selected). `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
+Token Plan requires an account with available credits. Builds from this repository and the published npm CLI `@minimax-ai/code@0.6.9` default to `~/.minimax` for user data (or `~/.minimax-<profile>` when a profile is selected). `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Run two accounts](#run-two-accounts) to keep two accounts side by side, and [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
+
+#### Run two accounts
+
+A named profile owns a separate data directory, so its tokens, sessions, `config.yaml`, MCP configuration, plugins, and skills stay out of your other account. With no selector, `mcode` uses the `default` profile.
+
+```bash
+mcode login                      # personal account -> ~/.minimax
+mcode login --profile work       # work account     -> ~/.minimax-work
+mcode                            # personal
+mcode --profile work             # work
+mcode profile list               # see both
+mcode profile remove work --yes  # forget the work profile
+```
+
+`--profile` is accepted on the root command and on every subcommand, so `mcode --profile work exec` and `mcode login --profile work` select the same profile. `MINIMAX_PROFILE=work` selects a profile for a whole shell or process tree and loses to the flag. Profile names are 1-64 characters of letters, numbers, dots, underscores, and hyphens, starting and ending with a letter or number; any other name is refused with an error rather than corrected. `default` is reserved and means the same as omitting the flag. See [Profiles](docs/installation.md#profiles) for the naming rules, the isolated state, and every `mcode profile` subcommand.
 
 <details>
 <summary>Use your own API key (BYOK)</summary>
@@ -109,8 +100,6 @@ Providers added this way are stored under `custom_provider` in the active profil
 Clone this repository and copy the starter into a separate directory:
 
 ```bash
-git clone https://github.com/MiniMax-AI/minimax-code.git
-cd minimax-code
 node examples/pocket-pet/setup.mjs ../my-pocket-pet
 cd ../my-pocket-pet
 node serve.mjs
@@ -260,8 +249,6 @@ Account features, updates, feedback, and diagnostics are also included. Managed 
 
 To develop MCode or run this source checkout, you need Git, **Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26**, and **pnpm 9.12.0**. On Windows, keep the checkout on a local NTFS volume and outside cloud-synced folders; the preflight command below checks the volume before pnpm creates workspace links.
 ```bash
-git clone https://github.com/MiniMax-AI/minimax-code.git
-cd minimax-code
 node scripts/check-windows-source-location.mjs
 pnpm install --frozen-lockfile
 pnpm build
@@ -280,35 +267,12 @@ This repository targets the **0.6.3 source preview**. Installing the published p
 
 ## Documentation and contributing
 
-- [Installation and updates](docs/installation.md) · [Examples](docs/examples.md) · [TUI status line](packages/tui/docs/status-line-config.md)
-- [Contributor guide](CONTRIBUTING.md) · [Report a bug or propose an idea](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) · [Report a security issue](SECURITY.md)
-- [All documentation](docs/README.md): architecture, capability coverage, verification records, source synchronization, and release preparation.
+- [Installation and account profiles](docs/installation.md)
+- [Architecture](docs/architecture.md) and [component documentation](docs/components)
+- [Contributing](CONTRIBUTING.md), [security reporting](SECURITY.md) and [third-party notices](THIRD_PARTY_NOTICES.md)
 
-English is the primary documentation language. The [Chinese README](README_ZH.md) mirrors this page.
-
-For now, code and documentation pull requests are accepted only from repository collaborators. If you are not a collaborator but have an idea or proposal, please [open an issue](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) so we can discuss it. Remove secrets, account details, and private project content from reports.
-
-## Desktop app and support
-
-<a href="https://agent.minimax.io/download" title="Download MiniMax Code">
-  <img src="https://filecdn.minimax.chat/public/c3ebbd2e-f55b-48d7-adff-030abb63e06d.png" alt="MiniMax Code desktop app — click to download" width="100%" />
-</a>
-
-[Download for macOS or Windows](https://agent.minimax.io/download) · [Report a problem or ask a question](https://github.com/MiniMax-AI/minimax-code/issues/new/choose)
-
-This repository also hosts issue reporting for the MiniMax Code desktop app. The published source covers the terminal TUI, headless CLI, and ACP; it does not include the desktop application's source. Select the affected product when filing an issue. For a desktop bug, include the app version, operating system, and a log upload ID if available from **Settings → General → Upload logs**. For a CLI bug, include `mcode --version`, your interface, and a minimal reproduction. Remove credentials and private project content from reports.
-
-## Feedback and contact
-
-| Channel | Use it for |
-| --- | --- |
-| [GitHub Issues](https://github.com/MiniMax-AI/minimax-code/issues/new/choose) | Public bug reports, feature requests, and questions about the CLI or desktop app. |
-| [MiniMaxCode@minimax.io](mailto:MiniMaxCode@minimax.io) | General feedback and support inquiries. |
-| [security.mcode@minimax.io](mailto:security.mcode@minimax.io) | Private vulnerability reports. Send reproduction details and redacted evidence here; see [Security](SECURITY.md). |
-| [Discord](https://minimax.io/discord) | Community discussion and feedback. |
-| [Feishu feedback group QR code](https://cdn.hailuoai.com/hailuo-video-web/public_assets/minimax_code_feishu_group_url.png) | Chinese-language community feedback. Scan with Feishu, or find the QR code in the Chinese desktop app under the user menu → **Contact us → Feishu**. |
-
-Follow [MiniMax on X](https://x.com/MiniMaxAgent) for updates. Keep vulnerability details, credentials, and private project content out of public issues and community chats.
+Use the Niwa Labs fork’s issues for fork behavior. For MiniMax accounts,
+official installers or the desktop app, see [upstream MiniMax Code](https://github.com/MiniMax-AI/minimax-code).
 
 ## License
 

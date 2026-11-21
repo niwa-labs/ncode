@@ -8,10 +8,11 @@ export function formatPermissionRequest(request: TuiPendingPermission): string {
 
 export function formatPermissionResolution(
   request: TuiPendingPermission,
-  decision: 'allowOnce' | 'allowAlways' | 'deny',
+  decision: 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways',
 ): string {
   const tool = sanitizeTerminalText(request.toolName ?? 'unknown');
   if (decision === 'allowAlways') return `Saved permission rule · ${tool}`;
+  if (decision === 'denyAlways') return `Saved deny rule · ${tool}`;
   if (decision === 'deny') return `Denied · ${tool}`;
-  return `Allowed for this conversation · ${tool}`;
+  return `Allowed once · ${tool}`;
 }

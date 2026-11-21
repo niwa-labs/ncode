@@ -1,4 +1,8 @@
-import type { TuiRuntimeEvent } from '../types/runtime-events.js';
+import type {
+  TuiPromptSuggestionEvent,
+  TuiPromptSuggestionStatusEvent,
+  TuiRuntimeEvent,
+} from '../types/runtime-events.js';
 import type { TuiPendingPermission, TuiQuestionnaireRequest } from '../types/runtime-models.js';
 import { buildTuiToolPreview } from './tool-preview.js';
 import { parseSessionLLMRetryEventPayload } from './llm-retry-event.js';
@@ -45,6 +49,42 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       errorDetail: readString(payload, ['errorDetail', 'error_detail']),
       errorProviderId: readString(payload, ['errorProviderId', 'error_provider_id']),
     });
+  }
+  if (event.type === 'turn.prompt_suggestion.generated') {
+    const suggestion = readString(payload, ['suggestion']);
+    const turnId = readString(payload, ['turnId', 'turn_id']);
+    if (!suggestion || !turnId || !sessionId)
+      return { ...base, type: 'unknown', originalType: event.type };
+    const promptVersion = readString(payload, ['promptVersion', 'prompt_version']);
+    const elapsedMs = readNumber(payload, ['elapsedMs', 'elapsed_ms']);
+    const generated: TuiPromptSuggestionEvent = {
+      ...base,
+      sessionId,
+      type: 'turn.prompt_suggestion.generated',
+      turnId,
+      suggestion,
+      ...(promptVersion !== undefined ? { promptVersion } : {}),
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    };
+    return compact(generated);
+  }
+  if (event.type === 'turn.prompt_suggestion.status') {
+    const turnId = readString(payload, ['turnId', 'turn_id']);
+    const status = readString(payload, ['status']);
+    const reason = readString(payload, ['reason']);
+    const requested = readBoolean(payload, ['requested']);
+    if (!turnId || !status || !sessionId)
+      return { ...base, type: 'unknown', originalType: event.type };
+    const statusEvent: TuiPromptSuggestionStatusEvent = {
+      ...base,
+      sessionId,
+      type: 'turn.prompt_suggestion.status',
+      turnId,
+      status: status as 'generating' | 'unavailable' | 'cancelled',
+      ...(reason !== undefined ? { reason } : {}),
+      ...(requested !== undefined ? { requested } : {}),
+    };
+    return compact(statusEvent);
   }
   if (event.type === 'session.queue.updated') {
     return compact({
@@ -149,6 +189,13 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       });
     }
   }
+  if (event.type === 'session.compaction.progress') {
+    const progressId = readString(payload, ['progressId']);
+    const stage = readString(payload, ['stage']);
+    if (sessionId && progressId && (stage === 'preparing' || stage === 'installed' || stage === 'failed')) {
+      return { ...base, type: event.type, progressId, stage };
+    }
+  }
   if (
     event.type === 'session.compaction.started' ||
     event.type === 'session.compaction.completed' ||
@@ -174,7 +221,6 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       return compact({
         ...base,
         type: event.type,
-        turnId: readString(payload, ['turnId', 'turn_id']),
         variant,
         lastUserMsgId: readString(payload, ['lastUserMsgId', 'last_user_msg_id']),
       });
@@ -189,19 +235,16 @@ export function normalizeTuiRuntimeEvent(event: RawTuiRuntimeEvent): TuiRuntimeE
       });
     }
   }
-  if (event.type === 'turn.prompt_suggestion.generated') {
-    const turnId = readString(payload, ['turnId', 'turn_id']);
-    const suggestion = readString(payload, ['suggestion'])?.trim();
-    if (sessionId && turnId && suggestion) {
-      const elapsedMs = payload.elapsedMs ?? payload.elapsed_ms;
+  if (event.type === 'session.publish_conflict') {
+    const durableEntries = readNumber(payload, ['durableEntries', 'durable_entries']);
+    if (sessionId && durableEntries !== undefined) {
       return compact({
         ...base,
         type: event.type,
         sessionId,
-        turnId,
-        suggestion,
-        promptVersion: readString(payload, ['promptVersion', 'prompt_version']),
-        elapsedMs: isFiniteNumber(elapsedMs) ? elapsedMs : undefined,
+        preservedTo: readString(payload, ['preservedTo', 'preserved_to']),
+        durableEntries,
+        publishedEntries: readNumber(payload, ['publishedEntries', 'published_entries']) ?? 0,
       });
     }
   }
@@ -625,8 +668,15 @@ function readPermission(value: Record<string, unknown>): TuiPendingPermission | 
   });
 }
 
-function readPermissionDecision(value: unknown): 'allowOnce' | 'allowAlways' | 'deny' | undefined {
-  return value === 'allowOnce' || value === 'allowAlways' || value === 'deny' ? value : undefined;
+function readPermissionDecision(
+  value: unknown,
+): 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways' | undefined {
+  return value === 'allowOnce' ||
+    value === 'allowAlways' ||
+    value === 'deny' ||
+    value === 'denyAlways'
+    ? value
+    : undefined;
 }
 
 function readString(value: Record<string, unknown>, keys: readonly string[]): string | undefined {

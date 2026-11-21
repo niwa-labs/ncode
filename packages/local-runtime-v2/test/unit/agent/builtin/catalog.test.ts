@@ -1497,8 +1497,9 @@ describe("BuiltinAgentCatalog prompt modes", () => {
   });
 });
 
-describe('BuiltinAgentCatalog PTC section', () => {
-  const POINTER = '- Tool selection for this turn is described in "Tool calls in this turn".';
+describe('BuiltinAgentCatalog run_code (PTC-context) section', () => {
+  // OUR codemode (В2): top-level tools stay callable, so the section never
+  // swaps or removes Harness lines — it only inserts before "# Harness".
   const CONFLICTING = [
     'Prefer dedicated tools over `bash`',
     'Independent tool calls can run in parallel in one response.',
@@ -1515,20 +1516,26 @@ describe('BuiltinAgentCatalog PTC section', () => {
     { name: 'desktop work', input: { ...tui, surface: 'interactive' as const, promptProfile: 'desktop' as const, appMode: 'work' as const } },
   ];
 
-  it('lists only the enabled built-in tools and keeps the wall-clock hint', async () => {
+  it('lists only the enabled built-in tools and pins our В2 contract', async () => {
     const catalog = new BuiltinAgentCatalog();
     expect(await catalog.renderPtcSection(tui)).toBe(
       [
-        '# Tool calls in this turn (PTC)',
-        "Only `run_code` and the visible control tools are top-level in this turn. The tools listed at the start of `run_code`'s description are called only inside `run_code` as `await tools.<name>(args)`; calling them directly is rejected.",
+        '# Tool calls in this turn',
+        '`run_code` runs JavaScript in a sandbox and calls this turn\'s other tools from the script as',
+        '`await tools.<name>({...args})`. Every tool stays available as a normal top-level call; reach for',
+        '`run_code` when one program can gather or coordinate work that would otherwise cost many separate',
+        'responses.',
         '- `tools.grep` for file-content search, not `grep` or `rg` in `tools.bash`.',
         '- `tools.glob` for file-name or path search, not `find` or `ls -R` in `tools.bash`.',
-        '- `tools.read` to read files, not `cat`, `head` or `sed -n` in `tools.bash`; use `r.data.content` for the raw text.',
+        '- `tools.read` to read files, not `cat`, `head` or `sed -n` in `tools.bash`; the call returns the file text as a string.',
         '- `tools.edit` for targeted changes.',
         '- `tools.write` for new files or rewrites.',
         '- `tools.bash` only for builds, tests, git and other shell work.',
         '- Gather context in as few `run_code` calls as possible: put every independent read and search you already know you need into one `Promise.all`; reads and searches run at the same time. Shell commands run one at a time, so reads and searches through `tools.bash` do not run in parallel.',
-        '- A `run_code` program stops after 120 seconds by default. For a longer program, pass `timeout_ms` to `run_code` itself, next to `code` and `description`, e.g. `{ code, description, timeout_ms: 600000 }` for 10 minutes (at most 3,600,000). `timeout_ms` is not a `tools.bash` argument. A `tools.bash` timeout (in seconds) longer than the time left extends the program to fit it, within the same 3,600,000 ms limit. Or use `run_in_background: true`.',
+        '- Only the value your script returns reaches the model. A failed tool call throws; wrap calls whose failure is expected in `try`/`catch` so one miss does not discard the rest of the program.',
+        '- If the script itself throws, everything it produced before the throw is kept as partial output under "Script failed" — structure long programs so each gathered piece is returned or logged before the next.',
+        '- The combined output is capped (about 10k tokens); a truncated result says so. Do not print whole files inside `run_code` — return the lines that answer the question.',
+        '- Each launch is a fresh sandbox: no Node, no file system, no network of its own, and no state carried between launches. Permissions are checked per child call exactly as for direct calls; a refused child throws into your script.',
       ].join('\n'),
     );
     // Without bash every half sentence that names tools.bash stays out: the
@@ -1541,15 +1548,21 @@ describe('BuiltinAgentCatalog PTC section', () => {
       }),
     ).toBe(
       [
-        '# Tool calls in this turn (PTC)',
-        "Only `run_code` and the visible control tools are top-level in this turn. The tools listed at the start of `run_code`'s description are called only inside `run_code` as `await tools.<name>(args)`; calling them directly is rejected.",
+        '# Tool calls in this turn',
+        '`run_code` runs JavaScript in a sandbox and calls this turn\'s other tools from the script as',
+        '`await tools.<name>({...args})`. Every tool stays available as a normal top-level call; reach for',
+        '`run_code` when one program can gather or coordinate work that would otherwise cost many separate',
+        'responses.',
         '- `tools.grep` for file-content search.',
         '- `tools.glob` for file-name or path search.',
-        '- `tools.read` to read files; use `r.data.content` for the raw text.',
+        '- `tools.read` to read files; the call returns the file text as a string.',
         '- `tools.edit` for targeted changes.',
         '- `tools.write` for new files or rewrites.',
         '- Gather context in as few `run_code` calls as possible: put every independent read and search you already know you need into one `Promise.all`; reads and searches run at the same time.',
-        '- A `run_code` program stops after 120 seconds by default. For a longer program, pass `timeout_ms` to `run_code` itself, next to `code` and `description`, e.g. `{ code, description, timeout_ms: 600000 }` for 10 minutes (at most 3,600,000).',
+        '- Only the value your script returns reaches the model. A failed tool call throws; wrap calls whose failure is expected in `try`/`catch` so one miss does not discard the rest of the program.',
+        '- If the script itself throws, everything it produced before the throw is kept as partial output under "Script failed" — structure long programs so each gathered piece is returned or logged before the next.',
+        '- The combined output is capped (about 10k tokens); a truncated result says so. Do not print whole files inside `run_code` — return the lines that answer the question.',
+        '- Each launch is a fresh sandbox: no Node, no file system, no network of its own, and no state carried between launches. Permissions are checked per child call exactly as for direct calls; a refused child throws into your script.',
       ].join('\n'),
     );
     const readOnly = await catalog.renderPtcSection({
@@ -1557,13 +1570,21 @@ describe('BuiltinAgentCatalog PTC section', () => {
       capabilities: resolveAgentCapabilities({ tools: ['read', 'grep'] }),
     });
     expect(readOnly).toContain('- `tools.grep` for file-content search.');
-    expect(readOnly).toContain('- `tools.read` to read files');
-    for (const absent of ['tools.glob', 'tools.edit', 'tools.write', 'tools.bash', 'run_in_background'])
+    expect(readOnly).toContain('- `tools.read` to read files; the call returns the file text as a string.');
+    for (const absent of [
+      'tools.glob',
+      'tools.edit',
+      'tools.write',
+      'tools.bash',
+      'timeout_ms',
+      'run_in_background',
+      'r.data.content',
+    ])
       expect(readOnly).not.toContain(absent);
-    // Without bash the hint ends after the run_code example; the tools.bash sentences stay out.
+    // The cap/sandbox contract lines carry no per-tool halves; they close the section.
     expect(
       readOnly.endsWith(
-        '- A `run_code` program stops after 120 seconds by default. For a longer program, pass `timeout_ms` to `run_code` itself, next to `code` and `description`, e.g. `{ code, description, timeout_ms: 600000 }` for 10 minutes (at most 3,600,000).',
+        '- Each launch is a fresh sandbox: no Node, no file system, no network of its own, and no state carried between launches. Permissions are checked per child call exactly as for direct calls; a refused child throws into your script.',
       ),
     ).toBe(true);
   });
@@ -1578,7 +1599,7 @@ describe('BuiltinAgentCatalog PTC section', () => {
   });
 
   it.each(modes)(
-    'puts the section before # Harness of the $name agent.md seed and swaps the conflicting lines',
+    'inserts the section before # Harness of the $name seed and keeps every Harness line',
     async ({ input }) => {
       const catalog = new BuiltinAgentCatalog();
       const section = await catalog.renderPtcSection(input);
@@ -1586,55 +1607,61 @@ describe('BuiltinAgentCatalog PTC section', () => {
       const on = await catalog.render({ ...input, ptc: { section } });
 
       expect(on.corePrompt).toContain(`${section}\n\n# Harness\n`);
-      expect(on.corePrompt.indexOf('# Tool calls in this turn (PTC)')).toBeLessThan(
+      expect(on.corePrompt.indexOf('# Tool calls in this turn')).toBeLessThan(
         on.corePrompt.indexOf('# Harness'),
       );
-      expect(on.corePrompt.match(/# Tool calls in this turn \(PTC\)/gu)).toHaveLength(1);
-      expect(on.corePrompt).toContain(POINTER);
-      expect(on.corePrompt).toContain(
-        '- For unfamiliar project-specific concepts, search the workspace first with `tools.grep` or `tools.glob` inside `run_code`.',
-      );
+      expect(on.corePrompt.match(/# Tool calls in this turn/gu)).toHaveLength(1);
+      // OUR В2 semantics: the Harness guidance is never swapped out.
       for (const line of CONFLICTING) {
-        expect(on.corePrompt).not.toContain(line);
+        expect(on.corePrompt).toContain(line);
         expect(off.corePrompt).toContain(line);
       }
-      for (const text of ['Tool calls in this turn', 'timeout_ms', 'tools.grep', 'run_code'])
+      for (const text of ['Tool calls in this turn', 'run_code'])
         expect(off.corePrompt).not.toContain(text);
-      // Only the PTC section and the swapped Harness lines differ.
+      // Only the inserted section differs.
       expect(on.surfacePrompt).toBe(off.surfacePrompt);
     },
   );
 
-  it('keeps the authoritative-data guidance in the Work PTC branch', async () => {
+  it('keeps the authoritative-data guidance in the Work seed with the section on', async () => {
     const catalog = new BuiltinAgentCatalog();
     const input = modes[2]!.input;
     const on = await catalog.render({
       ...input,
       ptc: { section: await catalog.renderPtcSection(input) },
     });
-    // Own line: the source policy inserts the file-reference rule right after the pointer line.
     expect(on.corePrompt).toContain(
-      `${POINTER}\n- When specialized tools overlap in responsibility, prefer the one backed by the most authoritative data source.`,
+      'When specialized tools overlap in responsibility, prefer the one backed by the most authoritative data source.',
     );
-    expect(on.corePrompt).not.toContain('Prefer dedicated tools over `bash` or `web_search`');
+    expect(on.corePrompt).toContain('Prefer dedicated tools over `bash` or `web_search`');
+  });
+
+  it('carries the upstream Web Research harness section in the tui seed (merge-loss pin)', async () => {
+    const catalog = new BuiltinAgentCatalog();
+    const off = await catalog.render(tui);
+    expect(off.corePrompt).toContain('# Web Research');
+    expect(off.corePrompt).toContain('Never scrape search-engine result pages.');
+    expect(off.corePrompt.indexOf('# Web Research')).toBeLessThan(
+      off.corePrompt.indexOf('# Core Judgment'),
+    );
   });
 
   it.each([
     { name: 'tui', input: { ...tui, agentName: 'custom-agent' } },
     { name: 'desktop', input: { ...tui, agentName: 'custom-agent', surface: 'interactive' as const, promptProfile: 'desktop' as const } },
-  ])('applies the same swap to the $name shared base of a Custom Agent', async ({ input }) => {
+  ])('inserts the same section into the $name shared base of a Custom Agent', async ({ input }) => {
     const catalog = new BuiltinAgentCatalog();
     const section = await catalog.renderPtcSection(input);
     const off = await catalog.renderSharedBasePrompt(input, 'worker');
     const on = await catalog.renderSharedBasePrompt({ ...input, ptc: { section } }, 'worker');
     expect(on.startsWith(`${section}\n\n# Harness\n`)).toBe(true);
-    expect(on).toContain(POINTER);
-    for (const line of CONFLICTING) {
-      expect(on).not.toContain(line);
+    // Both AGENT_CONTEXT branches carry the first two Harness lines; the
+    // "search the workspace" line exists only in the non-tui branch.
+    for (const line of CONFLICTING.slice(0, 2)) {
+      expect(on).toContain(line);
     }
-    for (const line of CONFLICTING.slice(0, 2)) expect(off).toContain(line);
     expect(off).not.toContain('Tool calls in this turn');
-    // The root layer of the same file carries no PTC text.
+    // The root layer of the same file carries no run_code text.
     expect(
       await catalog.renderSurfacePrompt({ ...input, ptc: { section } }),
     ).toBe(await catalog.renderSurfacePrompt(input));

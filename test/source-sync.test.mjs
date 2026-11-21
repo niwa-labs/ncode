@@ -421,7 +421,7 @@ function cliReleaseFixture(t) {
   git('config', 'user.name', 'Release Fixture'); git('config', 'user.email', 'release@example.invalid');
   git('config', 'core.hooksPath', path.join(home, 'no-hooks'));
   mkdirSync(path.join(root, 'packages/tui'), { recursive: true });
-  for (const name of ['package.json', 'packages/tui/package.json']) writeFileSync(path.join(root, name), JSON.stringify({ name: 'fixture', version: '1.2.3', private: true }, null, 2) + '\n');
+  for (const name of ['package.json', 'packages/tui/package.json']) writeFileSync(path.join(root, name), JSON.stringify({ name: 'minimax-code', version: '1.2.3', private: true }, null, 2) + '\n');
   git('add', '.'); git('commit', '-m', 'Fixture baseline'); git('remote', 'add', 'origin', remote); git('push', '-u', 'origin', 'main');
   return { root, remote, git, base: git('rev-parse', 'HEAD') };
 }
@@ -535,7 +535,19 @@ test('CLI publication requires every supported installation receipt for the exac
   assert.throws(() => validateReleaseReports(options));
 });
 
-test('CLI release publishes only tag pushes after full verification and archive installation', () => {
+test('source fork CLI publication commands fail before accessing Git or GitHub', () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  for (const args of [
+    ['scripts/release-cli.mjs', '--version', '100.0.0'],
+    ['scripts/publish-cli-release.mjs'],
+  ]) {
+    const result = spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /CLI publication is reserved for upstream MiniMax Code/);
+  }
+});
+
+test('CLI release publishes only upstream tag pushes after verification and installation', () => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/cli-release.yml', import.meta.url), 'utf8'));
   assert.deepEqual(workflow.on.push, { tags: ['v*'] });
   assert.equal(workflow.on.workflow_dispatch.inputs.tag.required, false);
@@ -544,7 +556,8 @@ test('CLI release publishes only tag pushes after full verification and archive 
   assert.ok(workflow.jobs.build.steps.some(step => step.run === 'pnpm verify'));
   assert.ok(workflow.jobs.build.steps.some(step => step.run?.includes('cliBuildVersion(process.cwd(), tag)')));
   assert.deepEqual(workflow.jobs.publish.needs, ['build', 'install']);
-  assert.equal(workflow.jobs.publish.if, "github.event_name == 'push'");
+  assert.equal(workflow.jobs.publish.if, "github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push'");
+  assert.equal(workflow.jobs['publish-acp'].if, "github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'");
   assert.equal(workflow.jobs.publish.permissions.contents, 'write');
   assert.equal(workflow.jobs.install.strategy.matrix, '${{ fromJSON(needs.build.outputs.matrix) }}');
   const install = workflow.jobs.install.steps.find(step => step.run === 'pnpm verify --profile package');
@@ -581,7 +594,7 @@ test('Python SDK release publishes only tag pushes through Trusted Publishing af
   for (const [name, [condition, environment]] of Object.entries(publishers)) {
     const job = workflow.jobs[name];
     assert.equal(job.needs, 'build');
-    assert.equal(job.if, condition);
+    assert.equal(job.if, `github.repository == 'MiniMax-AI/minimax-code' && ${condition}`);
     assert.equal(job.environment.name, environment);
     assert.deepEqual(job.permissions, { 'id-token': 'write' });
     assert.ok(job.steps.every(step => !step.run), 'publish jobs run no repository code');
@@ -703,7 +716,7 @@ function verificationFixture(t) {
   };
 }
 
-test('platform verification omits only the compiler gate and invalid profiles fail closed', t => {
+test('platform verification omits only the full-only gates and invalid profiles fail closed', t => {
   const f = verificationFixture(t);
   const full = f.run(['--list']);
   const platform = f.run(['--profile', 'platform', '--list']);
@@ -711,7 +724,10 @@ test('platform verification omits only the compiler gate and invalid profiles fa
   assert.equal(platform.status, 0, platform.stderr);
   const gates = full.stdout.trim().split('\n');
   assert.ok(gates.includes('typecheck'));
-  assert.deepEqual(platform.stdout.trim().split('\n'), gates.filter(g => g !== 'typecheck'));
+  // Full-only gates: the compiler gate (`typecheck`) and the W3 package
+  // typecheck sweep (`typecheck:packages`) — the platform profile omits both.
+  const fullOnly = ['typecheck', 'typecheck:packages'];
+  assert.deepEqual(platform.stdout.trim().split('\n'), gates.filter(g => !fullOnly.includes(g)));
   assert.notEqual(f.run(['--profile', 'platfrom', '--list']).status, 0);
   assert.notEqual(f.run(['--unknown']).status, 0);
   assert.equal(existsSync(f.reportDir), false);
@@ -823,7 +839,7 @@ test('ordinary CI runs a focused Windows contract while compatibility remains ma
   assert.ok(Object.hasOwn(ci.on, 'pull_request'));
   assert.deepEqual(ci.on.push.branches, ['main']);
   assert.deepEqual(Object.keys(ci.jobs).sort(), ['changes', 'docs', 'verification', 'verify']);
-  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-latest', 'windows-latest']);
+  assert.deepEqual(ci.jobs.verify.strategy.matrix.os, ['ubuntu-latest', 'macos-15', 'windows-latest']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.node, ['24']);
   assert.deepEqual(ci.jobs.verify.strategy.matrix.include, [
     { os: 'ubuntu-latest', node: '24', profile: 'full' },
@@ -1152,7 +1168,7 @@ test('issue product labels follow current form answers without replacing unrelat
   await assert.rejects(replay(answer('Desktop app'), [], 403), /GitHub GET failed: 403/);
 });
 
-test('issue forms label incoming reports for triage and retain collaborator-only PR guidance', () => {
+test('issue forms label reports for triage and direct vulnerability reports to private intake', () => {
   for (const [name, type] of [
     ['01-bug-report.yml', 'bug'], ['02-feature-request.yml', 'enhancement'],
     ['03-question.yml', 'question'], ['docs.yml', 'documentation'],
@@ -1162,9 +1178,10 @@ test('issue forms label incoming reports for triage and retain collaborator-only
   }
   const config = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/config.yml', import.meta.url), 'utf8'));
   assert.equal(config.blank_issues_enabled, false);
-  const policy = config.contact_links.find(link => link.url.endsWith('/CONTRIBUTING.md'));
-  assert.match(policy.about, /only from repository collaborators/);
-  assert.match(policy.about, /external PRs are not accepted/);
+  const security = config.contact_links.find(link => link.name === 'Report a vulnerability privately');
+  assert.match(security?.url, /^https:\/\/docs\.github\.com\//);
+  assert.match(security.about, /on this repository/);
+  assert.ok(config.contact_links.every(link => !link.url.includes('MiniMax-AI/minimax-code')));
   const question = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/03-question.yml', import.meta.url), 'utf8'));
   assert.equal(question.body.find(field => field.id === 'platform').validations.required, false);
   assert.equal(question.body.find(field => field.id === 'question').validations.required, true);

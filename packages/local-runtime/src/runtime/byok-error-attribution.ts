@@ -1,10 +1,11 @@
 import type { StreamFn } from '@earendil-works/pi-agent-core';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry.
 import {
   streamSimple,
   type AssistantMessage,
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import { classifyLLMErrorToCode, LLM_ERROR_CODES } from '@mavis/shared/llm-error-classifier';
 
 const BYOK_ERROR_PREFIX = 'BYOK upstream error';

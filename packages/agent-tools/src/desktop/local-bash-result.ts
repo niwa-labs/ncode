@@ -1,11 +1,19 @@
+import type { AgentToolResult } from '@earendil-works/pi-agent-core';
+// Port-mode closure (W01-C, PR-09 reapply): the structural Bash contract lives
+// in the vendored pin again (BashToolDetails carries execution/timing/output/
+// processOutput; the local shell operations throw the vendored
+// BashExecutionError). This module keeps only the product-side helpers and
+// re-exports the vendored contract so existing importers and the
+// `instanceof BashExecutionError` checks keep one class identity.
 import {
   BashExecutionError,
   type BashExecutionOutcome,
   type BashToolDetails,
-} from '@earendil-works/pi-coding-agent/tools';
-import type { AgentToolResult } from '@earendil-works/pi-agent-core';
+} from '@earendil-works/pi-coding-agent';
 
 import type { LocalBackgroundBashExecutorResult } from './types.js';
+
+export { BashExecutionError, type BashExecutionOutcome, type BashToolDetails };
 
 export interface LocalBashExecutionOutcome extends Omit<BashExecutionOutcome, 'reason'> {
   reason: BashExecutionOutcome['reason'] | 'preflight_failed' | 'watchdog_timeout';
@@ -23,6 +31,13 @@ export function localBashResultFromPi(
       .join('\n'),
     details,
     ...(execution && execution.status !== 'succeeded' ? { isError: true } : {}),
+    // W04 tool-contract funnel: forward the pin's programmatic channel
+    // (`BashToolOutput` with exit_code etc.) and tool-owned usage verbatim,
+    // without inventing either when the pin result omits them.
+    ...(result.structuredContent !== undefined
+      ? { structuredContent: result.structuredContent }
+      : {}),
+    ...(result.usage !== undefined ? { usage: result.usage } : {}),
   };
 }
 

@@ -1,10 +1,12 @@
+// pi 48c8f322: the static catalog helpers moved to the pi-ai `./compat`
+// entry (deprecated aliases over the builtin provider registry).
 import {
   getModels,
   getProviders,
   type Api,
   type Model,
   type ThinkingLevelMap,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import type { StreamFn, ThinkingLevel as PiThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   knownMaxImagesPerRequestForBaseUrl,
@@ -64,25 +66,8 @@ import {
 import { hasOpenPlatformThinkingVariants } from './openplatform-thinking.js';
 import { withByokErrorAttribution } from './byok-error-attribution.js';
 import { withLocalDynamicMaxTokens } from './dynamic-max-tokens.js';
-import { resolveLocalRequestBodyBytes } from './file-api-capabilities.js';
+import { normalizeLocalMultimodalLimitCapabilities } from './file-api-capabilities.js';
 import { resolveLocalFileApiGatewayAuth } from './file-api-gateway-auth.js';
-
-/** Strips trailing `char` repeats in linear time (no backtracking regex). */
-function trimTrailingChar(value: string, char: string): string {
-  let end = value.length;
-  while (end > 0 && value[end - 1] === char) end -= 1;
-  return value.slice(0, end);
-}
-
-
-/**
- * Images per request for a model that declares none. The Messages API accepts
- * 100 on 200K-context models and 600 otherwise, OpenAI 1500; MiniMax M3 models
- * accept 20 and Mistral's API 8, recognized below.
- */
-const LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST = 100;
-const MINIMAX_M3_MAX_IMAGES_PER_REQUEST = 20;
-const MINIMAX_M3_FAMILY = /^minimax-m3(?:[.-]|$)/iu;
 
 const FALLBACK_MODEL_LIMITS = {
   contextWindow: 200_000,
@@ -221,10 +206,9 @@ export class LocalModelResolver implements LocalModelResolverLike {
     const maxTokens = positive(input.modelRef.max_tokens) || input.maxTokens;
     const thinking = resolveThinking(input, this.options.implicitCustomProviderThinking === true);
     const baseUrl = normalizeResolvedBaseUrl(input.api, input.baseUrl);
-    const maxRequestBodyBytes = resolveLocalRequestBodyBytes(input.modelRef.capabilities, {
-      api: input.api,
-      baseUrl,
-    });
+    const maxRequestBodyBytes = Number(
+      normalizeLocalMultimodalLimitCapabilities(input.modelRef.capabilities).max_request_body_bytes,
+    );
     const model = buildResolvedModel({ input, contextWindow, maxTokens, baseUrl, thinking });
     const streamFn = resolveModelStream(input, this.options.streamFn);
     const fileApiGatewayAuth = input.managedProvider
@@ -634,7 +618,7 @@ function thinkingCompatibilityFields(
 function normalizeResolvedBaseUrl(api: Api, baseUrl: string): string {
   return isModelProviderApi(api)
     ? normalizeProviderBaseUrl(api, baseUrl)
-    : trimTrailingChar(baseUrl, '/');
+    : baseUrl.replace(/\/+$/u, '');
 }
 
 function buildResolvedModel(scope: {
@@ -649,10 +633,7 @@ function buildResolvedModel(scope: {
   const compat = resolvedModelCompatibility(input, thinking);
   const maxImagesPerRequest =
     normalizeMaxImagesPerRequest(input.modelRef.capabilities?.max_images_per_request) ??
-    knownMaxImagesPerRequestForBaseUrl(baseUrl) ??
-    (MINIMAX_M3_FAMILY.test(input.modelId.trim())
-      ? MINIMAX_M3_MAX_IMAGES_PER_REQUEST
-      : LOCAL_DEFAULT_MAX_IMAGES_PER_REQUEST);
+    knownMaxImagesPerRequestForBaseUrl(baseUrl);
   const model: Model<Api> & ModelRequestImageLimit = {
     id: input.modelId,
     name: input.modelId,

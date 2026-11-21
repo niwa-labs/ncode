@@ -5,12 +5,20 @@
 
 import {
 	type AssistantMessage,
-	type Context,
+	type ClientIdentity,
 	EventStream,
-	streamSimple,
+	getCurrentTools,
+	getToolStateChanges,
+	mergeClientIdentity,
+	normalizeContext,
+	PI_ATTRIBUTION,
+	type SystemMessage,
 	type ToolResultMessage,
+	type ToolStateChanges,
+	toToolDeclaration,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { getDefaultStreamFn } from "./stream-fn.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -18,27 +26,19 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolCall,
+	AgentToolCallOutcome,
 	AgentToolResult,
+	PrepareNextTurnContext,
 	StreamFn,
 } from "./types.ts";
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /**
- * Optional host-owned relationship for a tool call executed outside a model
- * tool batch. The loop does not infer it from arguments or message text.
+ * Request identity of agent loops: pi-ai's defaults with provider attribution to pi. `AgentLoopConfig.identity`
+ * overrides it field by field.
  */
-export interface ToolCallExecutionOptions {
-	parentToolCallId?: string;
-	parentDescription?: string;
-	missingToolMessage?: (toolName: string) => string | undefined;
-}
-
-/** The subset of loop configuration used by one tool-call lifecycle. */
-export type ToolCallLifecycleConfig = Pick<
-	AgentLoopConfig,
-	"beforeToolCall" | "onToolExecutionStart" | "afterToolCall" | "missingToolMessage"
->;
+export const DEFAULT_AGENT_IDENTITY: ClientIdentity = { attribution: PI_ATTRIBUTION };
 
 /**
  * Start an agent loop with a new prompt message.
@@ -48,8 +48,8 @@ export function agentLoop(
 	prompts: AgentMessage[],
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
@@ -80,8 +80,8 @@ export function agentLoop(
 export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -113,23 +113,24 @@ export async function runAgentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const newMessages: AgentMessage[] = [...prompts];
+	const initialMessages = declareToolChanges(context, prompts);
+	const newMessages: AgentMessage[] = [...initialMessages];
 	const currentContext: AgentContext = {
 		...context,
-		messages: [...context.messages, ...prompts],
+		messages: [...context.messages, ...initialMessages],
 	};
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
-	for (const prompt of prompts) {
-		await emit({ type: "message_start", message: prompt });
-		await emit({ type: "message_end", message: prompt });
+	for (const message of initialMessages) {
+		await emit({ type: "message_start", message });
+		await emit({ type: "message_end", message });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
 }
 
@@ -137,8 +138,8 @@ export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -154,7 +155,7 @@ export async function runAgentLoopContinue(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
 }
 
@@ -174,11 +175,12 @@ async function runLoop(
 	initialConfig: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	streamFunction: StreamFn,
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
-	let firstTurn = true;
+	let lastCompletedTurn: PrepareNextTurnContext | undefined;
+	let explicitContinuation = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -188,28 +190,75 @@ async function runLoop(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
-			if (!firstTurn) {
+			let preparedMessages: AgentMessage[] = [];
+			if (lastCompletedTurn) {
+				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				if (nextTurnSnapshot) {
+					currentContext = nextTurnSnapshot.context ?? currentContext;
+					preparedMessages = nextTurnSnapshot.messages ?? [];
+					config = {
+						...config,
+						model: nextTurnSnapshot.model ?? config.model,
+						reasoning:
+							nextTurnSnapshot.thinkingLevel === undefined
+								? config.reasoning
+								: nextTurnSnapshot.thinkingLevel === "off"
+									? undefined
+									: nextTurnSnapshot.thinkingLevel,
+					};
+				}
+				// Preparation can be long-running (for example, compaction). Pick up steering
+				// queued while it ran. Only poll again if the earlier poll returned nothing;
+				// otherwise one-at-a-time mode would deliver two messages in this turn.
+				if (pendingMessages.length === 0) {
+					pendingMessages = (await config.getSteeringMessages?.()) || [];
+				}
 				await emit({ type: "turn_start" });
-			} else {
-				firstTurn = false;
 			}
 
-			// Process pending messages (inject before next assistant response)
-			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
-					await emit({ type: "message_start", message });
-					await emit({ type: "message_end", message });
-					currentContext.messages.push(message);
-					newMessages.push(message);
-				}
-				pendingMessages = [];
+			// Process prepared and queued messages before the next assistant response.
+			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+				await emit({ type: "message_start", message });
+				await emit({ type: "message_end", message });
+				currentContext.messages.push(message);
+				newMessages.push(message);
+			}
+			pendingMessages = [];
+
+			const requestUpdate = await config.prepareRequest?.(
+				{
+					context: currentContext,
+					model: config.model,
+					thinkingLevel: config.reasoning ?? "off",
+				},
+				signal,
+			);
+			if (requestUpdate) {
+				currentContext = requestUpdate.context ?? currentContext;
+				config = {
+					...config,
+					model: requestUpdate.model ?? config.model,
+					reasoning:
+						requestUpdate.thinkingLevel === undefined
+							? config.reasoning
+							: requestUpdate.thinkingLevel === "off"
+								? undefined
+								: requestUpdate.thinkingLevel,
+				};
 			}
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				lastCompletedTurn = {
+					message,
+					toolResults: [],
+					context: currentContext,
+					newMessages,
+				};
+				await config.finishTurn?.(lastCompletedTurn, signal);
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -221,7 +270,13 @@ async function runLoop(
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
-				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				// A "length" stop means the output was cut off by the token limit, so
+				// every tool call in the message may carry truncated arguments. Fail
+				// them all instead of executing potentially borked calls.
+				const executedToolBatch =
+					message.stopReason === "length"
+						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
+						: await executeToolCalls(currentContext, message, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
@@ -231,45 +286,31 @@ async function runLoop(
 				}
 			}
 
-			await emit({ type: "turn_end", message, toolResults });
-
-			const nextTurnContext = {
+			lastCompletedTurn = {
 				message,
 				toolResults,
 				context: currentContext,
 				newMessages,
 			};
-			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
-			if (nextTurnSnapshot) {
-				currentContext = nextTurnSnapshot.context ?? currentContext;
-				config = {
-					...config,
-					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
-				};
-			}
+			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+			await emit({ type: "turn_end", message, toolResults });
 
-			if (
-				await config.shouldStopAfterTurn?.({
-					message,
-					toolResults,
-					context: currentContext,
-					newMessages,
-				})
-			) {
+			if (decision?.action === "end") {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
 
+			explicitContinuation = decision?.action === "continue";
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			// MiniMax host seam: post-dequeue steering admission veto. When admission
+			// rejects continuation, end the run gracefully — the veto wins over pending
+			// tool-call continuation, so no further provider request is issued for it.
 			if ((await config.shouldStopAfterSteering?.()) === true) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
+			}
+			if (hasMoreToolCalls || pendingMessages.length > 0) {
+				explicitContinuation = false;
 			}
 		}
 
@@ -277,7 +318,14 @@ async function runLoop(
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
+			explicitContinuation = false;
 			pendingMessages = followUpMessages;
+			continue;
+		}
+
+		// No natural request was selected, so fulfill the continuation decision with one context-only turn.
+		if (explicitContinuation) {
+			explicitContinuation = false;
 			continue;
 		}
 
@@ -289,6 +337,60 @@ async function runLoop(
 }
 
 /**
+ * Declare tool loadout changes to the model.
+ *
+ * `context.tools` is what the runtime can execute; the transcript's system messages declare
+ * what the model may call. Before each request the difference becomes `toolsAdded` and
+ * `toolsRemoved` on a system message. When a pending system message exists, its tool fields
+ * are treated as intent and replaced with the delta between the committed transcript and
+ * the executable set, so replay always yields exactly `context.tools`. Otherwise a new
+ * system message is inserted before the first non-system pending message.
+ */
+export function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
+	let systemIndex = -1;
+	for (let i = pendingMessages.length - 1; i >= 0; i--) {
+		if (pendingMessages[i].role === "system") {
+			systemIndex = i;
+			break;
+		}
+	}
+	const pending = pendingMessages[systemIndex] as SystemMessage | undefined;
+	const baseline = pending
+		? pendingMessages.map((message, index) =>
+				index === systemIndex ? withToolChanges(pending, NO_CHANGES) : message,
+			)
+		: pendingMessages;
+	const changes = getToolStateChanges(
+		getCurrentTools([...context.messages, ...baseline]),
+		(context.tools ?? []).map(toToolDeclaration),
+	);
+	const unchanged = changes.toolsAdded.length === 0 && changes.toolsRemoved.length === 0;
+
+	if (pending) {
+		// Keep the caller's message object when it already declares no tool changes.
+		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return pendingMessages;
+		return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));
+	}
+	if (unchanged) return pendingMessages;
+	const update = withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes);
+	const insertIndex = pendingMessages.findIndex((message) => message.role !== "system");
+	const index = insertIndex === -1 ? pendingMessages.length : insertIndex;
+	return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];
+}
+
+const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
+
+/** Copy a system message with its tool fields replaced by `changes`; empty lists omit the field. */
+function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: ToolStateChanges): SystemMessage {
+	const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
+	return {
+		...rest,
+		...(toolsAdded.length > 0 ? { toolsAdded } : {}),
+		...(toolsRemoved.length > 0 ? { toolsRemoved } : {}),
+	};
+}
+
+/**
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
  */
@@ -297,7 +399,7 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
@@ -308,14 +410,7 @@ async function streamAssistantResponse(
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
 
-	// Build LLM context
-	const llmContext: Context = {
-		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
-		tools: context.tools,
-	};
-
-	const streamFunction = streamFn || streamSimple;
+	const llmContext = normalizeContext({ messages: llmMessages });
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
@@ -324,8 +419,18 @@ async function streamAssistantResponse(
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
+		identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
 		signal,
 	});
+	// Record the requested level, whichever stream function answered. The
+	// MiniMax unexpected-tool-call fallback (if configured) is applied to every
+	// finalized result of this response: successful structural tool calls the
+	// host did not declare become terminal text, never an execution.
+	const result = async () =>
+		normalizeUnexpectedToolCall(
+			Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" }),
+			config,
+		);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
@@ -361,7 +466,7 @@ async function streamAssistantResponse(
 
 			case "done":
 			case "error": {
-				const finalMessage = normalizeUnexpectedToolCall(await response.result(), config);
+				const finalMessage = await result();
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
 				} else {
@@ -376,7 +481,7 @@ async function streamAssistantResponse(
 		}
 	}
 
-	const finalMessage = normalizeUnexpectedToolCall(await response.result(), config);
+	const finalMessage = await result();
 	if (addedPartial) {
 		context.messages[context.messages.length - 1] = finalMessage;
 	} else {
@@ -387,7 +492,15 @@ async function streamAssistantResponse(
 	return finalMessage;
 }
 
-function normalizeUnexpectedToolCall(
+/**
+ * MiniMax host seam: finalize an unexpected provider tool call as a terminal text response.
+ *
+ * Only a SUCCESSFUL response carrying at least one `toolCall` block is normalized: the call
+ * blocks are stripped, the fallback text is appended once after the provider text, and the
+ * stop reason becomes "stop" — the loop then treats the turn as a plain text answer, with no
+ * execution and no second hop. Error and aborted responses pass through untouched.
+ */
+export function normalizeUnexpectedToolCall(
 	message: AssistantMessage,
 	config: AgentLoopConfig,
 ): AssistantMessage {
@@ -419,6 +532,40 @@ function normalizeUnexpectedToolCall(
 }
 
 /**
+ * Fail all tool calls from an assistant message that was truncated by the
+ * output token limit. Streamed tool-call arguments are finalized with a
+ * best-effort JSON salvage parser, so a truncated message can yield tool calls
+ * whose arguments parse and validate but are silently incomplete. None of them
+ * are safe to execute; report each as an error so the model can re-issue them.
+ */
+export async function failToolCallsFromTruncatedMessage(
+	toolCalls: AgentToolCall[],
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	const messages: ToolResultMessage[] = [];
+	for (const toolCall of toolCalls) {
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+		const finalized: FinalizedToolCallOutcome = {
+			toolCall,
+			result: createErrorToolResult(
+				`Tool call "${toolCall.name}" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.`,
+			),
+			isError: true,
+		};
+		await emitToolExecutionEnd(finalized, emit);
+		const toolResultMessage = createToolResultMessage(finalized);
+		await emitToolResultMessage(toolResultMessage, emit);
+		messages.push(toolResultMessage);
+	}
+	return { messages, terminate: false };
+}
+
+/**
  * Execute tool calls from an assistant message.
  */
 async function executeToolCalls(
@@ -429,35 +576,13 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
-	const batchContext = withResolvedMissingTools(currentContext, toolCalls, config);
 	const hasSequentialToolCall = toolCalls.some(
-		(tc) => batchContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
+		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(batchContext, assistantMessage, toolCalls, config, signal, emit);
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
-	return executeToolCallsParallel(batchContext, assistantMessage, toolCalls, config, signal, emit);
-}
-
-/**
- * Adds the tools the host resolved for this batch's uncataloged calls to the context the batch
- * executes with. The context used for model requests keeps its own tools.
- */
-function withResolvedMissingTools(
-	context: AgentContext,
-	toolCalls: readonly AgentToolCall[],
-	config: AgentLoopConfig,
-): AgentContext {
-	if (!config.resolveMissingTool) return context;
-	const catalogNames = new Set((context.tools ?? []).map((tool) => tool.name));
-	const resolved: AgentTool<any>[] = [];
-	for (const toolCall of toolCalls) {
-		if (catalogNames.has(toolCall.name)) continue;
-		const tool = config.resolveMissingTool(toolCall);
-		if (tool?.name !== toolCall.name) continue;
-		if (!resolved.some((candidate) => candidate.name === tool.name)) resolved.push(tool);
-	}
-	return resolved.length === 0 ? context : { ...context, tools: [...(context.tools ?? []), ...resolved] };
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
 }
 
 type ExecutedToolCallBatch = {
@@ -475,22 +600,91 @@ async function executeToolCallsSequential(
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
+	// MiniMax host seam (reactive subagents §1.7, wave 3): the accepted
+	// owner-input boundary spans the WHOLE tool round. The generation captured
+	// here already reflects inputs accepted and drained BEFORE this batch; a
+	// CHANGE at an inter-call boundary means an owner input arrived while the
+	// earlier calls of THIS batch were running.
+	const ownerInputGenerationAtBatchStart = await config.ownerInputGeneration?.();
 
 	for (const [toolIndex, toolCall] of toolCalls.entries()) {
-		const finalized = await executeToolCall(
-			currentContext,
-			assistantMessage,
-			toolCall,
-			config,
-			signal,
-			emit,
-		);
+		if (
+			toolIndex > 0 &&
+			ownerInputGenerationAtBatchStart !== undefined &&
+			(await config.ownerInputGeneration?.()) !== ownerInputGenerationAtBatchStart
+		) {
+			// Yield-to-owner-input boundary: the remaining calls of the batch are
+			// not started blind against an instruction the runtime already
+			// accepted. Each still receives exactly one honest skipped outcome
+			// (same shape as the terminate seam, WITHOUT terminate-agent): the
+			// loop continues so the steering drain runs and the model turn is
+			// not ended.
+			for (const skippedToolCall of toolCalls.slice(toolIndex)) {
+				await emit({
+					type: "tool_execution_start",
+					toolCallId: skippedToolCall.id,
+					toolName: skippedToolCall.name,
+					args: skippedToolCall.arguments,
+				});
+				const skipped: FinalizedToolCallOutcome = {
+					toolCall: skippedToolCall,
+					result: createErrorToolResult(
+						`Tool call "${skippedToolCall.name}" was not started because new user input was accepted while this batch was running; reconsider this call against the new instruction and issue it again if it is still needed.`,
+					),
+					isError: true,
+				};
+				await emitToolExecutionEnd(skipped, emit);
+				const skippedMessage = createToolResultMessage(skipped);
+				await emitToolResultMessage(skippedMessage, emit);
+				finalizedCalls.push(skipped);
+				messages.push(skippedMessage);
+			}
+			break;
+		}
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		let finalized: FinalizedToolCallOutcome;
+		if (preparation.kind === "immediate") {
+			finalized = {
+				toolCall,
+				result: preparation.result,
+				isError: preparation.isError,
+			};
+			if (preparation.terminateAgent === true) finalized.terminateAgent = true;
+		} else {
+			const executed = await executePreparedToolCall(
+				currentContext,
+				assistantMessage,
+				preparation,
+				signal,
+				emitToolExecutionUpdate(toolCall, emit),
+				admittedExecutionStart(config, currentContext, assistantMessage, preparation),
+			);
+			finalized = await finalizeExecutedToolCall(
+				currentContext,
+				assistantMessage,
+				preparation,
+				executed,
+				config,
+				signal,
+			);
+		}
+
+		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
 
-		if (finalized.terminateAgent === true || signal?.aborted) {
+		if (finalized.terminateAgent === true) {
+			// MiniMax host seam: whole-agent stop. Every remaining call of the batch
+			// still receives exactly one (skipped, error) outcome.
 			for (const skippedToolCall of toolCalls.slice(toolIndex + 1)) {
 				await emit({
 					type: "tool_execution_start",
@@ -498,21 +692,22 @@ async function executeToolCallsSequential(
 					toolName: skippedToolCall.name,
 					args: skippedToolCall.arguments,
 				});
-				const skipped = {
+				const skipped: FinalizedToolCallOutcome = {
 					toolCall: skippedToolCall,
 					result: createErrorToolResult(
-						finalized.terminateAgent === true
-							? "Tool execution skipped because the agent was stopped by a hook"
-							: "Tool execution skipped because the operation was aborted",
+						"Tool execution skipped because the agent was stopped by a hook",
 					),
 					isError: true,
-				} satisfies FinalizedToolCallOutcome;
+				};
 				await emitToolExecutionEnd(skipped, emit);
 				const skippedMessage = createToolResultMessage(skipped);
 				await emitToolResultMessage(skippedMessage, emit);
 				finalizedCalls.push(skipped);
 				messages.push(skippedMessage);
 			}
+			break;
+		}
+		if (signal?.aborted) {
 			break;
 		}
 	}
@@ -532,6 +727,7 @@ async function executeToolCallsParallel(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	const STOPPED_BY_HOOK = "Tool execution skipped because the agent was stopped by a hook";
 
 	for (const [toolIndex, toolCall] of toolCalls.entries()) {
 		await emit({
@@ -543,32 +739,22 @@ async function executeToolCallsParallel(
 
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		if (preparation.kind === "immediate") {
-			const finalized = {
+			const finalized: FinalizedToolCallOutcome = {
 				toolCall,
 				result: preparation.result,
 				isError: preparation.isError,
-				args: preparation.args,
-				...(preparation.failure === undefined ? {} : { failure: preparation.failure }),
-				terminateAgent: preparation.terminateAgent,
-			} satisfies FinalizedToolCallOutcome;
+			};
+			if (preparation.terminateAgent === true) finalized.terminateAgent = true;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
-			if (preparation.terminateAgent === true || signal?.aborted) {
-				await skipPreparedParallelToolCalls(
-					finalizedCalls,
-					preparation.terminateAgent === true
-						? "Tool execution skipped because the agent was stopped by a hook"
-						: "Tool execution skipped because the operation was aborted",
-					emit,
-				);
-				await appendSkippedParallelToolCalls(
-					finalizedCalls,
-					toolCalls.slice(toolIndex + 1),
-					preparation.terminateAgent === true
-						? "Tool execution skipped because the agent was stopped by a hook"
-						: "Tool execution skipped because the operation was aborted",
-					emit,
-				);
+			if (preparation.terminateAgent === true) {
+				// MiniMax host seam: whole-agent stop. Prepared-but-unstarted calls and
+				// the not-yet-prefetched tail all receive skipped error outcomes.
+				await skipPreparedParallelToolCalls(finalizedCalls, STOPPED_BY_HOOK, emit);
+				await appendSkippedParallelToolCalls(finalizedCalls, toolCalls.slice(toolIndex + 1), STOPPED_BY_HOOK, emit);
+				break;
+			}
+			if (signal?.aborted) {
 				break;
 			}
 			continue;
@@ -576,43 +762,44 @@ async function executeToolCallsParallel(
 
 		finalizedCalls.push({ kind: "prepared-entry", preparation });
 		if (signal?.aborted) {
-			await skipPreparedParallelToolCalls(
-				finalizedCalls,
-				"Tool execution skipped because the operation was aborted",
-				emit,
-			);
-			await appendSkippedParallelToolCalls(
-				finalizedCalls,
-				toolCalls.slice(toolIndex + 1),
-				"Tool execution skipped because the operation was aborted",
-				emit,
-			);
 			break;
 		}
 	}
 
 	const orderedFinalizedCalls = await Promise.all(
-		finalizedCalls.map(async (entry) => {
-			if (!isPreparedToolCallEntry(entry)) return entry;
-			const executed = await executePreparedToolCall(
-				currentContext,
-				assistantMessage,
-				entry.preparation,
-				config,
-				signal,
-				emit,
-			);
-			const finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				entry.preparation,
-				executed,
-				config,
-				signal,
-			);
-			await emitToolExecutionEnd(finalized, emit);
-			return finalized;
-		}),
+		finalizedCalls.map((entry) =>
+			isPreparedToolCallEntry(entry)
+				? (async () => {
+						if (signal?.aborted) {
+							const finalized: FinalizedToolCallOutcome = {
+								toolCall: entry.preparation.toolCall,
+								result: createErrorToolResult("Operation aborted"),
+								isError: true,
+							};
+							await emitToolExecutionEnd(finalized, emit);
+							return finalized;
+						}
+						const executed = await executePreparedToolCall(
+							currentContext,
+							assistantMessage,
+							entry.preparation,
+							signal,
+							emitToolExecutionUpdate(entry.preparation.toolCall, emit),
+							admittedExecutionStart(config, currentContext, assistantMessage, entry.preparation),
+						);
+						const finalized = await finalizeExecutedToolCall(
+							currentContext,
+							assistantMessage,
+							entry.preparation,
+							executed,
+							config,
+							signal,
+						);
+						await emitToolExecutionEnd(finalized, emit);
+						return finalized;
+					})()
+				: Promise.resolve(entry),
+		),
 	);
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
@@ -627,66 +814,49 @@ async function executeToolCallsParallel(
 	};
 }
 
-export type PreparedToolCall = {
+type PreparedToolCall = {
 	kind: "prepared";
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
 };
 
-export type ToolCallFailureKind =
-	| "tool_not_found"
-	| "argument_preparation"
-	| "argument_validation"
-	| "before_hook"
-	| "blocked"
-	| "cancelled"
-	| "execution"
-	| "after_hook";
-
-/** Source-owned failure classification; hosts must not infer it from text. */
-export interface ToolCallFailure {
-	kind: ToolCallFailureKind;
-	message: string;
-	blockedBy?: string;
-	approvalStatus?: "denied" | "expired";
-}
-
-export type ImmediateToolCallOutcome = {
+type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
-	args?: unknown;
-	failure?: ToolCallFailure;
+	/** MiniMax host seam: the blocked call requested whole-agent stop. */
 	terminateAgent?: boolean;
 };
 
-export type ExecutedToolCallOutcome = {
+type ExecutedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
-	failure?: ToolCallFailure;
+	durationMs: number;
 };
 
-export type FinalizedToolCallOutcome = {
-	toolCall: AgentToolCall;
-	result: AgentToolResult<any>;
-	isError: boolean;
-	args?: unknown;
-	failure?: ToolCallFailure;
-	isErrorOrigin?: "tool" | "hook";
-	terminateAgent?: boolean;
-};
+type FinalizedToolCallOutcome = AgentToolCallOutcome;
 
-type FinalizedToolCallEntry =
-	| FinalizedToolCallOutcome
-	| { kind: "prepared-entry"; preparation: PreparedToolCall };
+/** The `beforeToolCall` and `afterToolCall` hooks of {@link AgentLoopConfig}. */
+export type ToolCallHooks = Pick<AgentLoopConfig, "beforeToolCall" | "afterToolCall">;
+
+type ToolUpdateSink = (partialResult: AgentToolResult<any>) => Promise<void> | void;
+
+/**
+ * A parallel-batch entry: either an already-finalized outcome, or a prepared
+ * call whose execution starts when the batch's `Promise.all` begins. The object
+ * form (not a closure) lets whole-agent termination replace prepared entries
+ * with skipped outcomes before any effect starts.
+ */
+type FinalizedToolCallEntry = FinalizedToolCallOutcome | { kind: "prepared-entry"; preparation: PreparedToolCall };
 
 function isPreparedToolCallEntry(
 	entry: FinalizedToolCallEntry,
 ): entry is { kind: "prepared-entry"; preparation: PreparedToolCall } {
-	return "kind" in entry && entry.kind === "prepared-entry";
+	return typeof entry === "object" && entry !== null && "kind" in entry && entry.kind === "prepared-entry";
 }
 
+/** Replace every prepared-but-unstarted parallel entry with a skipped error outcome. */
 async function skipPreparedParallelToolCalls(
 	finalizedCalls: FinalizedToolCallEntry[],
 	reason: string,
@@ -694,16 +864,17 @@ async function skipPreparedParallelToolCalls(
 ): Promise<void> {
 	for (const [index, entry] of finalizedCalls.entries()) {
 		if (!isPreparedToolCallEntry(entry)) continue;
-		const skipped = {
+		const skipped: FinalizedToolCallOutcome = {
 			toolCall: entry.preparation.toolCall,
 			result: createErrorToolResult(reason),
 			isError: true,
-		} satisfies FinalizedToolCallOutcome;
+		};
 		await emitToolExecutionEnd(skipped, emit);
 		finalizedCalls[index] = skipped;
 	}
 }
 
+/** Give the not-yet-prefetched tail of a parallel batch skipped error outcomes. */
 async function appendSkippedParallelToolCalls(
 	finalizedCalls: FinalizedToolCallEntry[],
 	toolCalls: readonly AgentToolCall[],
@@ -717,11 +888,11 @@ async function appendSkippedParallelToolCalls(
 			toolName: toolCall.name,
 			args: toolCall.arguments,
 		});
-		const skipped = {
+		const skipped: FinalizedToolCallOutcome = {
 			toolCall,
 			result: createErrorToolResult(reason),
 			isError: true,
-		} satisfies FinalizedToolCallOutcome;
+		};
 		await emitToolExecutionEnd(skipped, emit);
 		finalizedCalls.push(skipped);
 	}
@@ -748,206 +919,202 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
-export async function prepareToolCall(
+/**
+ * MiniMax host seam wiring: build the admitted-execution boundary callback for one
+ * prepared call, or undefined when the host did not configure `onToolExecutionStart`.
+ */
+function admittedExecutionStart(
+	config: AgentLoopConfig,
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	prepared: PreparedToolCall,
+): (() => void) | undefined {
+	const hook = config.onToolExecutionStart;
+	if (!hook) return undefined;
+	return () =>
+		hook({
+			assistantMessage,
+			toolCall: prepared.toolCall,
+			args: prepared.args,
+			context: currentContext,
+		});
+}
+
+async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCall: AgentToolCall,
-	config: ToolCallLifecycleConfig,
+	config: ToolCallHooks,
 	signal: AbortSignal | undefined,
-	options: ToolCallExecutionOptions = {},
+	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
-		const message =
-			options.missingToolMessage?.(toolCall.name) ??
-			config.missingToolMessage?.(toolCall.name) ??
-			`Tool ${toolCall.name} not found`;
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(message),
+			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
-			failure: { kind: "tool_not_found", message },
 		};
 	}
 
-	let preparedToolCall: AgentToolCall;
 	try {
-		preparedToolCall = prepareToolCallArguments(tool, toolCall);
-	} catch (error) {
-		return {
-			kind: "immediate",
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
-			isError: true,
-			failure: {
-				kind: "argument_preparation",
-				message: error instanceof Error ? error.message : String(error),
-			},
-		};
-	}
-
-	let validatedArgs: unknown;
-	try {
-		validatedArgs = validateToolArguments(tool, preparedToolCall);
-	} catch (error) {
-		return {
-			kind: "immediate",
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
-			isError: true,
-			failure: {
-				kind: "argument_validation",
-				message: error instanceof Error ? error.message : String(error),
-			},
-		};
-	}
-
-	if (config.beforeToolCall) {
-		let beforeResult;
-		try {
-			beforeResult = await config.beforeToolCall(
+		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+		const validatedArgs = validateToolArguments(tool, preparedToolCall);
+		if (config.beforeToolCall) {
+			const beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
 					toolCall,
 					args: validatedArgs,
 					context: currentContext,
-					...(options.parentToolCallId === undefined
-						? {}
-						: { parentToolCallId: options.parentToolCallId }),
-					...(options.parentDescription === undefined
-						? {}
-						: { parentDescription: options.parentDescription }),
 				},
 				signal,
 			);
-		} catch (error) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
-				isError: true,
-				args: validatedArgs,
-				failure: {
-					kind: "before_hook",
-					message: error instanceof Error ? error.message : String(error),
-				},
-			};
+			if (signal?.aborted) {
+				return {
+					kind: "immediate",
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+			}
+			if (beforeResult?.block) {
+				const result = createErrorToolResult(beforeResult.reason || "Tool execution was blocked");
+				if (beforeResult.terminate === true) {
+					result.terminate = true;
+				}
+				return {
+					kind: "immediate",
+					result,
+					isError: true,
+					...(beforeResult.terminateAgent === true ? { terminateAgent: true } : {}),
+				};
+			}
 		}
 		if (signal?.aborted) {
 			return {
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
-				args: validatedArgs,
-				failure: { kind: "cancelled", message: "Operation aborted" },
 			};
 		}
-		if (beforeResult?.block) {
-			const message = beforeResult.reason || "Tool execution was blocked";
-			return {
-				kind: "immediate",
-				result: createErrorToolResult(message),
-				isError: true,
-				args: validatedArgs,
-				failure: {
-					kind: "blocked",
-					message,
-					...(beforeResult.blockedBy === undefined ? {} : { blockedBy: beforeResult.blockedBy }),
-					...(beforeResult.approvalStatus === undefined
-						? {}
-						: { approvalStatus: beforeResult.approvalStatus }),
-				},
-				terminateAgent: beforeResult.terminateAgent,
-			};
-		}
-	}
-	if (signal?.aborted) {
+		return {
+			kind: "prepared",
+			toolCall,
+			tool,
+			args: validatedArgs,
+		};
+	} catch (error) {
 		return {
 			kind: "immediate",
-			result: createErrorToolResult("Operation aborted"),
+			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
-			args: validatedArgs,
-			failure: { kind: "cancelled", message: "Operation aborted" },
 		};
 	}
-	return {
-		kind: "prepared",
-		toolCall,
-		tool,
-		args: validatedArgs,
-	};
 }
 
-export async function executePreparedToolCall(
+function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink): ToolUpdateSink {
+	return (partialResult) =>
+		emit({
+			type: "tool_execution_update",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+			partialResult,
+		});
+}
+
+/** Options for {@link runToolCall}. */
+export interface RunToolCallOptions extends ToolCallHooks {
+	/** Tools the call resolves against. */
+	tools: readonly AgentTool<any>[];
+	/** Passed to the hooks as the message that issued the call. */
+	assistantMessage: AssistantMessage;
+	/** Passed to the hooks as the current agent context. */
+	context: AgentContext;
+	signal?: AbortSignal;
+	onUpdate?: ToolUpdateSink;
+}
+
+/**
+ * Run one tool call through the same steps as a model-issued call: argument preparation, schema
+ * validation, `beforeToolCall`, execution, and `afterToolCall`. Emits no events and adds no
+ * messages. Tools that call other tools use this so the hooks (for example permission checks)
+ * apply to those calls too.
+ *
+ * Never rejects for tool failures: unknown tools, validation errors, blocked calls, and thrown
+ * errors come back as `isError: true`.
+ */
+export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
+	const { assistantMessage, context, signal } = options;
+	const preparation = await prepareToolCall(context, assistantMessage, toolCall, options, signal, options.tools);
+	if (preparation.kind === "immediate") {
+		return { toolCall, result: preparation.result, isError: preparation.isError };
+	}
+	const executed = await executePreparedToolCall(
+		context,
+		assistantMessage,
+		preparation,
+		signal,
+		options.onUpdate ?? (() => {}),
+	);
+	return finalizeExecutedToolCall(context, assistantMessage, preparation, executed, options, signal);
+}
+
+async function executePreparedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
-	config: ToolCallLifecycleConfig,
 	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
-	options: ToolCallExecutionOptions = {},
+	onUpdate: ToolUpdateSink,
+	onExecutionStart?: () => void,
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents: Promise<void>[] = [];
+	let acceptingUpdates = true;
+	const startedAt = performance.now();
+	const elapsed = () => Math.round(performance.now() - startedAt);
 
 	try {
-		config.onToolExecutionStart?.({
-				assistantMessage,
-				toolCall: prepared.toolCall,
-				args: prepared.args,
-				context: currentContext,
-				...(options.parentToolCallId === undefined
-					? {}
-					: { parentToolCallId: options.parentToolCallId }),
-				...(options.parentDescription === undefined
-					? {}
-					: { parentDescription: options.parentDescription }),
-			});
+		// MiniMax host seam: the admitted-execution boundary. This runs after
+		// argument validation and beforeToolCall admission, immediately before
+		// the first effect — denied/blocked/skipped calls never reach it.
+		onExecutionStart?.();
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
 			signal,
 			(partialResult) => {
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-							...(options.parentToolCallId === undefined
-								? {}
-								: { parentToolCallId: options.parentToolCallId }),
-						}),
-					),
-				);
+				if (!acceptingUpdates) return;
+				updateEvents.push(Promise.resolve(onUpdate(partialResult)));
 			},
 		);
+		const durationMs = elapsed();
+		acceptingUpdates = false;
 		await Promise.all(updateEvents);
-		return { result, isError: false };
+		return { result, isError: result.isError === true, durationMs };
 	} catch (error) {
+		const durationMs = elapsed();
+		acceptingUpdates = false;
 		await Promise.all(updateEvents);
 		return {
 			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
 			isError: true,
-			failure: {
-				kind: "execution",
-				message: error instanceof Error ? error.message : String(error),
-			},
+			durationMs,
 		};
+	} finally {
+		acceptingUpdates = false;
 	}
 }
 
-export async function finalizeExecutedToolCall(
+async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	prepared: PreparedToolCall,
 	executed: ExecutedToolCallOutcome,
-	config: ToolCallLifecycleConfig,
+	config: ToolCallHooks,
 	signal: AbortSignal | undefined,
-	options: ToolCallExecutionOptions = {},
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
-	let isErrorOrigin: "tool" | "hook" | undefined = executed.isError ? "tool" : undefined;
-	let failure = executed.failure;
 	let terminateAgent = false;
 
 	if (config.afterToolCall) {
@@ -960,36 +1127,29 @@ export async function finalizeExecutedToolCall(
 					result,
 					isError,
 					context: currentContext,
-					...(options.parentToolCallId === undefined
-						? {}
-						: { parentToolCallId: options.parentToolCallId }),
-					...(options.parentDescription === undefined
-						? {}
-						: { parentDescription: options.parentDescription }),
 				},
 				signal,
 			);
 			if (afterResult) {
+				// Structured content not replaced along with the content may no longer match it.
+				const structuredContent =
+					afterResult.structuredContent ?? (afterResult.content ? undefined : result.structuredContent);
 				result = {
+					...result,
 					content: afterResult.content ?? result.content,
 					details: afterResult.details ?? result.details,
+					usage: afterResult.usage ?? result.usage,
 					terminate: afterResult.terminate ?? result.terminate,
 				};
-				if (afterResult.isError !== undefined) {
-					isError = afterResult.isError;
-					isErrorOrigin = afterResult.isError
-						? (afterResult.isErrorOrigin ?? "hook")
-						: undefined;
-				}
+				if (structuredContent === undefined) delete result.structuredContent;
+				else result.structuredContent = structuredContent;
+				isError = afterResult.isError ?? isError;
+				// MiniMax host seam: whole-agent stop requested by this call's hook.
 				terminateAgent = afterResult.terminateAgent === true;
 			}
 		} catch (error) {
 			result = createErrorToolResult(error instanceof Error ? error.message : String(error));
 			isError = true;
-			failure = {
-				kind: "after_hook",
-				message: error instanceof Error ? error.message : String(error),
-			};
 		}
 	}
 
@@ -997,76 +1157,9 @@ export async function finalizeExecutedToolCall(
 		toolCall: prepared.toolCall,
 		result,
 		isError,
-		args: prepared.args,
-		...(failure === undefined ? {} : { failure }),
-		...(isErrorOrigin === undefined ? {} : { isErrorOrigin }),
-		terminateAgent,
+		durationMs: executed.durationMs,
+		...(terminateAgent ? { terminateAgent: true } : {}),
 	};
-}
-
-/**
- * Execute one tool call through Pi's complete lifecycle without creating a
- * model-history tool-result message. Hosts that execute a nested call can use
- * this with a trusted parent id; ordinary batches keep their phased path so
- * parallel preparation remains ordered.
- */
-export async function executeToolCall(
-	currentContext: AgentContext,
-	assistantMessage: AssistantMessage,
-	toolCall: AgentToolCall,
-	config: ToolCallLifecycleConfig,
-	signal: AbortSignal | undefined,
-	emit: AgentEventSink,
-	options: ToolCallExecutionOptions = {},
-): Promise<FinalizedToolCallOutcome> {
-	await emit({
-		type: "tool_execution_start",
-		toolCallId: toolCall.id,
-		toolName: toolCall.name,
-		args: toolCall.arguments,
-		...(options.parentToolCallId === undefined
-			? {}
-			: { parentToolCallId: options.parentToolCallId }),
-	});
-
-	const preparation = await prepareToolCall(
-		currentContext,
-		assistantMessage,
-		toolCall,
-		config,
-		signal,
-		options,
-	);
-	const finalized =
-		preparation.kind === "immediate"
-			? {
-					toolCall,
-					result: preparation.result,
-					isError: preparation.isError,
-					args: preparation.args,
-					...(preparation.failure === undefined ? {} : { failure: preparation.failure }),
-					terminateAgent: preparation.terminateAgent,
-				}
-			: await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					await executePreparedToolCall(
-						currentContext,
-						assistantMessage,
-						preparation,
-						config,
-						signal,
-						emit,
-						options,
-					),
-					config,
-					signal,
-					options,
-				);
-
-	await emitToolExecutionEnd(finalized, emit, options);
-	return finalized;
 }
 
 function createErrorToolResult(message: string): AgentToolResult<any> {
@@ -1076,20 +1169,14 @@ function createErrorToolResult(message: string): AgentToolResult<any> {
 	};
 }
 
-async function emitToolExecutionEnd(
-	finalized: FinalizedToolCallOutcome,
-	emit: AgentEventSink,
-	options: ToolCallExecutionOptions = {},
-): Promise<void> {
+async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
 	await emit({
 		type: "tool_execution_end",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
 		result: finalized.result,
 		isError: finalized.isError,
-		...(options.parentToolCallId === undefined
-			? {}
-			: { parentToolCallId: options.parentToolCallId }),
+		...(finalized.durationMs === undefined ? {} : { durationMs: finalized.durationMs }),
 	});
 }
 
@@ -1098,9 +1185,13 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
-		content: finalized.result.content,
+		// Untyped tools (JS extensions) can return results without content; normalize
+		// so the null never enters session history or provider payloads.
+		content: finalized.result.content ?? [],
 		details: finalized.result.details,
+		usage: finalized.result.usage,
 		isError: finalized.isError,
+		...(finalized.durationMs === undefined ? {} : { durationMs: finalized.durationMs }),
 		timestamp: Date.now(),
 	};
 }

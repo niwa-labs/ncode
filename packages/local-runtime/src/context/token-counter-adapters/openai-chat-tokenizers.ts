@@ -1,5 +1,9 @@
-import type { Context, Model, Tool } from '@earendil-works/pi-ai';
-import { convertMessages as convertOpenAICompletionsMessages } from '@earendil-works/pi-ai/openai-completions';
+import { normalizeContext, type Context, type Model, type Tool } from '@earendil-works/pi-ai';
+// Port-mode (W01): the pin moved the OpenAI completions wire helpers from
+// providers/openai-completions.ts to api/openai-completions.ts (export map
+// `./api/*`); the old subpath no longer resolves. The pin converter takes the
+// normalized TranscriptContext.
+import { convertMessages as convertOpenAICompletionsMessages } from '@earendil-works/pi-ai/api/openai-completions';
 
 import { toProviderMessages } from '../messages-count-tokens-messages.js';
 import { isManagedLoginTokenPlan } from './managed-login.js';
@@ -26,11 +30,18 @@ type OpenAICompletionsCompat = Parameters<typeof convertOpenAICompletionsMessage
 
 // Mirrors Pi's resolved compat for the official Zhipu and Moonshot hosts.
 // Pi exports the message converter but keeps its compat resolver private.
+// The five trailing fields follow the pin resolver's non-OpenRouter defaults
+// (api/openai-completions.ts resolveCompat): finish_reason is surfaced,
+// chat-template knobs empty, grammar tools off, affinity format "openai"
+// (inert while sendSessionAffinityHeaders is false).
 const BASE_CHAT_COMPAT: OpenAICompletionsCompat = {
   supportsStore: false,
+  requiresNonNullAssistantContent: false,
+  requiresToolsWithToolHistory: false,
   supportsDeveloperRole: false,
   supportsReasoningEffort: false,
   supportsUsageInStreaming: true,
+  supportsFinishReason: true,
   maxTokensField: 'max_tokens',
   requiresToolResultName: false,
   requiresAssistantAfterToolResult: false,
@@ -39,10 +50,14 @@ const BASE_CHAT_COMPAT: OpenAICompletionsCompat = {
   thinkingFormat: 'openai',
   openRouterRouting: {},
   vercelGatewayRouting: {},
+  chatTemplateKwargs: {},
+  chatTemplateArgs: {},
   zaiToolStream: false,
   supportsStrictMode: false,
+  supportsOpenAIGrammarTools: false,
   cacheControlFormat: undefined,
   sendSessionAffinityHeaders: false,
+  sessionAffinityFormat: 'openai',
   supportsLongCacheRetention: true,
 };
 
@@ -142,6 +157,7 @@ function buildOpenAIChatTokenizerRequest(
 
   return {
     url,
+    unsupportedCacheKey: `${adapterId}:${url}`,
     body,
     headers: {
       authorization: `Bearer ${ctx.apiKey ?? ''}`,
@@ -164,7 +180,7 @@ function buildOpenAIChatTokenizerBody(
   };
   const body: OpenAIChatTokenizerBody = {
     model: model.id,
-    messages: convertOpenAICompletionsMessages(model, context, compat),
+    messages: convertOpenAICompletionsMessages(model, normalizeContext(context), compat),
   };
   if (ctx.tools && ctx.tools.length > 0) body.tools = convertTools(ctx.tools, compat);
   return body;

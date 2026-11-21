@@ -22,6 +22,7 @@ export { HStack } from './components/h-stack.js';
 export { Image, type ImageOptions, type ImageTheme } from './components/image.js';
 export { Input } from './components/input.js';
 export { Loader, type LoaderIndicatorOptions } from './components/loader.js';
+export { MouseRegion, type MouseRegionHandler } from './components/mouse-region.js';
 export {
   type DefaultTextStyle,
   Markdown,
@@ -88,6 +89,34 @@ export {
 } from './keys.js';
 // LaTeX rendering
 export { type RenderLatexOptions, renderLatex } from './latex.js';
+// Colors and styling
+export {
+  backgroundAnsi,
+  type Color,
+  type ColorMixSpace,
+  colorToHex,
+  colorToOkhsl,
+  colorToOklch,
+  colorToRgb,
+  foregroundAnsi,
+  type IndexedColor,
+  indexedColor,
+  mixColors,
+  type OkhslChannels,
+  type OklchChannels,
+  type OklchColorValue,
+  okhslColor,
+  oklchColor,
+  parseColor,
+  type RgbColorValue,
+  rgbColor,
+  styleText,
+  styleTextWithAnsi,
+  type TerminalColorMode,
+  type TextAttributes,
+  type TextStyle,
+} from './colors.js';
+export { oklabToOkhslLightness } from './oklab.js';
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from './stdin-buffer.js';
 // Terminal interface and implementations
@@ -95,9 +124,12 @@ export { ProcessTerminal, type Terminal } from './terminal.js';
 // Terminal colors
 export {
   parseOsc11BackgroundColor,
+  parseOscColorResponse,
   parseTerminalColorSchemeReport,
+  type OscColorTarget,
   type RgbColor,
   type TerminalColorScheme,
+  type TerminalColors,
 } from './terminal-colors.js';
 // Terminal image support
 export {

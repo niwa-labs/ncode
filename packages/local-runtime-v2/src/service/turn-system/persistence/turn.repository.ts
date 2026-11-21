@@ -797,7 +797,17 @@ function admitTurnInTransaction(
   const duplicate = findDuplicate(tx, input);
   if (duplicate) return withRecoveredTerminalFacts(duplicate, terminalFacts);
   const lockRejection = activeLockRejection(lock);
-  if (lockRejection) return withRecoveredTerminalFacts(lockRejection, terminalFacts);
+  if (lockRejection) {
+    return withRecoveredTerminalFacts(
+      {
+        ...lockRejection,
+        ...(lock !== undefined && lock.ownerKind !== 'compaction'
+          ? { activeTurnId: findAcceptedTurnId(tx, input.sessionId) }
+          : {}),
+      },
+      terminalFacts,
+    );
+  }
   if (
     !input.bypassPriorityFence &&
     options.priorityFence.blocksInTransaction(tx, {
@@ -835,6 +845,17 @@ function activeLockRejection(
     status: 'rejected',
     reason: lock.ownerKind === 'compaction' ? 'compaction-active' : 'active-turn',
   };
+}
+
+/** The turn currently holding the session's admission lock, if its ingress row is readable. */
+function findAcceptedTurnId(db: RepositoryDb, sessionId: string): string | undefined {
+  const accepted = db
+    .select({ turnId: turnIngress.turnId })
+    .from(turnIngress)
+    .where(and(eq(turnIngress.sessionId, sessionId), eq(turnIngress.status, 'accepted')))
+    .orderBy(desc(turnIngress.acceptedSequence))
+    .get();
+  return accepted?.turnId;
 }
 
 function blocksAdmission(

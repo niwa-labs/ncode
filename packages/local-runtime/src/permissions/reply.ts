@@ -31,9 +31,10 @@ export class LocalPermissionReplyError extends Error {
 }
 
 /**
- * Map a channel-side decoded decision to the daemon's three-way reply
- * vocabulary. `always` becomes `allowAlways` (persisted as a global rule);
- * `allow` becomes `allowOnce` (session-scoped); `deny` is identity.
+ * Map a channel-side decoded decision to the daemon's reply vocabulary.
+ * `always` becomes `allowAlways` (persisted as a global rule); `allow`
+ * becomes `allowOnce` (this call only, no rule); `deny` is identity (this
+ * call only, no rule). Channels have no `denyAlways` button.
  */
 export function permissionBehaviorToReply(
   behavior: ChannelPermissionBehavior,

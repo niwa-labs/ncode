@@ -225,6 +225,40 @@ export class TuiQueueFlow {
     return items;
   }
 
+  /**
+   * Input wave 2 (owner bug 2026-11-07, queue stranded after a Turn
+   * terminal): the Runtime publishes its queue wake for every terminal, but a
+   * `user-stop` (abort) or `turn-final-failure` pause makes the dispatcher
+   * refuse plain claims — the pending items hang behind the pause forever
+   * unless someone resumes. This Turn's terminal was observed HERE, so the
+   * TUI resumes the paused Queue with the same explicit Continue lever the
+   * owner would otherwise have to press by hand. Completed terminals leave
+   * the Queue unpaused — their wake is the Runtime's own released signal.
+   *
+   * Best-effort by contract: any refusal (login gate, nothing to dispatch,
+   * lost Session) leaves the pause in place for manual `/queue` continue.
+   */
+  async resumeAfterTurnTerminal(): Promise<boolean> {
+    if (!this.options.enabled || this.isStopped()) return false;
+    const sessionId = this.options.controller.snapshot().session?.sessionId;
+    if (!sessionId) return false;
+    await this.refresh(sessionId);
+    if (
+      this.isStopped() ||
+      this.options.controller.snapshot().session?.sessionId !== sessionId
+    ) {
+      return false;
+    }
+    const queue = this.options.runProjection.snapshot();
+    if (!queue.queuePaused || queue.queuePendingCount === 0) return false;
+    try {
+      return await this.continueQueue();
+    } catch {
+      // The pause stays; the owner keeps the manual /queue Continue lever.
+      return false;
+    }
+  }
+
   async continueQueue(): Promise<boolean> {
     const chat = this.options.controller.snapshot();
     const sessionId = chat.session?.sessionId;
@@ -523,6 +557,64 @@ export class TuiQueueFlow {
     this.options.requestRender();
     void this.refresh(sessionId).catch(() => undefined);
     return snapshot;
+  }
+
+  /**
+   * Input wave 2 (owner bug 2026-11-07, FIFO starvation): a new message
+   * steered into a live Turn must not overtake messages the owner typed
+   * EARLIER into the Queue — plain steers bypass the Queue, so for as long as
+   * the Turn runs the queued items starve behind every newer steer. Before
+   * the new message is delivered, the pending FIFO heads join the SAME live
+   * Turn first (oldest first), so delivery order equals typing order.
+   *
+   * Stops at the first head that cannot join: a paused item (the owner's
+   * explicit hold), an attachment item (same text-only steer contract as
+   * `steerNext`), a failed claim (the Turn went terminal mid-drain — the
+   * normal post-turn wake owns the rest), a Session switch or a stop. Never
+   * throws: a drain failure must not block the owner's own message.
+   *
+   * Returns the number of queued items delivered into the active Turn.
+   */
+  async drainIntoActiveTurn(): Promise<number> {
+    if (!this.options.enabled || this.isStopped()) return 0;
+    const sessionId = this.options.controller.snapshot().session?.sessionId;
+    if (!sessionId) return 0;
+    let delivered = 0;
+    for (;;) {
+      const chat = this.options.controller.snapshot();
+      if (
+        this.isStopped() ||
+        chat.session?.sessionId !== sessionId ||
+        chat.retiringTurnId ||
+        this.steeringNext
+      ) {
+        break;
+      }
+      const queue = this.options.runProjection.snapshot();
+      if (queue.queuePaused) break;
+      // FIFO discipline: the drain starts at the head and stops at the first
+      // item that cannot join this Turn — it never skips over one.
+      const next = queue.queuedItems.find((item) => isPendingQueueStatus(item.status));
+      if (!next || next.sessionId !== sessionId) break;
+      if (next.status !== 'queued' || !isUserManageableQueueItem(next)) break;
+      if (next.attachments?.length) break;
+      try {
+        await this.options.runtime.steerQueuedMessage(sessionId, next.itemId);
+      } catch {
+        break;
+      }
+      delivered += 1;
+      if (
+        !this.isStopped() &&
+        this.options.controller.snapshot().session?.sessionId === sessionId
+      ) {
+        this.options.runProjection.updateQueueItem({ ...next, status: 'running' });
+        this.updatePanel();
+        this.options.onChanged();
+      }
+    }
+    if (delivered > 0) void this.refresh(sessionId).catch(() => undefined);
+    return delivered;
   }
 
   async steerNext(): Promise<boolean> {

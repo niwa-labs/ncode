@@ -85,7 +85,7 @@ export class TuiPermissionPicker implements Component, Focusable {
     }> = [
       {
         value: 'allowOnce',
-        label: '1 Allow for this conversation',
+        label: '1 Allow once',
       },
       ...(request.allowAlwaysSupported === false
         ? []
@@ -491,13 +491,13 @@ function permissionDecisionTone(toolName: string): TuiDecisionTone {
 function formatPendingPermissionDecision(decision: TuiPermissionDecision): string {
   if (decision === 'allowAlways') return 'Saving the permission rule and allowing this action…';
   if (decision === 'deny') return 'Denying this action…';
-  return 'Allowing for this conversation…';
+  return 'Allowing this action…';
 }
 
 function permissionDecisionDetail(decision: TuiPermissionDecision): string {
   if (decision === 'allowAlways') return 'Review the exact saved scope next';
   if (decision === 'deny') return 'Add guidance before denying this action';
-  return 'MCode asks again in a new conversation';
+  return 'MCode asks again next time';
 }
 
 function permissionSelectTheme(): SelectListTheme {
@@ -520,9 +520,8 @@ function fitPermissionDecisionLabel(
   const candidates =
     decision === 'allowOnce'
       ? [
-          `${prefix} Allow for this conversation`,
-          `${prefix} Allow this conversation`,
-          `${prefix} Allow conversation`,
+          `${prefix} Allow once`,
+          `${prefix} Allow this action`,
           `${prefix} Allow`,
         ]
       : decision === 'allowAlways'

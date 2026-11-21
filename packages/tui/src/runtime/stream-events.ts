@@ -4,22 +4,39 @@ import { buildTuiToolPreview } from './tool-preview.js';
 
 export type TuiMessageRole = 'user' | 'assistant' | 'system' | 'unknown';
 
+/**
+ * §4 `decidedBy` mark parsed off a tool-call status payload (wire shape of
+ * `_meta["minimax-code/permission"]`; structural mirror of the runtime's
+ * `RuntimePermissionMark` — the TUI package does not depend on agent-core).
+ */
+export interface TuiPermissionMark {
+  decision: 'allow' | 'deny';
+  decidedBy: 'classifier' | 'rule' | 'mode' | 'hook' | 'user';
+  ruleKind: 'builtin' | 'session' | 'agent' | 'global' | null;
+  mode: 'default' | 'auto' | 'bypassPermissions' | 'acceptEdits' | 'dontAsk' | 'off';
+  reason: string;
+}
+
 export interface TuiToolCall {
   id?: string;
-  /** Outer `run_code` Tool Call id when this call was made from a PTC program. */
-  parentToolCallId?: string;
   name: string;
   status?: string | number;
+  /** Outer tool call id when this call is a nested PTC child (run_code). */
+  parentToolCallId?: string;
   input?: unknown;
   output?: unknown;
   error?: unknown;
   durationMs?: number;
   structuredPreview?: TuiStructuredPreview;
+  /** §4 mark; present once the runtime resolved this call's permission. */
+  permission?: TuiPermissionMark;
 }
 
 export interface TuiToolResult {
   toolCallId: string;
   toolName?: string;
+  /** True when the tool reported an error outcome (wire `isError`). */
+  isError?: boolean;
   details?: {
     taskId?: string;
     subSessionId?: string;
@@ -61,6 +78,12 @@ export interface TuiMessage {
     | 'review_failed'
     | 'review_aborted'
     | 'review_interrupted';
+  /**
+   * Durable `custom` marker (`customType`/`eventType` of the source record):
+   * lets history readers distinguish e.g. todo cadence reminders from guard
+   * reminders, which all ride the `unknown` role.
+   */
+  customType?: string;
   source?: string;
   origin?: unknown;
   error?: string;
@@ -124,6 +147,18 @@ export type TuiStreamEvent = (
     }
   | { type: 'messages-replaced'; messages: TuiMessage[]; turnId?: string }
   | { type: 'messages-rewound'; messageIds: string[]; turnId?: string }
+  | {
+      /**
+       * A response-control hook rejected the in-flight assistant attempt
+       * BEFORE its `message_end` was emitted. `messageId` is the host-allocated
+       * identity the attempt streamed under: live projections retract exactly
+       * that attempt's transient cells by identity — never by text match, and
+       * a later `messageId` change alone is never treated as a discard.
+       */
+      type: 'assistant-discarded';
+      messageId: string;
+      turnId?: string;
+    }
   | { type: 'resync-required'; turnId?: string }
   | {
       type: 'delta';
@@ -145,6 +180,9 @@ const RESPONSE_AGENT_MESSAGE_CHUNK = 6;
 const RESPONSE_HEARTBEAT = 10;
 const RUNTIME_SESSION_STATUS = 3;
 const RUNTIME_TURN_TERMINAL = 4;
+const RUNTIME_DEBUG_TRACE = 5;
+/** Debug-trace phase the event bridge emits on a response-control discard. */
+const ASSISTANT_DISCARDED_PHASE = 'assistant_message_discarded';
 
 /** TUI-owned projection from the generated Session SSE frame to display events. */
 export function projectTuiSessionStreamFrame(
@@ -183,6 +221,8 @@ export function projectTuiSessionStreamFrame(
     projected = projectLegacySessionStatus(event, turnId);
   } else if (type === RUNTIME_SESSION_STATUS || type === RUNTIME_TURN_TERMINAL) {
     projected = projectRuntimeSessionStatus(event, turnId);
+  } else if (type === RUNTIME_DEBUG_TRACE) {
+    projected = projectRuntimeDebugTrace(event, turnId);
   } else if (type === 'resume_overflow') {
     projected = { type: 'resync-required', turnId };
   } else if (typeof type === 'string') {
@@ -288,11 +328,40 @@ function projectLegacySessionStatus(
     : undefined;
 }
 
-function projectRuntimeSessionStatus(
+/**
+ * Runtime debug traces stay invisible EXCEPT the response-control discard
+ * marker: only that phase carries per-attempt identity the live projection
+ * must act on (every other trace is observability-only).
+ */
+function projectRuntimeDebugTrace(
   event: Record<string, unknown>,
   turnId: string | undefined,
 ): TuiStreamEvent | undefined {
-  const payload = readRecord(event.payload) ?? {};
+  const trace = readRecord(readRecord(event.payload)?.trace) ?? readRecord(event.trace);
+  if (!trace || readString(trace, ['phase']) !== ASSISTANT_DISCARDED_PHASE) return undefined;
+  let attrs: Record<string, unknown> | undefined;
+  const rawAttrs = readString(trace, ['attrs_json', 'attrsJson']);
+  if (rawAttrs !== undefined) {
+    try {
+      attrs = readRecord(JSON.parse(rawAttrs));
+    } catch {
+      attrs = undefined;
+    }
+  }
+  attrs ??= readRecord(trace.attrs);
+  const messageId = attrs ? readString(attrs, ['message_id', 'messageId']) : undefined;
+  if (!messageId) return undefined;
+  return {
+    type: 'assistant-discarded',
+    messageId,
+    turnId: readString(event, ['turn_id', 'turnId']) ?? turnId,
+  };
+}
+
+function projectRuntimeSessionStatus(
+  event: Record<string, unknown>,
+  turnId: string | undefined,
+): TuiStreamEvent | undefined {  const payload = readRecord(event.payload) ?? {};
   const status = runtimeProjectedSessionStatus(readNumber(payload, ['status']));
   if (!status) return undefined;
   const error = readRecord(payload.error);
@@ -340,25 +409,30 @@ export function normalizeTuiMessage(raw: unknown, fallbackTurnId?: string): TuiM
 }
 
 function normalizeMessage(message: Record<string, unknown>, fallbackTurnId?: string): TuiMessage {
-  // CliService history keeps the PTC parent of a Tool Call only in the raw JSON.
-  const rawMetadata = readRecord(parseJsonValue(message.rawJson ?? message.raw_json)) ?? {};
+  // Durable canonical compaction summaries ride the `compactionSummary` role
+  // with the text in `summary` — project them onto the TUI's compaction marker
+  // (same shape the legacy v2 parse produces).
+  const isCompactionSummary = readString(message, ['role']) === 'compactionSummary';
   return compact({
     id: readString(message, ['msg_id', 'msgId', 'id']),
     turnId: readString(message, ['turn_id', 'turnId']) ?? fallbackTurnId,
-    role: normalizeRole(readString(message, ['role'])) ?? 'unknown',
-    kind: normalizeMessageKind(readString(message, ['kind'])),
+    role: isCompactionSummary ? 'assistant' : (normalizeRole(readString(message, ['role'])) ?? 'unknown'),
+    kind: normalizeMessageKind(readString(message, ['kind'])) ?? (isCompactionSummary ? 'compaction' : undefined),
+    customType: readString(message, ['customType', 'custom_type', 'eventType', 'event_type']),
     source: readString(message, ['source']),
     origin: parseJsonValue(message.origin ?? message.originJson ?? message.origin_json),
     error: readString(message, ['error']),
     tokensBefore: readNumber(message, ['tokensBefore', 'tokens_before']),
     tokensAfter: readNumber(message, ['tokensAfter', 'tokens_after']),
-    content: readString(message, ['msg_content', 'msgContent', 'content']),
-    editContent: readString(message, ['editContent']) ?? readString(rawMetadata, ['editContent']),
+    content:
+      readString(message, ['msg_content', 'msgContent', 'content']) ??
+      (isCompactionSummary ? readString(message, ['summary']) : undefined),
+    editContent: readString(message, ['editContent']),
     thinking: readString(message, ['thinking_content', 'thinkingContent', 'thinking']),
     thinkingDurationMs: readNumber(message, ['thinking_duration_ms', 'thinkingDurationMs']),
-    toolCalls: withRawParentToolCallIds(
+    toolCalls: withRawJsonToolParents(
       normalizeToolCalls(readArray(message, ['tool_calls', 'toolCalls'])),
-      rawMetadata,
+      parseRawJsonToolParents(message.rawJson ?? message.raw_json),
     ),
     toolResult: normalizeToolResult(readRecord(message.toolResult ?? message.tool_result)),
     parts: normalizeMessageParts(readArray(message, ['parts'])),
@@ -415,6 +489,7 @@ function normalizeToolResult(
   return compact({
     toolCallId,
     toolName: readString(result, ['toolName', 'tool_name']),
+    isError: readBoolean(result, ['isError', 'is_error']),
     details:
       normalizedDetails && Object.keys(normalizedDetails).length > 0
         ? normalizedDetails
@@ -543,8 +618,6 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
     if (!name) return [];
     const toolCall = compact({
       id: readString(record, ['tool_call_id', 'toolCallId', 'id']),
-      parentToolCallId:
-        readString(record, ['parent_tool_call_id', 'parentToolCallId'])?.trim() || undefined,
       name,
       status:
         readString(record, ['tool_call_status', 'toolCallStatus', 'status']) ??
@@ -563,12 +636,14 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
         ]),
       ),
       error: readFirst(record, ['tool_call_error', 'toolCallError', 'error']),
+      parentToolCallId: readParentToolCallId(record),
       durationMs: readNumber(record, [
         'tool_call_duration_ms',
         'toolCallDurationMs',
         'durationMs',
         'duration_ms',
       ]),
+      permission: readPermissionMark(record.permission),
     });
     const structuredPreview = buildTuiToolPreview({
       toolName: toolCall.name,
@@ -583,31 +658,96 @@ function normalizeToolCalls(raw: unknown[] | undefined): TuiToolCall[] | undefin
   return toolCalls.length > 0 ? toolCalls : undefined;
 }
 
+/** Blank wire values (e.g. a padded placeholder) mean "no parent". */
+function readParentToolCallId(record: Record<string, unknown>): string | undefined {
+  const value = readString(record, ['parent_tool_call_id', 'parentToolCallId']);
+  return value !== undefined && value.trim().length > 0 ? value : undefined;
+}
+
+const PERMISSION_MARK_DECIDED_BY = new Set([
+  'classifier',
+  'rule',
+  'mode',
+  'hook',
+  'user',
+]);
+const PERMISSION_MARK_RULE_KIND = new Set(['builtin', 'session', 'agent', 'global']);
+const PERMISSION_MARK_MODE = new Set([
+  'default',
+  'auto',
+  'bypassPermissions',
+  'acceptEdits',
+  'dontAsk',
+  'off',
+]);
+
 /**
- * The generated Session Tool Call view has no parent slot, so durable history
- * carries a PTC child call's parent run_code id only in the message rawJson.
+ * §4 mark parse: all five keys must be present with valid values and a
+ * non-empty reason; anything else is not a mark and is dropped (a partial
+ * mark would be worse than none on the ACP `_meta`).
  */
-function withRawParentToolCallIds(
-  toolCalls: TuiToolCall[] | undefined,
-  rawMetadata: Record<string, unknown>,
-): TuiToolCall[] | undefined {
-  if (!toolCalls?.some((toolCall) => toolCall.id && !toolCall.parentToolCallId)) return toolCalls;
-  const parents = new Map<string, string>();
-  for (const item of readArray(rawMetadata, ['tool_calls', 'toolCalls']) ?? []) {
-    const record = readRecord(item);
-    if (!record) continue;
-    const id = readString(record, ['tool_call_id', 'toolCallId', 'id']);
-    const parentToolCallId = readString(record, ['parent_tool_call_id', 'parentToolCallId']);
-    if (id && parentToolCallId) parents.set(id, parentToolCallId);
+function readPermissionMark(value: unknown): TuiPermissionMark | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const decision = record.decision;
+  const decidedBy = record.decidedBy;
+  const ruleKind = record.ruleKind;
+  const mode = record.mode;
+  const reason = record.reason;
+  if (decision !== 'allow' && decision !== 'deny') return undefined;
+  if (typeof decidedBy !== 'string' || !PERMISSION_MARK_DECIDED_BY.has(decidedBy)) return undefined;
+  if (ruleKind !== null && (typeof ruleKind !== 'string' || !PERMISSION_MARK_RULE_KIND.has(ruleKind))) {
+    return undefined;
   }
-  if (parents.size === 0) return toolCalls;
+  if (typeof mode !== 'string' || !PERMISSION_MARK_MODE.has(mode)) return undefined;
+  if (typeof reason !== 'string' || reason.trim().length === 0) return undefined;
+  return {
+    decision,
+    decidedBy: decidedBy as TuiPermissionMark['decidedBy'],
+    ruleKind: ruleKind as TuiPermissionMark['ruleKind'],
+    mode: mode as TuiPermissionMark['mode'],
+    reason,
+  };
+}
+
+/**
+ * Nested PTC parents may exist only in the durable rawJson when the Tool Call
+ * view predates the parent slot: the view value wins, otherwise the rawJson
+ * entry matched by tool call id fills the parent. Missing or broken rawJson
+ * keeps the view values untouched.
+ */
+function withRawJsonToolParents(
+  toolCalls: TuiToolCall[] | undefined,
+  rawParents: ReadonlyMap<string, string> | undefined,
+): TuiToolCall[] | undefined {
+  if (!toolCalls || !rawParents?.size) return toolCalls;
   return toolCalls.map((toolCall) => {
-    const parentToolCallId =
-      toolCall.parentToolCallId ?? (toolCall.id ? parents.get(toolCall.id) : undefined);
-    return parentToolCallId && parentToolCallId !== toolCall.parentToolCallId
-      ? { ...toolCall, parentToolCallId }
-      : toolCall;
+    if (toolCall.parentToolCallId !== undefined || toolCall.id === undefined) return toolCall;
+    const parent = rawParents.get(toolCall.id);
+    return parent === undefined ? toolCall : { ...toolCall, parentToolCallId: parent };
   });
+}
+
+function parseRawJsonToolParents(rawJson: unknown): ReadonlyMap<string, string> | undefined {
+  if (typeof rawJson !== 'string' || !rawJson.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return undefined;
+  }
+  const record = readRecord(parsed);
+  const toolCalls = record ? readArray(record, ['tool_calls', 'toolCalls']) : undefined;
+  if (!toolCalls) return undefined;
+  const parents = new Map<string, string>();
+  toolCalls.forEach((item) => {
+    const call = readRecord(item);
+    if (!call) return;
+    const id = readString(call, ['tool_call_id', 'toolCallId', 'id']);
+    const parent = readParentToolCallId(call);
+    if (id !== undefined && parent !== undefined) parents.set(id, parent);
+  });
+  return parents.size > 0 ? parents : undefined;
 }
 
 function normalizeRole(role: string | undefined): TuiMessageRole | undefined {

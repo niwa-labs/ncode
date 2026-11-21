@@ -7,9 +7,8 @@ export { LocalBackgroundTaskService } from './service.js';
 export type { LocalBackgroundTaskServiceOptions } from './service.js';
 export { FsLocalTaskOutputStore, SqliteLocalBackgroundTaskStore } from './store.js';
 export { abortAllBackgroundLocalBashTasks } from './bash-runner.js';
+export { scheduleLocalBackgroundTaskDelivery } from './delivery.js';
 export { createUserStopCascade } from './user-stop-cascade.js';
-export { backgroundTaskNotificationReceiptId } from './conversation-delivery.js';
-export { isTaskDeliverySuppressed } from './user-stop-suppression.js';
 export type {
   UserStopCascade,
   UserStopCascadeDependencies,

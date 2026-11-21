@@ -13,6 +13,7 @@ import type {
   RemoteTokenCountResult,
   RemoteTokenCounter,
 } from './remote-token-counter.js';
+import { sanitizeProviderHeaders } from './remote-token-counter.js';
 
 const DIAGNOSTIC_ORDER: readonly ContextUsageComponentKind[] = [
   'OTHER',
@@ -173,11 +174,14 @@ function buildRemoteCountContext(
   input: ContextUsageProviderDiagnosticsInput,
   stage: DiagnosticStage,
 ): RemoteTokenCountContext {
+  // Pin ProviderHeaders may carry null (= header removal); count requests
+  // are plain fetch, so nulls are dropped when crossing into the context.
+  const countHeaders = sanitizeProviderHeaders(input.streamOptions?.headers);
   return {
     messages: stage.messages,
     model: input.model,
     ...(input.streamOptions?.apiKey ? { apiKey: input.streamOptions.apiKey } : {}),
-    ...(input.streamOptions?.headers ? { headers: input.streamOptions.headers } : {}),
+    ...(countHeaders ? { headers: countHeaders } : {}),
     ...(stage.systemPrompt ? { systemPrompt: stage.systemPrompt } : {}),
     ...(stage.tools ? { tools: stage.tools } : {}),
     ...(input.streamOptions?.maxTokens !== undefined

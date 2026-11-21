@@ -91,6 +91,12 @@ export interface TurnExecutionService {
   /** Requires the caller to hold the matching Session exclusive mutation lease. */
   submitTrusted(input: TurnExecutionSubmission): Promise<ActivateTurnResult>;
   requestCompaction(input: RequestCompactionInput): Promise<RequestCompactionResult>;
+  /**
+   * Wave-0 item 0.6: re-runs the session's deferred manual compaction (a
+   * /compact that stood behind the queue). Called on every session release;
+   * a no-op without a pending compaction.
+   */
+  runDeferredCompactions(sessionId: string): Promise<void>;
   steerActiveTurn(input: {
     readonly sessionId: string;
     readonly turnId: string;

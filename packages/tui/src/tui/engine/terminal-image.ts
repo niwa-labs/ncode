@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { TerminalColorMode } from "./colors.js";
 
 export type ImageProtocol = "kitty" | "iterm2" | null;
 
@@ -71,7 +72,7 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
 	const term = process.env.TERM?.toLowerCase() || "";
 	const colorTerm = process.env.COLORTERM?.toLowerCase() || "";
-	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit";
+	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit" || term.endsWith("-direct");
 	const isWindowsConsole = process.platform === "win32";
 
 	// Emit OSC 8 hyperlinks only when tmux confirms it forwards.
@@ -83,6 +84,18 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 	// screen does not forward OSC 8 hyperlinks, so keep them off there.
 	if (term.startsWith("screen")) {
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
+	}
+
+	// Herdr forwards OSC 8 hyperlinks and supports the Kitty graphics protocol. Check it before
+	// outer-terminal detection because variables like KITTY_WINDOW_ID can leak into its panes.
+	if (termProgram === "herdr") {
+		return { images: "kitty", trueColor: hasTrueColorHint, hyperlinks: true };
+	}
+
+	// Rex supports OSC 8 hyperlinks but only partially implements the Kitty graphics protocol
+	// (no Unicode placeholders), so leave images off. Check it before outer-terminal detection.
+	if (termProgram === "rex") {
+		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
 	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
@@ -110,11 +123,7 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
-	if (termProgram === "vscode") {
-		return { images: null, trueColor: true, hyperlinks: true };
-	}
-
-	if (termProgram === "alacritty") {
+	if (termProgram === "alacritty" || termProgram === "vscode" || termProgram === "zed") {
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
 
@@ -172,11 +181,15 @@ export function getCapabilities(): TerminalCapabilities {
 	return cachedCapabilities;
 }
 
+export function getTerminalColorMode(capabilities: TerminalCapabilities = getCapabilities()): TerminalColorMode {
+	return capabilities.trueColor ? "truecolor" : "256color";
+}
+
 export function resetCapabilitiesCache(): void {
 	cachedCapabilities = null;
 }
 
-/** Override selected auto-detected capabilities for a host or test environment. */
+/** Override selected auto-detected capabilities. */
 export function setCapabilityOverrides(overrides: Partial<TerminalCapabilities>): void {
 	if (
 		capabilityOverrides.images === overrides.images &&
@@ -331,6 +344,7 @@ export interface KittyImagePlacement {
 	transmissionGeneration: number;
 	transmissionBytes: number;
 	estimatedDecodedBytes: number;
+	rows: number;
 	sequence: string;
 	replacementLine: string;
 }
@@ -348,11 +362,25 @@ export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
 	}
 }
 
-function getRegisteredKittyImageMetadata(line: string): RegisteredKittyImageMetadata | undefined {
-	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
-	if (!controls) return undefined;
+function getRegisteredKittyImageMetadataFromControls(controls: string): RegisteredKittyImageMetadata | undefined {
 	const imageId = /(?:^|,)i=(\d+)(?:,|$)/.exec(controls)?.[1];
 	return imageId === undefined ? undefined : kittyImageMetadata.get(Number.parseInt(imageId, 10));
+}
+
+function getRegisteredKittyImageMetadata(line: string): RegisteredKittyImageMetadata | undefined {
+	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
+	return controls === undefined ? undefined : getRegisteredKittyImageMetadataFromControls(controls);
+}
+
+function getExplicitKittyImageRows(controls: string): number | undefined {
+	const value = /(?:^|,)r=(\d+)(?:,|$)/.exec(controls)?.[1];
+	if (value === undefined) return undefined;
+	const rows = Number.parseInt(value, 10);
+	return rows > 0 ? rows : undefined;
+}
+
+function getKittyImageRowsFromControls(controls: string, fallbackRows: number): number {
+	return getExplicitKittyImageRows(controls) ?? fallbackRows;
 }
 
 export function getKittyImageMetadata(line: string): KittyImageMetadata | undefined {
@@ -387,14 +415,24 @@ const KITTY_PLACEMENT_CONTROL_KEYS = new Set([
 	"V",
 ]);
 
+/** Read the number of rows covered by an image placement without scanning its payload. */
+export function getKittyImagePlacementRows(line: string): number | undefined {
+	const controls = /\x1b_G([^;]*);/.exec(line)?.[1];
+	if (controls === undefined) return undefined;
+	const explicitRows = getExplicitKittyImageRows(controls);
+	if (explicitRows !== undefined) return explicitRows;
+	return getRegisteredKittyImageMetadataFromControls(controls)?.rows;
+}
+
 /** Build a placement-only command for an image line emitted by {@link renderImage}. */
 export function getKittyImagePlacement(line: string): KittyImagePlacement | undefined {
 	const match = /\x1b_G([^;]*);/.exec(line);
-	const metadata = getRegisteredKittyImageMetadata(line);
-	if (!match || !metadata) return undefined;
+	if (!match) return undefined;
+	const metadata = getRegisteredKittyImageMetadataFromControls(match[1]);
+	if (!metadata) return undefined;
 
 	let commandStart = match.index;
-	let commandControls = match[1]!;
+	let commandControls = match[1];
 	let transmissionEnd: number;
 	while (true) {
 		const terminator = line.indexOf("\x1b\\", commandStart + KITTY_PREFIX.length);
@@ -408,7 +446,7 @@ export function getKittyImagePlacement(line: string): KittyImagePlacement | unde
 		commandControls = line.slice(commandStart + KITTY_PREFIX.length, controlsEnd);
 	}
 
-	const controls = match[1]!
+	const controls = match[1]
 		.split(",")
 		.filter((control) => KITTY_PLACEMENT_CONTROL_KEYS.has(control.split("=", 1)[0] ?? ""));
 	const sequence = `\x1b_Ga=p,q=2,${controls.join(",")}\x1b\\`;
@@ -417,6 +455,7 @@ export function getKittyImagePlacement(line: string): KittyImagePlacement | unde
 		transmissionGeneration: metadata.transmissionGeneration,
 		transmissionBytes: transmissionEnd - match.index,
 		estimatedDecodedBytes: metadata.widthPx * metadata.heightPx * 4,
+		rows: getKittyImageRowsFromControls(match[1], metadata.rows),
 		sequence,
 		replacementLine: `${line.slice(0, match.index)}${sequence}${line.slice(transmissionEnd)}`,
 	};
@@ -431,9 +470,18 @@ export function cropKittyImageLine(line: string, hiddenRows: number, visibleRows
 	const sourceY = Math.floor((metadata.heightPx * hiddenRows) / metadata.rows);
 	const sourceEnd = Math.ceil((metadata.heightPx * (hiddenRows + croppedRows)) / metadata.rows);
 	const sourceHeight = Math.max(1, Math.min(metadata.heightPx, sourceEnd) - sourceY);
-	const controls = match[1]!.split(",").filter((control) => !/^[yhr]=/.test(control));
+	const controls = match[1].split(",").filter((control) => !/^[yhr]=/.test(control));
 	controls.push(`y=${sourceY}`, `h=${sourceHeight}`, `r=${croppedRows}`);
 	return `${line.slice(0, match.index)}\x1b_G${controls.join(",")};${line.slice(match.index + match[0].length)}`;
+}
+
+function chooseLessDistortedCellCount(upperCount: number, idealCount: number): number {
+	if (upperCount <= 1) return upperCount;
+
+	const lowerCount = upperCount - 1;
+	const upperDistortion = Math.max(upperCount / idealCount, idealCount / upperCount);
+	const lowerDistortion = Math.max(lowerCount / idealCount, idealCount / lowerCount);
+	return lowerDistortion < upperDistortion ? lowerCount : upperCount;
 }
 
 export function calculateImageCellSize(
@@ -441,6 +489,7 @@ export function calculateImageCellSize(
 	maxWidthCells: number,
 	maxHeightCells?: number,
 	cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 },
+	optimizeAspectRatio = false,
 ): ImageCellSize {
 	const maxWidth = Math.max(1, Math.floor(maxWidthCells));
 	const maxHeight = maxHeightCells === undefined ? undefined : Math.max(1, Math.floor(maxHeightCells));
@@ -453,13 +502,26 @@ export function calculateImageCellSize(
 
 	const scaledWidthPx = imageWidth * scale;
 	const scaledHeightPx = imageHeight * scale;
-	const columns = Math.ceil(scaledWidthPx / cellDimensions.widthPx);
-	const rows = Math.ceil(scaledHeightPx / cellDimensions.heightPx);
+	let columns = Math.max(1, Math.min(maxWidth, Math.ceil(scaledWidthPx / cellDimensions.widthPx)));
+	const heightRows = scaledHeightPx / cellDimensions.heightPx;
+	let rows = Math.max(1, Math.ceil(heightRows));
+	if (maxHeight !== undefined) {
+		rows = Math.min(maxHeight, rows);
+	}
 
-	return {
-		columns: Math.max(1, Math.min(maxWidth, columns)),
-		rows: Math.max(1, maxHeight === undefined ? rows : Math.min(maxHeight, rows)),
-	};
+	if (!optimizeAspectRatio) {
+		return { columns, rows };
+	}
+
+	if (widthScale <= heightScale) {
+		const idealRows = (columns * cellDimensions.widthPx * imageHeight) / (imageWidth * cellDimensions.heightPx);
+		rows = chooseLessDistortedCellCount(rows, idealRows);
+	} else {
+		const idealColumns = (rows * cellDimensions.heightPx * imageWidth) / (imageHeight * cellDimensions.widthPx);
+		columns = chooseLessDistortedCellCount(columns, idealColumns);
+	}
+
+	return { columns, rows };
 }
 
 export function calculateImageRows(
@@ -510,7 +572,7 @@ export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 				continue;
 			}
 
-			const marker = buffer[offset + 1]!;
+			const marker = buffer[offset + 1];
 
 			if (marker >= 0xc0 && marker <= 0xc2) {
 				const height = buffer.readUInt16BE(offset + 5);
@@ -584,8 +646,8 @@ export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 			return { widthPx: width, heightPx: height };
 		} else if (chunk === "VP8X") {
 			if (buffer.length < 30) return null;
-			const width = (buffer[24]! | (buffer[25]! << 8) | (buffer[26]! << 16)) + 1;
-			const height = (buffer[27]! | (buffer[28]! << 8) | (buffer[29]! << 16)) + 1;
+			const width = (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16)) + 1;
+			const height = (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16)) + 1;
 			return { widthPx: width, heightPx: height };
 		}
 
@@ -623,7 +685,14 @@ export function renderImage(
 	}
 
 	const maxWidth = options.maxWidthCells ?? 80;
-	const size = calculateImageCellSize(imageDimensions, maxWidth, options.maxHeightCells, getCellDimensions());
+	// Reduce Kitty's cell-aligned distortion without shrinking iTerm2 reservations.
+	const size = calculateImageCellSize(
+		imageDimensions,
+		maxWidth,
+		options.maxHeightCells,
+		getCellDimensions(),
+		caps.images === "kitty",
+	);
 
 	if (caps.images === "kitty") {
 		if (options.imageId !== undefined) {

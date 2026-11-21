@@ -3,10 +3,10 @@ export {
   type McpConnectionPoolOptions,
   type McpServerLookup,
 } from './runtime/connection-pool.js';
-export { describeMcpCallError, type McpCallErrorRaw } from './runtime/call-error.js';
 export {
   MCP_DEFAULTS,
   NOOP_MCP_RUNTIME_LOGGER,
+  toMcpToolInfo,
   type HttpTransportConfig,
   type McpCallOptions,
   type McpConnection,
@@ -14,7 +14,11 @@ export {
   type McpConnectionState,
   type McpConnectionTokenOverrides,
   type McpPoolMetrics,
+  type McpReadResourceResult,
+  type McpResourceInfo,
+  type McpResourceTemplateInfo,
   type McpRuntimeLogger,
+  type McpTokenProvider,
   type McpToolCallResult,
   type McpToolInfo,
   type ResolvedMcpServer,
@@ -27,6 +31,10 @@ export { createTransport, type McpTransportFactoryOptions } from './runtime/tran
 export { createHttpTransport } from './runtime/transport/http.js';
 export { createStdioTransport } from './runtime/transport/stdio.js';
 export {
+  createBearerAuthProvider,
+  type BearerAuthProviderOptions,
+} from './runtime/transport/auth.js';
+export {
   MCP_RUNTIME_TOOL_NAME_MAX_LENGTH,
   buildMcpServerRuntimeName,
   buildMcpToolRuntimeName,
@@ -38,3 +46,18 @@ export {
   pluginMcpNameKey,
   type McpNameAssignments,
 } from './runtime/name-registry.js';
+
+// Re-export the pinned pi-mcp protocol surface the product facade bridges to
+// (§4 :504 — @mavis/mcp remains the facade over pi-mcp). Consumers get the
+// protocol types/errors from one specifier instead of importing the vendored
+// package directly.
+export {
+  McpAuthRequiredError,
+  McpClient,
+  type McpClientOptions,
+  McpError,
+  McpHttpError,
+  type McpRequestOptions,
+  McpSessionExpiredError,
+  type McpTransport,
+} from '@earendil-works/pi-mcp';

@@ -24,14 +24,19 @@ export async function getTuiAcpSessionControlState(
   runtime: TuiAcpRuntime,
   session: TuiSession,
 ): Promise<TuiAcpSessionControlState> {
-  const [planCapabilities, permissionMode, models] = await Promise.all([
+  const [planCapabilities, sessionMode, processMode, models] = await Promise.all([
     runtime.getPlanModeCapabilities().catch(() => ({ entryEnabled: false })),
+    // §2.2: ACP Sessions report their OWN bound mode; the process mode is
+    // only the fallback for Sessions the runtime holds no entry for.
+    runtime
+      .getSessionPermissionMode?.(session.sessionId)
+      .catch(() => undefined),
     runtime.getPermissionMode().catch(() => undefined),
     runtime.listModels(session.sessionId).catch(() => [] as TuiModel[]),
   ]);
   return {
     modes: modeState(session, planCapabilities.entryEnabled),
-    configOptions: configOptions(session, permissionMode, models),
+    configOptions: configOptions(session, sessionMode ?? processMode, models),
   };
 }
 
@@ -141,14 +146,14 @@ function permissionModeOption(
     type: 'select',
     id: ACP_CONFIG_PERMISSION_MODE,
     name: 'Permission mode',
-    description: 'Controls how MiniMax Code handles tool permission requests in this process.',
+    description: 'Permission mode for this session; fixed after the first prompt',
     category: '_permission',
     currentValue: current,
     options: MINIMAX_CODE_PERMISSION_MODES.map((mode) => ({
       value: mode,
       name: formatTuiPermissionMode(mode),
     })),
-    _meta: { 'minimax-code/scope': 'process' },
+    _meta: { 'minimax-code/scope': 'session' },
   };
 }
 
@@ -176,10 +181,26 @@ function sessionModelOption(
     description: 'Selects the model used by subsequent turns in this Session.',
     category: 'model',
     currentValue: modelConfigValue(selected),
-    options: values.map(({ selection, name }) => ({
+    options: values.map(({ selection, name, model }) => ({
       value: modelConfigValue(selection),
       name,
+      _meta: { 'minimax-code/context': modelContextMeta(model) },
     })),
+  };
+}
+
+/** Projects the catalog context data (TuiModel) onto the wire for ACP clients. */
+function modelContextMeta(model: TuiModel): {
+  contextLimit?: number;
+  maxOutputTokens?: number;
+  contextWindowOptions?: number[];
+} {
+  return {
+    ...(model.contextLimit !== undefined ? { contextLimit: model.contextLimit } : {}),
+    ...(model.maxOutputTokens !== undefined ? { maxOutputTokens: model.maxOutputTokens } : {}),
+    ...(model.contextWindowOptions?.length
+      ? { contextWindowOptions: [...model.contextWindowOptions] }
+      : {}),
   };
 }
 
@@ -222,6 +243,7 @@ function uniqueModelValues(models: readonly TuiModel[]): Array<{
     readonly variant?: string;
   };
   readonly name: string;
+  readonly model: TuiModel;
 }> {
   const seen = new Set<string>();
   const values = [];
@@ -244,6 +266,7 @@ function uniqueModelValues(models: readonly TuiModel[]): Array<{
       values.push({
         selection,
         name: `${model.displayName ?? model.modelId}${selection.variant ? ` · ${selection.variant}` : ''}`,
+        model,
       });
     }
   }

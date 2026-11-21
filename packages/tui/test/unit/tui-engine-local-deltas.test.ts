@@ -664,8 +664,10 @@ describe('MCode Pi Engine local deltas', () => {
     await terminal.flush();
 
     expect(terminal.takeWrites()).not.toContain('\x1b[3J');
+    // The freed row is absorbed where the activity row was removed, above the
+    // composer; settled answer rows above keep their positions.
     expect(terminal.getScrollBuffer()).toEqual([
-      ...answer.slice(0, 39), '', ...answer.slice(39), 'composer', 'status',
+      ...answer, '', 'composer', 'status',
     ]);
     expect(terminal.getViewport().at(-1)).toBe('status');
     expect(terminal.getCursorPosition()).toEqual({ x: 8, y: 42 });
@@ -705,11 +707,12 @@ describe('MCode Pi Engine local deltas', () => {
       for (let added = 0; added <= activityRows + 1; added++) {
         tui.renderNow();
         await terminal.flush();
-        // Native history keeps its original boundary. Freed rows remain visible
-        // until new output consumes them, rather than replaying historical text.
+        // Native history keeps its original boundary. Freed rows stay visible
+        // at the point where the activity rows were removed — directly above
+        // the composer — until new output consumes them.
         const expected = component.lines.map((line) => line.replace(CURSOR_MARKER, ''));
         const remainingSpace = Math.max(0, activityRows - added);
-        if (remainingSpace > 0) expected.splice(38 + activityRows, 0, ...Array<string>(remainingSpace).fill(''));
+        if (remainingSpace > 0) expected.splice(answer.length, 0, ...Array<string>(remainingSpace).fill(''));
         expect(terminal.getViewport()).toEqual(
           expected.slice(-terminal.rows),
         );
@@ -721,6 +724,73 @@ describe('MCode Pi Engine local deltas', () => {
       expect(terminal.getScrollBuffer()).not.toContain('');
     },
   );
+
+  // Video-review regression (r1-stream): during append-only streaming the
+  // welcome banner partially visible at the top of the screen must survive a
+  // mid-document shrink of live rows. Padding the shrink at the previous
+  // viewport top blanked and shifted the banner's visible rows, which repeated
+  // collapse/grow cycles progressively erased from the top down.
+  it('keeps final banner rows in place when live rows shrink above the viewport floor', async () => {
+    const terminal = new RecordingVirtualTerminal(60, 12);
+    const tui = new TuiMainScreen(terminal);
+    const component = new MutableLines();
+    component.viewportLayoutKey = 'stable-footer';
+    const banner = Array.from({ length: 6 }, (_, index) => `BANNER row ${index}`);
+    // 6 banner + 7 live + composer + status = 15 rows on a 12-row screen, so
+    // the viewport top sits inside the banner: rows 3..5 stay visible on screen.
+    const live = Array.from({ length: 7 }, (_, index) => `live-A${index}`);
+    component.lines = [...banner, ...live, `composer${CURSOR_MARKER}`, 'status'];
+    tui.addChild(component);
+    tui.renderNow();
+    await terminal.flush();
+    expect(terminal.getViewport().slice(0, 3)).toEqual(banner.slice(3));
+
+    // A thinking-style collapse drops two middle live rows without user input.
+    component.lines = [...banner, live[0]!, live[1]!, live[4]!, live[5]!, live[6]!, `composer${CURSOR_MARKER}`, 'status'];
+    tui.renderNow();
+    await terminal.flush();
+
+    // The banner keeps its screen position; the freed rows are blanked where
+    // they were removed, not above the surviving final rows.
+    expect(terminal.getViewport()).toEqual([
+      ...banner.slice(3),
+      live[0]!,
+      live[1]!,
+      '',
+      '',
+      live[4]!,
+      live[5]!,
+      live[6]!,
+      'composer',
+      'status',
+    ]);
+    const bannerCopies = terminal.getScrollBuffer().filter((line) => line.startsWith('BANNER row 0'));
+    expect(bannerCopies).toHaveLength(1);
+
+    // Streaming continues: growth consumes the padding in place, without
+    // rewriting the banner region or scrolling a second banner copy in.
+    for (const round of [0, 1]) {
+      component.lines.splice(8 + round, 0, `streamed-${round}`);
+      tui.renderNow();
+      await terminal.flush();
+      expect(terminal.getViewport().slice(0, 3)).toEqual(banner.slice(3));
+      expect(
+        terminal.getScrollBuffer().filter((line) => line.startsWith('BANNER row 0')),
+      ).toHaveLength(1);
+    }
+    expect(terminal.getViewport()).toEqual([
+      ...banner.slice(3),
+      live[0]!,
+      live[1]!,
+      'streamed-0',
+      'streamed-1',
+      live[4]!,
+      live[5]!,
+      live[6]!,
+      'composer',
+      'status',
+    ]);
+  });
 
   it('keeps every appended row when a historical row changes in the same frame', async () => {
     const terminal = new RecordingVirtualTerminal(67, 44);
@@ -1529,37 +1599,5 @@ describe('regular-mode retained document', () => {
     expect(history).toEqual(
       plain(['BANNER', ...fullTranscript, 'composer', 'status']),
     );
-  });
-
-  // xterm.js (VS Code) draws ZWJ emoji as separate glyphs, wider than visibleWidth() measures.
-  // A full-width padded Editor row must not soft-wrap and push every later frame down a row.
-  it('keeps the Editor row in place when the terminal draws a ZWJ emoji wider than measured', async () => {
-    const terminal = new RecordingVirtualTerminal(40, 12);
-    const tui = new TuiMainScreen(terminal);
-    const header = new MutableLines();
-    header.lines = ['header'];
-    const editor = new Editor(tui, { borderColor: passthrough, selectList: selectListTheme });
-    tui.addChild(header);
-    tui.addChild(editor);
-    tui.setFocus(editor);
-    const kiss = '\u{1F468}\u200D\u2764\uFE0F\u200D\u{1F48B}\u200D\u{1F468}';
-    tui.start();
-    try {
-      for (const input of ['a', 'b', kiss, 'c', 'd', 'e', 'f']) {
-        editor.handleInput(input);
-        tui.renderNow();
-        await terminal.flush();
-      }
-
-      const rows = terminal.getViewport().filter((row) => row.trim().length > 0);
-      expect(rows).toHaveLength(4);
-      expect(rows[0]).toBe('header');
-      expect(rows[1]).toMatch(/^─+$/);
-      expect(rows[2]).toMatch(/^ab.+cdef/);
-      expect(rows[3]).toMatch(/^─+$/);
-      expect(terminal.takeWrites().endsWith('\x1b[?7h\x1b[?2026l')).toBe(true);
-    } finally {
-      tui.stop();
-    }
   });
 });

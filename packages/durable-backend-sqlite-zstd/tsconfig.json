@@ -1,0 +1,35 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2024"],
+    "target": "ES2024",
+    // The paths entries compile neighbor-package SOURCES (the same resolution
+    // the standalone typecheck derives), so mirror the two flags
+    // `tsconfig.standalone.json` overrides for exactly that purpose: `.ts`
+    // extension imports and override modifiers are legal in that source tree.
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": false,
+    // Vendored neighbor sources (chord/pi-durable via the paths below) are
+    // written under the upstream flag set (no noUncheckedIndexedAccess); the
+    // same relaxation every regenerated per-package tsconfig applies.
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"],
+      "@mavis/cas": ["../../packages/cas/src/index.ts"],
+      "@earendil-works/chord": ["../../third_party/chord/src/index.ts"],
+      "@earendil-works/chord/context": ["../../third_party/chord/src/context/index.ts"],
+      "@earendil-works/chord/delta": ["../../third_party/chord/src/delta/index.ts"],
+      "@earendil-works/pi-durable": ["../../third_party/pi-durable/src/index.ts"],
+      "@earendil-works/pi-durable/testing": ["../../third_party/pi-durable/src/testing/index.ts"],
+      // W02-T: the vendored reference storage for the differential tests.
+      // Points at the built .d.ts (the tree the pin built in W01) so this
+      // program does not recompile the vendored source chain; the vitest
+      // alias resolves the runtime to source.
+      "@earendil-works/pi-durable/storage/memory": [
+        "../../third_party/pi-durable/dist/storage/memory.d.ts"
+      ]
+    }
+  },
+  "include": ["src", "test"]
+}

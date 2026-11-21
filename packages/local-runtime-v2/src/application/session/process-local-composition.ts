@@ -19,6 +19,10 @@ export function composeProcessLocalApplication(input: {
   readonly miniApp: ProcessLocalMiniAppArgs[1];
   readonly planEntryEnabled: () => boolean;
   readonly sessionReports?: ProcessLocalApplicationOptions['sessionReports'];
+  /** W10 `/session` warmer status: the turn-system owner's warming surface. */
+  readonly cacheWarming?: ProcessLocalApplicationOptions['cacheWarming'];
+  /** W1 §3.2 publish-stale status: the session-system owner's publisher surface. */
+  readonly publishStatus?: ProcessLocalApplicationOptions['publishStatus'];
   readonly instructions?: ProcessLocalApplicationOptions['instructions'];
   readonly mcp: ProcessLocalApplicationOptions['peripherals']['mcp'];
   readonly modelProvider: ProcessLocalApplicationOptions['modelProvider'];
@@ -35,6 +39,8 @@ export function composeProcessLocalApplication(input: {
     workspace: { ...input.compatibility.peripherals.workspace },
     plan: { isEntryEnabled: input.planEntryEnabled },
     ...(input.sessionReports ? { sessionReports: input.sessionReports } : {}),
+    ...(input.cacheWarming ? { cacheWarming: input.cacheWarming } : {}),
+    ...(input.publishStatus ? { publishStatus: input.publishStatus } : {}),
     instructions: input.instructions,
     peripherals: { ...input.compatibility.peripherals, mcp: input.mcp },
     modelProvider: input.modelProvider,

@@ -6,50 +6,15 @@ export const DESKTOP_BASH_MAX_BYTES = 24 * 1024;
 // Leave room for exit/timing receipts and the readable output reference.
 export const DESKTOP_BASH_PREVIEW_BYTES = DESKTOP_BASH_MAX_BYTES - 2048;
 
-/**
- * True for a tool call made from inside a run_code program (PTC). Agent Core
- * puts `parentToolCallId` only on the context of such a child call
- * (agent-core pi-turn-runner/ptc-tool-executor.ts); top-level calls never
- * carry it.
- *
- * The Desktop output caps (this file, and the token caps of mavis, memory and
- * web_fetch) exist to keep the model's context small. A child result goes to
- * the program, not to the model: only run_code's return value reaches the
- * model, and that is cut at 64 KiB (local-runtime-v2 runner/ptc
- * run-code-tool.ts). So child calls skip these caps and the program gets the
- * whole result; with a cut copy it had to page the same data in many small
- * calls (one reported Session needed 92 reads of the same file). The size of a child
- * result is bounded by the PTC bridge instead (16 MiB per result,
- * local-runtime-v2 execution/ptc/contracts.ts). Without `parentToolCallId`
- * every tool keeps its caps, text and details unchanged.
- */
-export function isPtcChildCall(ctx: { readonly parentToolCallId?: string }): boolean {
-  return typeof ctx.parentToolCallId === 'string' && ctx.parentToolCallId.length > 0;
-}
-
-/**
- * Largest Bash output or text-file read a run_code child gets in full (see
- * isPtcChildCall). Above it the child gets what a direct call gets: the
- * preview plus the way to continue (Bash: the full-output file path; read:
- * the next line offset). Confirmed in the 2026-10-28 PTC proposal: half of
- * the 16 MiB per-result PTC bridge limit (local-runtime-v2
- * execution/ptc/contracts.ts), leaving room for JSON escaping.
- *
- * It also bounds the host's own work before the bridge sees the result: Pi
- * read loads the whole file, and an uncapped child read would then number
- * every line and serialize the text again, so a file of hundreds of MB could
- * exhaust memory or hit V8's string length limit (a RangeError, which ends
- * the whole program instead of failing one call). A read result carries the
- * text twice (output and data.content), so a read just under the limit can
- * still exceed the bridge; that fails only the call (PTC_RESULT_TOO_LARGE).
- */
-export const PTC_CHILD_FULL_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
-
 export type DesktopOutputLimitStrategy = 'prefix_lines' | 'head_tail_lines';
 export type DesktopOutputOffsetUnit = 'line' | 'match' | 'file';
 
 export interface DesktopOutputContinuationHint {
-  tool: 'read' | 'grep' | 'glob' | 'mavis' | 'bash' | 'task_output';
+  /**
+   * `generic` marks a hint produced by the shared tool-result truncation seam
+   * (truncation/tool-result.ts), which has no tool-specific continuation.
+   */
+  tool: 'read' | 'grep' | 'glob' | 'mavis' | 'bash' | 'task_output' | 'generic';
   preserve_args: readonly string[];
   instruction: string;
 }
@@ -106,14 +71,34 @@ export function limitDesktopPrefixLines(
     options.maxBytes,
   );
   let returnedBodyLines = 0;
+  // Incremental accounting: the body byte total grows by the line plus one
+  // '\n' separator, so each candidate's size is known without re-joining the
+  // retained prefix (the naive slice+join per iteration is quadratic). The
+  // final body is joined once, after the loop, for the winning count only.
+  const retained: string[] = [];
+  let bodyBytes = 0;
+  let bestNotice: string | undefined;
   for (let count = 1; count <= inputLines.length; count += 1) {
-    const body = inputLines.slice(0, count).join('\n');
-    const retainedLines = inputLines.slice(0, count);
-    const notice = options.notice({ originalBytes, returnedBodyLines: count, retainedLines });
-    const candidate = joinBodyAndNotice(body, notice);
-    if (byteLength(candidate) > options.maxBytes) break;
-    bestText = candidate;
+    const line = inputLines[count - 1] ?? '';
+    bodyBytes += byteLength(line) + (count > 1 ? 1 : 0);
+    // The notice consumes the array synchronously and must not retain it: it
+    // keeps growing as the retained prefix extends.
+    retained.push(line);
+    const notice = options.notice({
+      originalBytes,
+      returnedBodyLines: count,
+      retainedLines: retained,
+    });
+    // Mirrors joinBodyAndNotice: the '\n\n' separator applies only when both
+    // parts are non-empty (a single '' first line yields an empty body).
+    const bodyEmpty = count === 1 && line === '';
+    const separatorBytes = bodyEmpty || notice === '' ? 0 : 2;
+    if (bodyBytes + separatorBytes + byteLength(notice) > options.maxBytes) break;
+    bestNotice = notice;
     returnedBodyLines = count;
+  }
+  if (bestNotice !== undefined) {
+    bestText = joinBodyAndNotice(retained.slice(0, returnedBodyLines).join('\n'), bestNotice);
   }
 
   return buildLimitedResult(
@@ -276,11 +261,15 @@ function takeWholeLinesFromStart(
   lines: readonly string[],
   maxBytes: number,
 ): { text: string; count: number } {
+  // Incremental byte accounting mirrors the joined candidate's length:
+  // every accepted line after the first costs its bytes plus one '\n'.
   const kept: string[] = [];
+  let keptBytes = 0;
   for (const line of lines) {
-    const candidate = [...kept, line].join('\n');
-    if (byteLength(candidate) > maxBytes) break;
+    const lineBytes = byteLength(line) + (kept.length > 0 ? 1 : 0);
+    if (keptBytes + lineBytes > maxBytes) break;
     kept.push(line);
+    keptBytes += lineBytes;
   }
   return { text: kept.join('\n'), count: kept.length };
 }
@@ -289,14 +278,20 @@ function takeWholeLinesFromEnd(
   lines: readonly string[],
   maxBytes: number,
 ): { text: string; count: number } {
-  const kept: string[] = [];
+  // Mirrored accounting: the last accepted line costs its bytes alone, every
+  // earlier one adds a '\n'. Collected in reverse, flipped once at the end so
+  // there is no per-line unshift copy.
+  const collected: string[] = [];
+  let keptBytes = 0;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index] ?? '';
-    const candidate = [line, ...kept].join('\n');
-    if (byteLength(candidate) > maxBytes) break;
-    kept.unshift(line);
+    const lineBytes = byteLength(line) + (collected.length > 0 ? 1 : 0);
+    if (keptBytes + lineBytes > maxBytes) break;
+    collected.push(line);
+    keptBytes += lineBytes;
   }
-  return { text: kept.join('\n'), count: kept.length };
+  collected.reverse();
+  return { text: collected.join('\n'), count: collected.length };
 }
 
 function joinBodyAndNotice(body: string, notice: string): string {
@@ -306,17 +301,32 @@ function joinBodyAndNotice(body: string, notice: string): string {
 }
 
 function fitUtf8Prefix(text: string, maxBytes: number): string {
-  const buffer = Buffer.from(text, 'utf8');
-  if (buffer.length <= maxBytes) return text;
-  let end = Math.max(0, maxBytes);
+  // Byte-length first: no copy is made just to discover the text already fits.
+  if (byteLength(text) <= maxBytes) return text;
+  // The text overflows. Every UTF-16 code unit encodes to at least one UTF-8
+  // byte, so the first `maxBytes` code units always carry at least `maxBytes`
+  // bytes: buffering that bounded slice never copies the whole (potentially
+  // single-line) payload. A surrogate pair split at the slice edge decodes to
+  // U+FFFD at or after the cut, and the boundary walk below lands on the same
+  // offset as it would with the full buffer.
+  const bounded = text.length <= maxBytes ? text : text.slice(0, maxBytes);
+  const buffer = Buffer.from(bounded, 'utf8');
+  let end = Math.min(Math.max(0, maxBytes), buffer.length);
   while (end > 0 && isUtf8Continuation(buffer[end])) end -= 1;
   return buffer.subarray(0, end).toString('utf8');
 }
 
 function fitUtf8Suffix(text: string, maxBytes: number): string {
-  const buffer = Buffer.from(text, 'utf8');
-  if (buffer.length <= maxBytes) return text;
-  let start = Math.max(0, buffer.length - maxBytes);
+  // Byte-length first: no copy is made just to discover the text already fits.
+  if (byteLength(text) <= maxBytes) return text;
+  // The text overflows. The bounded slice keeps one leading code unit of
+  // context so a surrogate pair straddling the cut stays intact: its bytes
+  // are then encoded identically to the full buffer, the last `maxBytes`
+  // bytes of both buffers coincide, and the boundary walk below lands on the
+  // same offset it would with the whole (potentially single-line) payload.
+  const bounded = text.length <= maxBytes + 1 ? text : text.slice(-(maxBytes + 1));
+  const buffer = Buffer.from(bounded, 'utf8');
+  let start = Math.max(0, buffer.length - Math.max(0, maxBytes));
   while (start < buffer.length && isUtf8Continuation(buffer[start])) start += 1;
   return buffer.subarray(start).toString('utf8');
 }

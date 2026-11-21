@@ -3,6 +3,12 @@ import { classifyBrowserNavigationEvent } from './browser-action-helpers.js';
 import { BrowserExtendedActionSupport } from './browser-extended-actions.js';
 import { isHoverSemanticSnapshot, resolveBrowserHoverSemantic } from './browser-hover-semantic.js';
 import {
+  BrowserScriptController,
+  BrowserScriptOperationError,
+  BROWSER_SCRIPT_CODE_MAX_BYTES,
+  resolveBrowserScriptTimeoutMs,
+} from './browser-script-runner.js';
+import {
   asNumber,
   asString,
   delay,
@@ -17,15 +23,6 @@ import {
 import type { BrowserTransport } from './browser-transport.js';
 import { CDPHelper } from './cdp-helper.js';
 import { ElementMapManager } from './element-map-manager.js';
-import {
-  BROWSER_SCRIPT_CLEANUP_BUDGET_MS,
-  BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS,
-  BROWSER_SCRIPT_MAX_CODE_BYTES,
-  BROWSER_SCRIPT_MAX_TIMEOUT_MS,
-  BrowserScriptRun,
-  deliverInputRelease,
-  stopPageExecution,
-} from './browser-script.js';
 import { isBrowserOperationInterruption, withTimeout } from './operation-timeout.js';
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -337,16 +334,6 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
       // Observe a late rejection after cancellation instead of leaking an
       // unhandled promise while the transport discards the late CDP response.
       actionResult.catch(() => undefined);
-      // run_script observes the abort itself and must release held input on
-      // this connection before the interruption reset below replaces it. Its
-      // release is bounded, so awaiting it cannot outlive the action deadline.
-      // A cancellation or deadline that fires during that cleanup must still
-      // fail the action and run recovery, even if the script had completed.
-      if (action === 'run_script') {
-        const scriptResult = await actionResult;
-        if (controller.signal.aborted) await abortResult;
-        return scriptResult;
-      }
       return await Promise.race([actionResult, abortResult]);
     } catch (error) {
       // A provider command can hit its own deadline before the encompassing
@@ -368,25 +355,7 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
           Math.max(1, recoveryDeadline - Date.now()),
         );
         this.invalidate(this.state);
-        // A run_script release that could not reach the page is retried on
-        // the recovered connection. If it still fails, the page may hold a
-        // key or button down: poison the session so the provider recreates
-        // the page instead of handing a stuck input state to the next action.
-        const pendingRelease = this.state.pendingInputRelease;
-        this.state.pendingInputRelease = undefined;
-        const released =
-          recovered && pendingRelease
-            ? (await deliverInputRelease(this.state, pendingRelease)).length === 0
-            : !pendingRelease;
-        // A reconnect does not stop a page-side loop. If run_script could not
-        // stop its page JavaScript, the page must respond on the new
-        // connection before the session is reused.
-        const pageUnresponsive = this.state.pageUnresponsive === true;
-        this.state.pageUnresponsive = undefined;
-        const responsive = pageUnresponsive
-          ? recovered && (await stopPageExecution(this.state))
-          : true;
-        this.poisoned = !recovered || !settled || !released || !responsive;
+        this.poisoned = !recovered || !settled;
       }
       throw error;
     } finally {
@@ -452,8 +421,6 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
         return this.clickAndWaitForNavigation(input, this.actionTimeoutMs);
       case 'double_click':
         return this.click(this.state, { ...input, clickCount: 2 });
-      case 'triple_click':
-        return this.click(this.state, { ...input, clickCount: 3 });
       case 'drag':
         return this.drag(input);
       case 'fill':
@@ -483,12 +450,12 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
         return this.query(this.state, { ...input, kind: 'dom' });
       case 'screenshot':
         return this.screenshot(this.state, input);
+      case 'run_script':
+        return this.runScript(this.state, input);
       case 'verify_text':
         return this.verifyText(input);
       case 'inspect_editable_targets':
         return this.query(this.state, { ...input, kind: 'editable' });
-      case 'run_script':
-        return this.runScript(input);
       case 'open_tab':
         throw new Error('PROVIDER_LIFECYCLE_ACTION: open_tab must be handled by the provider');
       default:
@@ -496,30 +463,41 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
     }
   }
 
-  private async runScript(input: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Run an untrusted script against the live tab inside an isolated worker.
+   * Arbitrary script side effects (navigation, DOM churn) can invalidate any
+   * opaque ref, so the element map is dropped unconditionally afterwards —
+   * same contract as a main-frame navigation.
+   */
+  private async runScript(state: BrowserSessionState, input: Record<string, unknown>): Promise<unknown> {
     const code = asString(input.code);
-    if (!code.trim()) throw new Error('SCRIPT_REQUIRED: run_script requires non-empty code');
-    if (Buffer.byteLength(code, 'utf8') > BROWSER_SCRIPT_MAX_CODE_BYTES) {
-      throw new Error(
-        `SCRIPT_TOO_LARGE: run_script code exceeds ${BROWSER_SCRIPT_MAX_CODE_BYTES} bytes`,
+    if (!code) {
+      throw new BrowserScriptOperationError(
+        'RUN_SCRIPT_INPUT_INVALID',
+        'run_script requires inline script code; the caller resolves an input.path into code before dispatch',
       );
     }
-    const signal = this.state.commandSignal;
-    if (!signal) throw new Error('SCRIPT_CONTEXT_UNAVAILABLE');
-    const filename = asString(input.filename).trim() || 'browser-script.js';
-    const generation = this.state.generation;
+    if (Buffer.byteLength(code, 'utf8') > BROWSER_SCRIPT_CODE_MAX_BYTES) {
+      throw new BrowserScriptOperationError(
+        'RUN_SCRIPT_INPUT_INVALID',
+        `run_script code exceeds ${BROWSER_SCRIPT_CODE_MAX_BYTES} bytes`,
+      );
+    }
+    const controller = new BrowserScriptController({
+      transport: state.transport,
+      diagnostics: state.cdpHelper,
+      ...(state.inputCoordinateScaleProvider ? { coordinateScale: state.inputCoordinateScaleProvider } : {}),
+      ...(state.commandTimeoutMs !== undefined ? { commandTimeoutMs: state.commandTimeoutMs } : {}),
+      ...(state.commandSessionId !== undefined ? { commandSessionId: state.commandSessionId } : {}),
+      code,
+      filename: asString(input.filename) || 'run-script.js',
+      timeoutMs: resolveBrowserScriptTimeoutMs(input.timeout),
+      signal: state.commandSignal ?? new AbortController().signal,
+    });
     try {
-      return await new BrowserScriptRun(this.state, {
-        code,
-        filename,
-        timeoutMs: scriptTimeout(input),
-        signal,
-        captureScreenshot: (captureInput) => this.screenshot(this.state, captureInput),
-      }).run();
+      return await controller.run();
     } finally {
-      // A script may navigate, mutate the DOM, or leave focus anywhere: refs
-      // issued before it are no longer trustworthy evidence.
-      if (this.state.generation === generation) this.invalidate(this.state);
+      this.invalidate(state);
     }
   }
 
@@ -547,18 +525,12 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
     const navigation = isRecord(result.navigation) ? result.navigation : {};
     const detected = result.code === 'UNEXPECTED_NAVIGATION' || navigation.detected === true;
     if (!detected) {
-      // Eval 774252: models re-chose click_and_wait_for_navigation for tabs,
-      // menus and dialog triggers after this failure (5 times in one case,
-      // ~30s each) because the recovery did not say why nothing navigated.
-      // URL changes, including same-document history updates, already count
-      // as navigation above, so reaching here means the URL stayed the same.
       return {
         ...result,
         success: false,
         code: 'ACTION_TIMEOUT',
         error: 'The click did not produce an observable main-document navigation.',
-        recovery:
-          'The click was dispatched but the URL did not change, so this control most likely updates the page in place (menu, tab, dialog, inline form). Inspect the current page to see its effect; for such controls use click, and reserve click_and_wait_for_navigation for links that load a new page.',
+        recovery: 'Inspect the current page before deciding whether to retry.',
       };
     }
     try {
@@ -640,25 +612,14 @@ export class BrowserCoreSession extends BrowserExtendedActionSupport {
           });
     let after = null;
     let semanticEffect = resolveBrowserHoverSemantic(before, after, fallbackText);
-    // Models pass click/type-style `delay` here to give slow tooltips time to
-    // appear (eval 766011 rejected it as invalid_input). Treat it as a pointer
-    // hold: keep sampling across the hold and do not return before it elapses.
-    const holdMs = Math.max(0, Math.min(5_000, asNumber(input.delay, 0)));
-    const holdUntil = Date.now() + holdMs;
     if (target.backendNodeId !== undefined) {
-      const samples = Math.max(
-        HOVER_SEMANTIC_SAMPLE_COUNT,
-        Math.ceil(holdMs / HOVER_SEMANTIC_SAMPLE_DELAY_MS),
-      );
-      for (let sample = 0; sample < samples; sample += 1) {
+      for (let sample = 0; sample < HOVER_SEMANTIC_SAMPLE_COUNT; sample += 1) {
         await delay(HOVER_SEMANTIC_SAMPLE_DELAY_MS, this.state.commandSignal);
         after = await captureSemantic();
         semanticEffect = resolveBrowserHoverSemantic(before, after, fallbackText);
         if (semanticEffect.semantic.name) break;
       }
     }
-    const remainingHoldMs = holdUntil - Date.now();
-    if (remainingHoldMs > 0) await delay(remainingHoldMs, this.state.commandSignal);
     return {
       success: hovered,
       durationMs: Date.now() - startedAt,
@@ -768,11 +729,6 @@ function positiveDeadline(value: number | undefined, fallback: number): number {
     : fallback;
 }
 
-function scriptTimeout(input: Record<string, unknown>): number {
-  const requested = asNumber(input.timeout, BROWSER_SCRIPT_DEFAULT_TIMEOUT_MS);
-  return Math.max(1_000, Math.min(BROWSER_SCRIPT_MAX_TIMEOUT_MS, Math.floor(requested)));
-}
-
 function actionDeadline(
   action: string,
   input: Record<string, unknown>,
@@ -780,6 +736,13 @@ function actionDeadline(
   fallback: number,
   focusedKeyboard = false,
 ): number {
+  if (action === 'run_script') {
+    // The script timeout governs; the action budget only adds teardown slack
+    // so a script that ends exactly at its own deadline is not killed by the
+    // outer action timer first.
+    const scriptMs = resolveBrowserScriptTimeoutMs(input.timeout);
+    return Math.min(scriptMs + ACTION_COMPLETION_BUFFER_MS, MAX_ACTION_WITH_COMPLETION_BUFFER_MS);
+  }
   const requested = Math.min(MAX_ACTION_TIMEOUT_MS, positiveDeadline(requestedMs, fallback));
   if (action === 'fill' || action === 'type') {
     const text = asString(input.text);
@@ -817,7 +780,6 @@ function actionDeadline(
     // cancel an otherwise valid slow navigation.
     return Math.max(requested, NAVIGATION_ACTION_TIMEOUT_MS);
   }
-  if (action === 'run_script') return scriptTimeout(input) + BROWSER_SCRIPT_CLEANUP_BUDGET_MS;
   if (action !== 'wait' && action !== 'wait_for') return requested;
   // `wait.timeout` is the condition budget. Keep a small cleanup margin so a
   // successful timeout wait is not cancelled by the enclosing action timer.

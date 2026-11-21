@@ -64,6 +64,19 @@ export function readPreparedSystemPrompt(agentConfig: Readonly<Record<string, un
   return value;
 }
 
+/** Accept sections only when they render the exact prompt admitted for this surface. */
+export function readPreparedSystemPromptSections(
+  agentConfig: Readonly<Record<string, unknown>>,
+  prefix: string,
+  systemPrompt: string,
+): Readonly<Record<string, string>> | undefined {
+  const value = agentConfig.system_prompt_sections;
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      !Object.values(value).every((text) => typeof text === 'string')) return undefined;
+  const sections = { extension: prefix.trim(), ...value as Record<string, string> };
+  return Object.values(sections).filter(Boolean).join('\n\n') === systemPrompt ? sections : undefined;
+}
+
 export function readPreparedContextUsagePromptRanges(
   agentConfig: Readonly<Record<string, unknown>>,
   systemPromptPrefix: string,

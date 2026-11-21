@@ -8,12 +8,12 @@ import type {
 import type { AssistantMessage, AssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { EventBridge } from '../event-bridge/index.js';
 import type { ToolExecutionContext } from '../tools/index.js';
+import type { NestedToolEventSink } from '../tools/types.js';
 import type {
   PiAfterLlmCallHook,
   PiAfterToolCallHook,
   PiBeforeLlmCallHook,
   PiBeforeToolCallHook,
-  PiLlmCallRecovery,
   PiOnLlmCallPreparedHook,
   PiOnHistoryChangedHook,
   PiOnStepEndHook,
@@ -23,6 +23,7 @@ import type {
 import { composeStreamFn } from './llm.js';
 import { withLLMRetry, type LLMCallScope, type LLMCallSettledEvent } from './llm-retry.js';
 import type { TurnMetricsRecorder } from './metrics.js';
+import type { turnHistory } from './history.js';
 import { newTools } from './tools.js';
 import type {
   LLMModelConfig,
@@ -122,17 +123,18 @@ export interface turnState<TCtx extends ToolExecutionContext = ToolExecutionCont
   /** Assistant responses rejected after message_end but still referenced by Pi's loop context. */
   rejectedAssistantMessages: Set<AgentMessage>;
   /**
-   * At most one recovered provider error per LLM call: `used` clears on the
-   * next response that is not an error. `pending` waits for the runner to
-   * repeat the request; `active` is handed to the next beforeLlmCall.
-   * `lastRequest` is the request view of the latest provider call.
+   * W04 canonical request-snapshot boundary (bridge to W03 C3). Assigned by
+   * `newAgent` when the Agent is constructed; `undefined` until then. Hosts
+   * read `snapshots()` for per-logical-request canonical revisions.
    */
-  recovery: {
-    used: boolean;
-    pending?: PiLlmCallRecovery;
-    active?: PiLlmCallRecovery;
-    lastRequest?: readonly AgentMessage[];
-  };
+  requestSnapshots?: import('./request-snapshot.js').RequestSnapshotBoundary;
+  /**
+   * The turn's history delivery cursor, assigned by the runner right after
+   * `newHistory`. `undefined` only inside `newTurn` itself; the recovery
+   * path (`agent.ts`) reconciles it when it removes an already-delivered
+   * failed tail outside a canonical replacement.
+   */
+  history?: turnHistory;
   nextEventId(kind: string): string;
   nextRuntimeSeq(): number;
 }
@@ -142,11 +144,21 @@ export function newTurn<TCtx extends ToolExecutionContext>(
   deps: turnDeps,
 ): turnState<TCtx> {
   const resolved = input.llm;
-  const composedStreamFn = composeStreamFn(resolved);
+  // W06 cache warming: the host wrapper composes OUTERMOST over the fully
+  // built product chain, and only the MAIN (agent-scope) stream uses it —
+  // auxiliary compaction-scope streams keep the unwrapped chain.
+  const providerStreamFn = composeStreamFn(resolved);
+  const agentProvider = input.contextWire?.wrapProviderStreamFn?.(providerStreamFn, { turnId: input.turnId, kind: 'agent' }) ?? providerStreamFn;
+  const summaryProvider = input.contextWire?.wrapProviderStreamFn?.(providerStreamFn, { turnId: input.turnId, kind: 'compaction' }) ?? providerStreamFn;
+  const hostStreamFn = input.wrapStreamFn ? input.wrapStreamFn(agentProvider) : agentProvider;
+  // Capture real main calls outside the cache-warmer observer. Replays and
+  // summary forks use the provider chain and cannot replace a main anchor.
+  const composedStreamFn = input.contextWire?.wrapStreamFn?.(summaryProvider, hostStreamFn) ?? hostStreamFn;
   const retryStream = (scope: LLMCallScope): StreamFn => {
+    const scopedStreamFn = scope === 'agent' ? composedStreamFn : summaryProvider;
     const metricsStreamFn = deps.metrics
-      ? deps.metrics.wrapStreamFn(composedStreamFn, { recordTerminalFailure: false })
-      : composedStreamFn;
+      ? deps.metrics.wrapStreamFn(scopedStreamFn, { recordTerminalFailure: false })
+      : scopedStreamFn;
     const callerObserver = input.llmRetry?.observer;
     const callerOnCallSettled = input.llmRetry?.onCallSettled;
     const retryingStreamFn = withLLMRetry(metricsStreamFn, {
@@ -219,12 +231,34 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     logger: deps.logger,
     ...(input.captureToolTiming ? { captureToolTiming: true } : {}),
     ...(toolCallProvenanceResolver ? { toolCallProvenanceResolver } : {}),
+    ...(input.permissionMarks ? { permissionMarks: input.permissionMarks } : {}),
     ...(typeof modelContextWindow === 'number' &&
     Number.isFinite(modelContextWindow) &&
     modelContextWindow > 0
       ? { contextWindow: modelContextWindow }
       : {}),
   });
+  // Nested child calls (run_code's gateway invoker) report through this sink;
+  // the bridge owns chunk sequencing and the deferred parent message, the
+  // turn writer owns the durable push. Bound lazily: the writer lives on the
+  // turn state built below.
+  let turnStateRef: { readonly writer: PiEventWriter } | undefined;
+  const nestedToolEvents: NestedToolEventSink = {
+    start: (call) => {
+      const state = turnStateRef;
+      if (!state) return;
+      for (const event of bridge.nestedToolStart(call).events) {
+        void state.writer.pushRuntime(event);
+      }
+    },
+    end: (call) => {
+      const state = turnStateRef;
+      if (!state) return;
+      for (const event of bridge.nestedToolEnd(call).events) {
+        void state.writer.pushRuntime(event);
+      }
+    },
+  };
   const tools = newTools(
     input.workspaceDir,
     input.toolConfig.tools ?? [],
@@ -232,6 +266,7 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     {
       disableBuiltinFallback: input.toolConfig.disableBuiltinToolFallback === true,
       readAssistantMessageId: () => bridge.getActiveAssistantMessageId(),
+      nestedToolEvents,
     },
   );
   const hooks: turnHooks = {
@@ -246,7 +281,7 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     onStepEnd: [...(input.hooks?.onStepEndHook ?? []), ...(input.hooks?.onTurnEndHook ?? [])],
   };
 
-  return {
+  const state: turnState<TCtx> = {
     input,
     llm: resolved,
     writer: input.eventWriter,
@@ -278,10 +313,11 @@ export function newTurn<TCtx extends ToolExecutionContext>(
     blockedToolCalls: [],
     syntheticResponse,
     rejectedAssistantMessages: new Set(),
-    recovery: { used: false },
     nextEventId,
     nextRuntimeSeq,
   };
+  turnStateRef = state;
+  return state;
 }
 
 function withLlmCallPreparedObservers(

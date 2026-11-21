@@ -9,7 +9,10 @@ import type {
   PermissionRuleMatcher,
 } from '../types.js';
 import { getContentRulesForTool, hasWholeToolRule } from '../context.js';
-import { matchHardBlockedFsRead } from '../classifier/dangerous-patterns.js';
+import {
+  BYPASS_IMMUNE_SAFETY_CATEGORIES,
+  matchHardBlockedFsRead,
+} from '../classifier/dangerous-patterns.js';
 import { matchesMcpServerRuntimeName } from '../mcp-runtime-name.js';
 import { shellTokenize } from './shell-tokenize.js';
 import { splitCommand, findHeredocBodyRanges } from './bash-split.js';
@@ -243,7 +246,15 @@ export function evaluatePathCapability(
         (result.reason.category === 'gitDirectory' ||
           (result.reason.category === 'protectedDirectory' && isPublicKeyFile(filePath))));
 
-    const wouldBeBypassImmune = result.reason.classifierApprovable === true ? true : !bypassAllowed;
+    // A BYPASS_IMMUNE_SAFETY_CATEGORIES category (privateRuntimeData is the
+    // only one reaching here with classifierApprovable:false) is immune at the
+    // checker level too, so a compound bash line cannot let an earlier
+    // ordinary path ASK mask it (pendingAsk keeps the first non-immune ask).
+    const wouldBeBypassImmune =
+      result.reason.classifierApprovable === true ||
+      !bypassAllowed ||
+      (result.reason.category !== undefined &&
+        BYPASS_IMMUNE_SAFETY_CATEGORIES.has(result.reason.category));
 
     // Honor a rule the user persisted under the ORIGINATING wrapper tool's
     // namespace (bash / apply_patch / unknown). A safetyCheck ASK on a sensitive

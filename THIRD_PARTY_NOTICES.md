@@ -1,6 +1,12 @@
 # Third-party notices
 
 - **Pi**: `third_party/pi-mono` and derived terminal code, MIT. Full notices are in `third_party/pi-mono/LICENSE` and `packages/tui/THIRD_PARTY_NOTICES.md`. Local modifications are recorded in `third_party/pi-mono/MINIMAX_CHANGES.md`.
+- **Pi Durable and Chord** are vendored from Earendil Works’
+  [Pi v1.5.2](https://github.com/earendil-works/pi/tree/b4afdddf44e059c67ccf5097e5317d913521b470).
+  They come from `packages/durable` and `packages/chord` and retain their MIT
+  notices in [Pi Durable LICENSE](third_party/pi-durable/LICENSE) and
+  [Chord LICENSE](third_party/chord/LICENSE). See the
+  [local modifications](third_party/pi-durable/MINIMAX_CHANGES.md).
 - **Sandbox Runtime**: `third_party/sandbox-runtime`, Apache-2.0. See its README, LICENSE, and upstream.json for the upstream version, source revision, fork changes, and native build instructions.
 - **models.dev**: the bundled provider / model catalog snapshot, MIT; notices are in `packages/tui/THIRD_PARTY_NOTICES.md`.
 - **Bundled assets**: LICENSE, NOTICE, and file-level declarations in each asset directory retain their original attribution.

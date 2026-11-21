@@ -1,6 +1,7 @@
 import { toRuntimeTool } from '@mavis/agent-core/tools';
-import type { LocalBashEnvPolicySource } from './permission-execution.js';
+import type { BashEnvPolicy } from '@mavis/agent-core/bash-subprocess-env';
 
+import type { ToolOutputSpill } from '../truncation/spill.js';
 import { LocalAskUserTool } from './local-ask-user.js';
 import { LocalFeatureEnableTool } from './local-feature-enable.js';
 import { LocalBashTool, LocalEditTool, LocalReadTool, LocalWriteTool } from './local-pi-tools.js';
@@ -17,6 +18,10 @@ import {
   LocalTaskStopTool,
 } from './local-task-control.js';
 import { LocalTaskTool } from './local-task.js';
+import {
+  LOCAL_TASK_OUTPUT_TOOL_DESCRIPTION_NON_REACTIVE,
+  LOCAL_TASK_TOOL_DESCRIPTION_NON_REACTIVE,
+} from './builtin-defs.js';
 import { LocalTaskAppendTool } from './local-task-append.js';
 import { LocalTodoWriteTool } from './local-todowrite.js';
 import { LocalWebFetchTool } from './local-webfetch.js';
@@ -49,12 +54,10 @@ export * from './local-ask-user.js';
 export * from './local-feature-enable.js';
 export * from './local-browser.js';
 export * from './local-pi-tools.js';
-export * from './ptc-result-projection.js';
 export * from './local-bash-result.js';
 export * from './local-bash-timing.js';
 export * from './local-bash-input.js';
 export * from './local-bash-contract.js';
-export * from './permission-execution.js';
 export { executeLocalHostTrashIfRequested } from './host-trash-executor.js';
 export type { LocalHostTrashRuntime } from './host-trash-executor.js';
 export * from './local-glob.js';
@@ -63,7 +66,6 @@ export * from './local-rg-runner.js';
 export * from './local-skill.js';
 export * from './local-mavis.js';
 export * from './local-mavis-commands.js';
-export * from './local-mavis-ptc.js';
 export * from './local-mavis-cron-adapter.js';
 export * from './local-memory.js';
 export * from './local-code-review.js';
@@ -84,6 +86,7 @@ export * from './matrix-tools.js';
 export * from './types.js';
 export * from './subagent-roles.js';
 export * from '../shared/web-search.js';
+export * from '../truncation/index.js';
 export {
   DEFAULT_BROAD_FILE_EXCLUDES,
   DEFAULT_SCAN_DIRECTORY_NAMES,
@@ -103,11 +106,11 @@ export interface LocalToolRegistryDeps {
   /**
    * Layer B env sanitize policy for bash subprocesses (Layer A boundary strip
    * is always on). REQUIRED so every assembly names its policy explicitly —
-   * production passes a callback resolving the current runtime policy (rm-shim
-   * PATH + spawn preflight); tests typically pass `{ mode: 'off' }`. See
+   * production passes `resolveAgentBashEnvPolicy(dataDir)` (rm-shim PATH +
+   * spawn preflight); tests typically pass `{ mode: 'off' }`. See
    * design/tools-optimize/bash-tool-optimization.md.
    */
-  bashEnvPolicy: LocalBashEnvPolicySource;
+  bashEnvPolicy: BashEnvPolicy;
   webFetchAdapter?: LocalWebFetchAdapter;
   webSearchAdapter?: LocalWebSearchAdapter;
   taskAdapter?: LocalTaskAdapter;
@@ -120,6 +123,21 @@ export interface LocalToolRegistryDeps {
   mavisCronAdapter?: LocalMavisCronAdapter;
   mavisMcpAdapter?: LocalMavisMcpAdapter;
   mavisSessionAdapter?: LocalMavisSessionAdapter;
+  /**
+   * Whether this runtime releases foreground task waits on owner input (the
+   * native task-wait binding of verdict 09 §1.4). Default (undefined) keeps
+   * the legacy reactive description; `false` swaps the task description to the
+   * honest non-reactive contract (§5.4 №19: JSONL/legacy backends must not
+   * promise release). There is no `true`-only surface: runtimes with the
+   * binding use the default description.
+   */
+  taskToolReactive?: boolean;
+  /**
+   * Optional full-output spill hook for truncated tool results (bash complete
+   * output, oversized skill content). The CAS-backed implementation arrives
+   * separately; without it tools keep their local persistence fallback.
+   */
+  toolOutputSpill?: ToolOutputSpill;
 }
 
 export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string, LocalRuntimeTool> {
@@ -134,6 +152,7 @@ export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string,
         deps.bashEnvPolicy,
         deps.hostTrashRuntime,
         deps.sandboxOperationsFactory,
+        deps.toolOutputSpill,
       ),
     ),
     toRuntimeTool(new LocalGrepTool(deps.workspaceRoot)),
@@ -141,7 +160,7 @@ export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string,
     toRuntimeTool(new LocalTodoWriteTool(deps.todoEventSink)),
   ];
   if (deps.skillReader) {
-    tools.push(toRuntimeTool(new LocalSkillTool(deps.skillReader)));
+    tools.push(toRuntimeTool(new LocalSkillTool(deps.skillReader, deps.toolOutputSpill)));
   }
   if (deps.memoryAdapter) {
     tools.push(toRuntimeTool(new LocalMemoryTool(deps.memoryAdapter)));
@@ -172,15 +191,29 @@ export function buildLocalToolRegistry(deps: LocalToolRegistryDeps): Map<string,
     tools.push(toRuntimeTool(new LocalWebSearchTool(deps.webSearchAdapter)));
   }
   if (deps.taskAdapter) {
-    tools.push(toRuntimeTool(new LocalTaskTool(deps.taskAdapter)));
+    const taskTool = toRuntimeTool(new LocalTaskTool(deps.taskAdapter));
+    tools.push(
+      deps.taskToolReactive === false
+        ? { ...taskTool, def: { ...taskTool.def, description: LOCAL_TASK_TOOL_DESCRIPTION_NON_REACTIVE } }
+        : taskTool,
+    );
   }
   if (deps.taskAppendAdapter) {
     tools.push(toRuntimeTool(new LocalTaskAppendTool(deps.taskAppendAdapter)));
   }
   if (deps.taskControlAdapter) {
+    const taskOutputTool = toRuntimeTool(new LocalTaskOutputTool(deps.taskControlAdapter));
     tools.push(
       toRuntimeTool(new LocalTaskQueryTool(deps.taskControlAdapter)),
-      toRuntimeTool(new LocalTaskOutputTool(deps.taskControlAdapter)),
+      // The owner-input early release of a bounded wait is a capability of the
+      // native task-wait binding (§5.4 №19): a non-reactive runtime keeps the
+      // full-wait description instead of promising a release it cannot do.
+      deps.taskToolReactive === false
+        ? {
+            ...taskOutputTool,
+            def: { ...taskOutputTool.def, description: LOCAL_TASK_OUTPUT_TOOL_DESCRIPTION_NON_REACTIVE },
+          }
+        : taskOutputTool,
       toRuntimeTool(new LocalTaskStopTool(deps.taskControlAdapter)),
     );
   }
@@ -205,7 +238,4 @@ export {
   CloudSessionReadError,
   type CloudSessionReaderOptions,
 } from './cloud-session-reader.js';
-export {
-  DESKTOP_BASH_PREVIEW_BYTES,
-  PTC_CHILD_FULL_OUTPUT_MAX_BYTES,
-} from './output-limit.js';
+export { DESKTOP_BASH_PREVIEW_BYTES } from './output-limit.js';

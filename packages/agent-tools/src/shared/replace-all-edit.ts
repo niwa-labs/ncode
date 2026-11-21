@@ -11,8 +11,6 @@
  * edit.
  */
 
-import { normalizeToLF, stripBom } from '@earendil-works/pi-coding-agent/tools';
-
 import { readFile as fsReadFile } from 'fs/promises';
 
 export interface ReplaceAllEditInput {
@@ -38,12 +36,6 @@ export class ReplaceAllError extends Error {
  * `replacedCount` lets the caller surface a meaningful success message
  * (the model's UX is "I replaced N occurrences") even though pi only ever
  * sees one edit.
- *
- * Counting and replacing happen in pi's edit space: BOM stripped and line
- * endings normalized to LF, exactly like pi's edit does before matching.
- * The returned edit lives in that space too, so pi matches it against the
- * whole normalized file and restores the original BOM and line endings
- * when it writes.
  */
 export async function buildReplaceAllEdit(
   absolutePath: string,
@@ -69,9 +61,13 @@ export async function buildReplaceAllEdit(
     );
   }
 
-  const content = normalizeToLF(stripBom(rawContent).text);
-  const needle = normalizeToLF(oldString);
-  const replacement = normalizeToLF(newString);
+  // BOM stripped and line endings normalized before matching (our decision
+  // the sync reverted): a CRLF/BOM file still matches, and the written file
+  // comes back normalized. Vendor 1.5.2 no longer ships these helpers, so
+  // they are inlined here.
+  const content = normalizeToLf(stripBom(rawContent));
+  const needle = normalizeToLf(oldString);
+  const replacement = normalizeToLf(newString);
 
   let replacedCount = 0;
   {
@@ -98,22 +94,12 @@ export async function buildReplaceAllEdit(
   };
 }
 
-/**
- * pi reports the collapsed full-file edit as "Successfully replaced 1
- * block(s)", which tells the model only one spot changed. Replace pi's
- * success text with the real occurrence count; non-text content and
- * details (diff / patch) are kept as-is.
- */
-export function withReplaceAllCount<T extends { content: ReadonlyArray<{ type: string }> }>(
-  result: T,
-  path: string,
-  replacedCount: number,
-): T {
-  const text = `Successfully replaced ${replacedCount} occurrence(s) in ${path}.`;
-  return {
-    ...result,
-    content: [{ type: 'text', text }, ...result.content.filter((item) => item.type !== 'text')],
-  };
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function normalizeToLf(text: string): string {
+  return text.replace(/\r\n/gu, '\n');
 }
 
 /**

@@ -3,6 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Context, Model, SimpleStreamOptions } from '@earendil-works/pi-ai';
 
 import type { RemoteTokenCountContext, RemoteTokenCounter } from './remote-token-counter.js';
+import { sanitizeProviderHeaders } from './remote-token-counter.js';
 
 const BASELINE_MESSAGE: AgentMessage = {
   role: 'user',
@@ -121,12 +122,15 @@ export class ContextUsageCalibrationCoordinator {
     streamOptions?: SimpleStreamOptions;
     fingerprint: string;
   }): Promise<ContextUsageToolCalibration> {
+    // Pin ProviderHeaders may carry null (= header removal); count requests
+    // are plain fetch, so nulls are dropped when crossing into the context.
+    const countHeaders = sanitizeProviderHeaders(input.streamOptions?.headers);
     const base: RemoteTokenCountContext = {
       messages: [BASELINE_MESSAGE],
       model: input.model,
       ...(input.context.systemPrompt ? { systemPrompt: input.context.systemPrompt } : {}),
       ...(input.streamOptions?.apiKey ? { apiKey: input.streamOptions.apiKey } : {}),
-      ...(input.streamOptions?.headers ? { headers: input.streamOptions.headers } : {}),
+      ...(countHeaders ? { headers: countHeaders } : {}),
       ...(input.streamOptions?.maxTokens !== undefined
         ? { maxTokens: input.streamOptions.maxTokens }
         : {}),
@@ -136,18 +140,20 @@ export class ContextUsageCalibrationCoordinator {
       ...(input.streamOptions?.reasoning ? { thinkingLevel: input.streamOptions.reasoning } : {}),
       ...(input.streamOptions?.signal ? { signal: input.streamOptions.signal } : {}),
     };
-    // Probe without tools first. An unavailable counter cannot calibrate the
-    // marginal, so do not upload the much larger tool definitions in that case.
-    const withoutTools = await this.counter.countContextTokens(base);
-    if (withoutTools.source !== 'remote') {
-      return { fingerprint: input.fingerprint, status: 'UNAVAILABLE' };
-    }
-    const withTools = await this.counter.countContextTokens({
-      ...base,
-      tools: [...(input.context.tools ?? [])],
-    });
+    const [withoutTools, withTools] = await Promise.all([
+      this.counter.countContextTokens(base),
+      this.counter.countContextTokens({
+        ...base,
+        tools: [...(input.context.tools ?? [])],
+      }),
+    ]);
     const tokens = withTools.tokens - withoutTools.tokens;
-    if (withTools.source !== 'remote' || !Number.isSafeInteger(tokens) || tokens < 0) {
+    if (
+      withoutTools.source !== 'remote' ||
+      withTools.source !== 'remote' ||
+      !Number.isSafeInteger(tokens) ||
+      tokens < 0
+    ) {
       return { fingerprint: input.fingerprint, status: 'UNAVAILABLE' };
     }
     return {

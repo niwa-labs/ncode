@@ -19,9 +19,13 @@ export const GLOBAL_EVENT_TYPES = [
   "session.abort",
   "session.queue.updated",
   "session.compaction.started",
+  "session.compaction.progress",
   "session.compaction.completed",
   "session.compaction.failed",
   "session.llm_retry",
+  "session.publish_conflict",
+  "turn.prompt_suggestion.generated",
+  "turn.prompt_suggestion.status",
   "permission.ask",
   "permission.resolved",
   "config.permission_mode.changed",
@@ -30,8 +34,6 @@ export const GLOBAL_EVENT_TYPES = [
   "questionnaire.dismiss",
   "questionnaire.superseded",
   "message.rewind",
-  "turn.prompt_suggestion.generated",
-  "turn.prompt_suggestion.status",
   "notification.read",
   "notification.refresh",
   "content.retry.exceeded",
@@ -162,7 +164,6 @@ export type GlobalThreadGoal = {
   } | null;
 };
 
-/** Closed catalog of product events exchanged between the runtime and its frontends. */
 /** Why a settled Turn produced no next-message suggestion. */
 export type PromptSuggestionUnavailableReason =
   | 'kill_switch'
@@ -198,6 +199,7 @@ export type PromptSuggestionAttempt = {
   usage?: PromptSuggestionUsage;
 };
 
+/** Closed catalog of product events exchanged between the runtime and its frontends. */
 export type GlobalEventPayloadMap = {
   "agent.created": { agentName: string };
   "agent.updated": {
@@ -292,6 +294,11 @@ export type GlobalEventPayloadMap = {
     error?: string;
   };
   "session.compaction.started": { sessionId: string; compactionId: string };
+  "session.compaction.progress": {
+    sessionId: string;
+    progressId: string;
+    stage: 'preparing' | 'installed' | 'failed';
+  };
   "session.compaction.completed": {
     sessionId: string;
     compactionId: string;
@@ -307,6 +314,23 @@ export type GlobalEventPayloadMap = {
     tokenUsage?: CompactionTokenUsage;
   };
   "session.llm_retry": SessionLLMRetryEventPayload;
+  /**
+   * W1 §3.4: the durable→jsonl publisher hit a foreign-rewrite conflict — the
+   * app rewrote the session's `messages.jsonl` while this runtime held an
+   * unpublished durable tail. Durable stays the source of truth; the foreign
+   * file was preserved as read-only evidence. Banner-class warning: the
+   * window renders it like other session warnings.
+   */
+  "session.publish_conflict": {
+    schemaVersion: 1;
+    sessionId: string;
+    /** Path of the preserved `messages.external-<ts>.jsonl` evidence copy, when preserved. */
+    preservedTo?: string;
+    /** Entries of the durable log that stayed the source. */
+    durableEntries: number;
+    /** Entries the conflicting foreign file carried. */
+    publishedEntries: number;
+  };
   "permission.ask": {
     requestId: string;
     sessionId: string;
@@ -317,12 +341,6 @@ export type GlobalEventPayloadMap = {
     ruleContents: string[];
     toolInput?: string;
     toolDescription?: string;
-    /** Parent run_code id for a PTC child request. */
-    parentToolCallId?: string;
-    /** Model-provided outer run_code description, displayed by current Desktop UI. */
-    parentToolDescription?: string;
-    /** Denial stops only the enclosing PTC program, never the entire Turn. */
-    stopPtcOnDeny?: boolean;
     reason: string;
     allowAlwaysSupported: boolean;
     createdAt: number;
@@ -330,7 +348,7 @@ export type GlobalEventPayloadMap = {
   "permission.resolved": {
     requestId: string;
     sessionId: string;
-    decision: "allowAlways" | "allowOnce" | "deny";
+    decision: "allowAlways" | "allowOnce" | "deny" | "denyAlways";
   };
   "config.permission_mode.changed": {
     permissionMode:
@@ -360,17 +378,17 @@ export type GlobalEventPayloadMap = {
     keepRequestId: string;
     supersededAt: number;
   };
-  'message.rewind': { sessionId: string; contextReset?: boolean };
-  'turn.prompt_suggestion.status': PromptSuggestionAttempt & {
+  "message.rewind": { sessionId: string; contextReset?: boolean };
+  "turn.prompt_suggestion.status": PromptSuggestionAttempt & {
     sessionId: string;
     turnId: string;
-    status: 'generating' | 'unavailable' | 'cancelled';
+    status: "generating" | "unavailable" | "cancelled";
     /** Set on a terminal status: why this Turn ended without a suggestion. */
     reason?: PromptSuggestionUnavailableReason;
     /** Set on a terminal status: whether a model request was issued. */
     requested?: boolean;
   };
-  'turn.prompt_suggestion.generated': PromptSuggestionAttempt & {
+  "turn.prompt_suggestion.generated": PromptSuggestionAttempt & {
     sessionId: string;
     turnId: string;
     suggestion: string;
@@ -487,4 +505,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** Shared wording for informational transcript notices in TUI and ACP. */
+export function compactionProgressText(stage: GlobalEventPayloadMap['session.compaction.progress']['stage']): string {
+  return {
+    preparing: 'Context compaction started. Preparing a summary.',
+    installed: 'Context replaced with the summary and recent messages.',
+    failed: 'Context compaction could not finish.',
+  }[stage];
 }

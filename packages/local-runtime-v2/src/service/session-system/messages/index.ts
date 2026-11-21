@@ -11,7 +11,6 @@ export * from './history/released-session-history-reader.js';
 export * from './history/session-history-location.js';
 export { resolveSessionHistoryPaths } from './history/session-history-paths.js';
 export * from './record.js';
-export * from './ptc/crash-recovery.js';
 export * from './source.js';
 export * from './stale-compaction-repair.js';
 export * from './user-message-commit-service.js';

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.node.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The paths entries compile neighbor-package SOURCES (the same resolution
+    // the repository gate derives), mirroring packages/v2-adapter/tsconfig.json.
+    "paths": {
+      "@mavis/logging": ["../../packages/logging/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}

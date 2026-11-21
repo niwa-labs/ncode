@@ -186,7 +186,18 @@ test(
       MCODE_TEST_ALLOWED_ORIGIN: new URL(baseUrl).origin,
       MCODE_TEST_NETWORK_AUDIT: networkAudit,
       MCODE_TEST_MANAGED_OFFLINE: "1",
+      // In-process pin: this suite tests the agent loop (see the fixture note).
+      MCODE_SERVER_MODE: "off",
       MCODE_TEST_PROCESS_PROBE: "1",
+      // These fixtures pin the LEGACY persistence surfaces (messages.jsonl,
+      // canonical sqlite rows) — W10 moved canonical history to the durable
+      // store by default, so the suite selects the explicit compat mode.
+      MCODE_HISTORY_PROVIDER: "jsonl",
+      // The suite drives the agent loop against a fixture provider; the
+      // daemon path (the auto default since 2026-10-29) resolves the route
+      // through the managed cn-prod preset and rejects the custom provider
+      // (BYOK-vs-daemon parity is tracked in the backlog), so pin in-process.
+      MCODE_SERVER_MODE: "off",
       NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
     };
     let commandSequence = 0;
@@ -745,6 +756,10 @@ test(
           MCODE_TEST_ALLOWED_ORIGIN: origin,
           MCODE_TEST_NETWORK_AUDIT: networkAudit,
           MCODE_TEST_MANAGED_OFFLINE: "1",
+          // In-process pin: this suite tests the agent loop (see the fixture note).
+          MCODE_SERVER_MODE: "off",
+          // Legacy persistence surfaces — see the compat-mode note above.
+          MCODE_HISTORY_PROVIDER: "jsonl",
           NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -977,6 +992,10 @@ function cancellationTest(cancellation) {
           MCODE_TEST_ALLOWED_ORIGIN: origin,
           MCODE_TEST_NETWORK_AUDIT: networkAudit,
           MCODE_TEST_MANAGED_OFFLINE: "1",
+          // In-process pin: this suite tests the agent loop (see the fixture note).
+          MCODE_SERVER_MODE: "off",
+          // Legacy persistence surfaces — see the compat-mode note above.
+          MCODE_HISTORY_PROVIDER: "jsonl",
           NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
         },
         stdio: ["ignore", "pipe", "pipe"],

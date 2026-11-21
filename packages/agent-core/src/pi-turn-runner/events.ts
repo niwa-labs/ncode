@@ -10,7 +10,6 @@ import { immediateSendBatchId } from './outbound-message-normalizer.js';
 export interface eventSub {
   unsubscribe(): void;
   drain(): Promise<void>;
-  dispatch(event: AgentEvent): Promise<void>;
   convergeAtIdle(): Promise<void>;
   forcedTermination(): TurnTerminationReason | undefined;
 }
@@ -86,15 +85,23 @@ export function subscribeEvents(
   let queue: Promise<void> = Promise.resolve();
   let forcedTermination: TurnTerminationReason | undefined;
   let continuationsClosed = false;
-  const existingShouldStopAfterTurn = agent.shouldStopAfterTurn;
-  agent.shouldStopAfterTurn = async (context) =>
-    forcedTermination !== undefined || (await existingShouldStopAfterTurn?.(context)) === true;
+  // W04 §5.1 row 32: the stop controller rides the pin-native finishTurn hook
+  // (the old shouldStopAfterTurn Agent property does not exist at the pin).
+  // Composition order: forced termination wins; otherwise the product hook
+  // decides (true → end, false/undefined → normal scheduling, never continue).
+  const productFinishTurn = agent.finishTurn;
+  agent.finishTurn = async (turnContext, signal) => {
+    if (forcedTermination !== undefined) return { action: 'end' as const };
+    const decision = await productFinishTurn?.(turnContext, signal);
+    return decision ?? undefined;
+  };
 
   const applyAfterLlmControl = async (
     event: Extract<AgentEvent, { type: 'message_end' }>,
-  ): Promise<'emit' | 'discard'> => {
-    if (event.message.role !== 'assistant' || turn.hooks.afterLLM.length === 0) return 'emit';
-    if (event.message.stopReason !== 'error') turn.recovery.used = false;
+  ): Promise<{ action: 'emit' } | { action: 'discard'; reason: string }> => {
+    if (event.message.role !== 'assistant' || turn.hooks.afterLLM.length === 0) {
+      return { action: 'emit' };
+    }
     for (const hook of turn.hooks.afterLLM) {
       let decision: Awaited<ReturnType<typeof hook>>;
       try {
@@ -102,7 +109,10 @@ export function subscribeEvents(
           sessionId: turn.input.sessionId,
           turnId: turn.input.turnId,
           message: event.message,
-          messages: [...agent.state.messages],
+          // pi 48c8f322 keeps the system prompt as transcript-resident
+          // `system` messages; hook-visible messages stay conversation-only
+          // (0.79 parity — no `system` role crosses hook boundaries).
+          messages: agent.state.messages.filter((message) => message.role !== 'system'),
           signal: turn.input.signal ?? agent.signal,
         });
       } catch (error) {
@@ -117,7 +127,9 @@ export function subscribeEvents(
         );
         event.message.content = event.message.content.filter((block) => block.type !== 'toolCall');
         forcedTermination = { kind: 'failed', message: `after_llm_call_failed: ${message}` };
-        return isEmptyAssistantResponse(event.message) ? 'discard' : 'emit';
+        return isEmptyAssistantResponse(event.message)
+          ? { action: 'discard', reason: 'after_llm_call_failed' }
+          : { action: 'emit' };
       }
       if (!decision || decision.type === 'continue') continue;
       if (decision.type === 'replaceText') {
@@ -137,34 +149,23 @@ export function subscribeEvents(
           content: [{ type: 'text', text: decision.prompt }],
           timestamp: Date.now(),
         });
-        return 'discard';
-      }
-      if (decision.type === 'recover') {
-        if (
-          event.message.stopReason !== 'error' ||
-          turn.recovery.used ||
-          turn.input.signal?.aborted === true
-        ) {
-          continue;
-        }
-        turn.recovery.used = true;
-        turn.recovery.pending = {
-          reason: decision.reason,
-          errorMessage: event.message.errorMessage ?? '',
-          requestMessages: turn.recovery.lastRequest ?? [],
-        };
-        return 'discard';
+        return { action: 'discard', reason: `retry: ${decision.reason}` };
       }
       // A failed response is rejected as a whole. Never let its still-pending
       // tool intent execute.
       event.message.content = event.message.content.filter((block) => block.type !== 'toolCall');
       forcedTermination = { kind: 'failed', message: decision.reason };
-      return isEmptyAssistantResponse(event.message) ? 'discard' : 'emit';
+      return isEmptyAssistantResponse(event.message)
+        ? { action: 'discard', reason: `fail: ${decision.reason}` }
+        : { action: 'emit' };
     }
-    return 'emit';
+    return { action: 'emit' };
   };
 
-  const discardAssistantMessage = (event: Extract<AgentEvent, { type: 'message_end' }>): void => {
+  const discardAssistantMessage = async (
+    event: Extract<AgentEvent, { type: 'message_end' }>,
+    reason: string,
+  ): Promise<void> => {
     // Agent.state and Pi's private loop context are distinct arrays containing
     // the same final message object. Remove the public transcript copy now and
     // let transformContext remove the loop-context copy before the next call.
@@ -176,8 +177,17 @@ export function subscribeEvents(
         ...messages.slice(0, messageIndex),
         ...messages.slice(messageIndex + 1),
       ];
+      // The removed message never reached onHistory (flushTail below skips
+      // discarded message_end events), so the delivery cursor still points
+      // past the live tail — reconcile it explicitly to the shrunken
+      // transcript so the replacement attempt's messages deliver as a fresh
+      // delta instead of being swallowed by a stale length comparison.
+      history.reconcileRemoval();
     }
-    turn.bridge.discardActiveAssistantMessage();
+    const discarded = turn.bridge.discardActiveAssistantMessage(reason);
+    if (discarded.events.length > 0) {
+      await flushEvents(turn.writer, discarded.events);
+    }
   };
 
   const cannotContinueAtIdle = (): boolean =>
@@ -278,9 +288,6 @@ export function subscribeEvents(
   };
 
   const writeAgentEvent = async (event: AgentEvent, observedAtMs: number): Promise<void> => {
-    if (requiresPtcLifecycleDelivery(event, turn) && !turn.bridge.getActiveAssistantMessageId()) {
-      throw new Error('PTC lifecycle delivery requires an active assistant message id.');
-    }
     let out: Awaited<ReturnType<typeof turn.bridge.processEvent>>;
     try {
       out = await turn.bridge.processEvent(event, observedAtMs);
@@ -324,11 +331,19 @@ export function subscribeEvents(
   };
 
   const onAgentEvent = async (event: AgentEvent, observedAtMs: number): Promise<void> => {
+    if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
+      turn.logger.info({
+        session_id: turn.input.sessionId, turn_id: turn.input.turnId,
+        event_type: event.type, role: event.message.role,
+        ...(event.message.role === 'assistant' ? { stop_reason: event.message.stopReason } : {}),
+      }, '[pi-turn-runner] agent boundary');
+    }
     let discardMessage = false;
     try {
       if (event.type === 'message_end') {
-        discardMessage = (await applyAfterLlmControl(event)) === 'discard';
-        if (discardMessage) discardAssistantMessage(event);
+        const control = await applyAfterLlmControl(event);
+        discardMessage = control.action === 'discard';
+        if (control.action === 'discard') await discardAssistantMessage(event, control.reason);
       }
       if (!discardMessage) await writeAgentEvent(event, observedAtMs);
     } catch (err) {
@@ -341,7 +356,6 @@ export function subscribeEvents(
         },
         '[pi-turn-runner] event handler threw',
       );
-      if (requiresPtcLifecycleDelivery(event, turn)) throw err;
     }
 
     if ((!discardMessage && event.type === 'message_end') || event.type === 'tool_execution_end') {
@@ -380,7 +394,7 @@ export function subscribeEvents(
     if (event.type === 'turn_end') await pollExternalContinuations(event);
   };
 
-  const dispatch = (event: AgentEvent): Promise<void> => {
+  const unsubscribe = agent.subscribe((event: AgentEvent) => {
     // Capture before queueing or awaiting response hooks so decode timing only
     // spans model events, not caller-side control or delivery work.
     const observedAtMs = nowMs();
@@ -390,33 +404,14 @@ export function subscribeEvents(
     const queued = queue.then(() => onAgentEvent(event, observedAtMs));
     queue = queued.catch(() => undefined);
     return queued;
-  };
-
-  const unsubscribe = agent.subscribe((event: AgentEvent) => dispatch(event));
+  });
 
   return {
     unsubscribe,
     drain: () => queue,
-    dispatch,
     convergeAtIdle,
     forcedTermination: () => forcedTermination,
   };
-}
-
-function requiresPtcLifecycleDelivery(event: AgentEvent, turn: turnState): boolean {
-  if (
-    turn.input.toolConfig.ptcTools === undefined ||
-    (event.type !== 'tool_execution_start' && event.type !== 'tool_execution_end')
-  ) {
-    return false;
-  }
-  if (event.parentToolCallId) return true;
-  return (
-    event.toolName === 'run_code' &&
-    (turn.input.toolConfig.tools ?? []).some(
-      (tool) => tool.def.name === 'run_code' && tool.source === 'builtin',
-    )
-  );
 }
 
 function enqueueSteering(agent: Agent, messages: AgentMessage[]): void {

@@ -61,7 +61,7 @@ import {
 } from '@mavis/protocol';
 import type { RuntimeProtocolError, RuntimeToolCall } from '../protocol/runtime-event.js';
 import type { TokenUsage } from '../protocol/agent-message.js';
-import { readPtcExecutionDetails } from '../tools/ptc.js';
+import type { NestedToolEventInput } from '../tools/types.js';
 import {
   buildAbortedTerminalStatusEvent,
   buildCompletedAssistantMessage,
@@ -73,6 +73,7 @@ import {
   buildThinkingDeltaChunk,
   buildToolCallChunk,
   extractAssistantErrorMessage,
+  extractAssistantRawStopReason,
   extractAssistantStopReason,
   extractAssistantText,
   extractAssistantThinking,
@@ -258,8 +259,20 @@ export class EventBridge {
    * Drop the in-flight assistant response without emitting its message_end.
    * Used when a response-control hook rejects an empty response before the
    * bridge or history surfaces it to product consumers.
+   *
+   * The reset is NOT silent: when an assistant message id was already
+   * allocated (deltas for the rejected attempt may have reached live
+   * consumers), the returned `BridgedEvents` carries a `debug.trace` frame
+   * with the phase `assistant_message_discarded` and the discarded
+   * `message_id` attr. Callers MUST flush those events downstream BEFORE the
+   * replacement attempt streams, so identity-aware consumers (the TUI live
+   * projection) retract exactly that attempt's transient cells — by
+   * identity, never by text match, and a later `messageId` change alone is
+   * never treated as a discard. With no active id there is nothing streamed
+   * to retract and the result carries no events.
    */
-  discardActiveAssistantMessage(): void {
+  discardActiveAssistantMessage(reason?: string): BridgedEvents {
+    const discardedMessageId = this.activeAssistantMessageId;
     this.activeAssistantMessageId = undefined;
     this.awaitingMessageId = false;
     this.pendingCompletedMessage = undefined;
@@ -267,6 +280,23 @@ export class EventBridge {
     this.toolStartMs = new Map();
     this.preparingToolCalls = new Map();
     this.pendingToolCount = 0;
+    if (!discardedMessageId) return { events: [] };
+    return {
+      events: [
+        buildDebugTraceEvent({
+          sessionId: this.ctx.sessionId,
+          turnId: this.ctx.turnId,
+          eventId: this.ctx.eventIdGenerator('coding_assistant_discarded'),
+          phase: 'assistant_message_discarded',
+          message: 'Assistant response was rejected; retract its live stream cells',
+          level: 'info',
+          attrs: {
+            message_id: discardedMessageId,
+            ...(reason ? { reason } : {}),
+          },
+        }),
+      ],
+    };
   }
 
   /**
@@ -594,7 +624,14 @@ export class EventBridge {
     // When an LLM error maps to a typed daemon code supported by the UI, emit a compact
     // `code:message` terminal error. The UI consumes assistant + finish_reason=error
     // as session status; local-runtime filters out these terminal assistant bubbles.
-    const classified = errorMessage ? classifyLLMErrorToCode(errorMessage) : null;
+    // The provider's raw stop reason rides along so a refusal/safety stop is detected
+    // structurally (W06 review fix) — its explanation text never reaches the code
+    // heuristics.
+    const classified = errorMessage
+      ? classifyLLMErrorToCode(errorMessage, {
+          rawStopReason: extractAssistantRawStopReason(event.message),
+        })
+      : null;
     const typedErrorText =
       classified !== null && TYPED_TERMINAL_ERROR_CODES.has(classified.status_code)
         ? `${classified.status_code}:${classified.message}`
@@ -710,14 +747,18 @@ export class EventBridge {
       };
     }
     const args = event.args;
+    // §4: Start normally precedes the permission decision (pi emits it before
+    // prepareToolCall), so this stamp only lands on re-emitted starts; the
+    // final Finished/Failed status below is the guaranteed carrier.
+    const startMark = this.permissionMarkFor(event.toolCallId);
     const toolCall: RuntimeToolCall = {
       tool_name: event.toolName,
       tool_call_id: event.toolCallId,
-      ...(event.parentToolCallId ? { parent_tool_call_id: event.parentToolCallId } : {}),
       status: 'started',
       ...(args !== undefined && typeof args === 'object' && args !== null
         ? { args: args as Record<string, unknown> }
         : {}),
+      ...(startMark ? { permission: startMark } : {}),
       ...this.resolveToolCallProvenance({
         phase: 'start',
         toolName: event.toolName,
@@ -745,11 +786,7 @@ export class EventBridge {
           eventId: this.ctx.eventIdGenerator('coding_trace_tool_call_started'),
           phase: 'tool_call_started',
           message: 'Host tool call started',
-          attrs: {
-            tool_name: event.toolName,
-            tool_call_id: event.toolCallId,
-            ...(event.parentToolCallId ? { parent_tool_call_id: event.parentToolCallId } : {}),
-          },
+          attrs: { tool_name: event.toolName, tool_call_id: event.toolCallId },
         }),
         buildToolCallChunk({
           sessionId: this.ctx.sessionId,
@@ -768,16 +805,6 @@ export class EventBridge {
   private async onToolEnd(
     event: Extract<AgentEvent, { type: 'tool_execution_end' }>,
   ): Promise<BridgedEvents> {
-    const startedSnapshot = this.completedToolCalls.get(event.toolCallId);
-    if (
-      event.parentToolCallId &&
-      (startedSnapshot?.parent_tool_call_id !== event.parentToolCallId ||
-        startedSnapshot.status !== 'started')
-    ) {
-      // A child belongs only to its registered parent. Bounded outer cleanup
-      // may have closed it as unknown before its real execution settles.
-      return { events: [] };
-    }
     if (!this.activeAssistantMessageId) {
       return {
         events: [
@@ -799,27 +826,31 @@ export class EventBridge {
     // terminal status + result on top of that snapshot so the flushed
     // RespData has the full (args + status=completed/failed + result)
     // shape — not just (status + result).
-    let durationMs: number | undefined;
+    const startedSnapshot = this.completedToolCalls.get(event.toolCallId);
+    // §4: the final status is the guaranteed carrier of the permission mark.
+    const endMark = this.permissionMarkFor(event.toolCallId);
+    // W04 pin tool contract: prefer the executor's monotonic durationMs (it
+    // excludes before/after hooks); fall back to the host-side wall-clock
+    // capture used when tool timing capture is enabled.
+    let durationMs: number | undefined = event.durationMs;
     if (this.captureToolTiming) {
       const startMs = this.toolStartMs.get(event.toolCallId);
-      if (startMs !== undefined) {
+      this.toolStartMs.delete(event.toolCallId);
+      if (durationMs === undefined && startMs !== undefined) {
         durationMs = this.now() - startMs;
-        this.toolStartMs.delete(event.toolCallId);
       }
     }
     const toolCall: RuntimeToolCall = {
       tool_name: event.toolName,
       tool_call_id: event.toolCallId,
-      ...(event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id
-        ? {
-            parent_tool_call_id:
-              event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id,
-          }
-        : {}),
       ...(startedSnapshot?.args !== undefined ? { args: startedSnapshot.args } : {}),
       status: event.isError ? 'failed' : 'completed',
       ...(event.result !== undefined ? { result: event.result } : {}),
       ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
+      // §4: the final status is the guaranteed carrier of the permission
+      // mark — it is emitted after the gate resolved the call (allow, deny,
+      // or block), including the single Failed of a denied-unexecuted call.
+      ...(endMark ? { permission: endMark } : {}),
       ...this.resolveToolCallProvenance(
         {
           phase: 'end',
@@ -832,7 +863,6 @@ export class EventBridge {
       ),
     };
     const events: BridgedEvents['events'] = [
-      ...this.closeUnknownPtcChildren(event),
       buildDebugTraceEvent({
         sessionId: this.ctx.sessionId,
         turnId: this.ctx.turnId,
@@ -842,12 +872,6 @@ export class EventBridge {
         attrs: {
           tool_name: event.toolName,
           tool_call_id: event.toolCallId,
-          ...(event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id
-            ? {
-                parent_tool_call_id:
-                  event.parentToolCallId ?? startedSnapshot?.parent_tool_call_id,
-              }
-            : {}),
           is_error: event.isError,
           ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
         },
@@ -868,7 +892,7 @@ export class EventBridge {
     // Last-write-wins per tool_call_id so re-emitted ends (defensive) collapse
     // to a single entry.
     this.completedToolCalls.set(event.toolCallId, toolCall);
-    if (event.parentToolCallId === undefined && this.pendingToolCount > 0) {
+    if (this.pendingToolCount > 0) {
       this.pendingToolCount--;
     }
 
@@ -886,65 +910,169 @@ export class EventBridge {
     return { events };
   }
 
-  private closeUnknownPtcChildren(
-    event: Extract<AgentEvent, { type: 'tool_execution_end' }>,
-  ): BridgedEvents['events'] {
-    if (event.toolName !== 'run_code' || event.parentToolCallId || !this.activeAssistantMessageId) return [];
-    const ptc = readPtcExecutionDetails({
-      role: 'toolResult',
-      toolName: event.toolName,
-      details: event.result.details,
-    });
-    if (!ptc) return [];
-    const events: BridgedEvents['events'] = [];
-    for (const record of ptc.child_calls) {
-      const started = this.completedToolCalls.get(record.child_tool_call_id);
-      if (
-        record.status !== 'unknown' ||
-        record.parent_tool_call_id !== event.toolCallId ||
-        started?.parent_tool_call_id !== event.toolCallId ||
-        started.tool_name !== record.tool_name ||
-        started.status !== 'started'
-      ) {
-        continue;
-      }
-      const text = 'PTC child outcome is unknown after bounded cleanup. The operation may still have side effects; do not replay it automatically.';
-      const retainedFacts = ptc.retained_facts.filter(
-        (fact) => 'child_tool_call_id' in fact && fact.child_tool_call_id === record.child_tool_call_id,
-      );
-      if (!retainedFacts.some((fact) => fact.kind === 'outcome_unknown')) {
-        retainedFacts.push({ kind: 'outcome_unknown', child_tool_call_id: record.child_tool_call_id });
-      }
-      const closed: RuntimeToolCall = {
-        ...started,
-        status: 'failed',
-        result: {
-          content: [{ type: 'text', text }],
-          details: {
-            ptc_child: {
-              version: 1,
-              record: { ...record, is_error: true, outcome_unknown: true },
-              retained_facts: retainedFacts,
+  /**
+   * A host-executed nested child call started (e.g. `run_code` dispatched a
+   * tool through its gateway invoker). The child is attributed to the active
+   * assistant message through `parent_tool_call_id` and travels the same
+   * STREAM_RESP path as direct calls, but it never counts towards
+   * `pendingToolCount`: the outer pi-level tool call owns the deferred
+   * completed-message lifecycle. The started snapshot lands in
+   * `completedToolCalls` so the flushed parent message carries the child in
+   * its `tool_calls` array — the model transcript itself is untouched.
+   */
+  nestedToolStart(input: NestedToolEventInput): BridgedEvents {
+    if (!this.activeAssistantMessageId) {
+      return {
+        events: [
+          buildDebugTraceEvent({
+            sessionId: this.ctx.sessionId,
+            turnId: this.ctx.turnId,
+            eventId: this.ctx.eventIdGenerator('coding_nested_tool_start_dropped'),
+            phase: 'event_bridge_nested_tool_start_dropped',
+            message: 'nested tool start arrived without an active assistant message_id',
+            level: 'warn',
+            attrs: {
+              tool_name: input.toolName,
+              tool_call_id: input.toolCallId,
+              parent_tool_call_id: input.parentToolCallId,
             },
-          },
-        },
+          }),
+        ],
       };
-      const startedAtMs = this.toolStartMs.get(record.child_tool_call_id);
-      if (startedAtMs !== undefined) closed.duration_ms = this.now() - startedAtMs;
-      this.toolStartMs.delete(record.child_tool_call_id);
-      this.completedToolCalls.set(record.child_tool_call_id, closed);
-      events.push(buildToolCallChunk({
-        sessionId: this.ctx.sessionId,
-        turnId: this.ctx.turnId,
-        eventId: this.ctx.eventIdGenerator('coding_ptc_unknown_child'),
-        runtimeSeq: this.ctx.runtimeSeqGenerator(),
-        msgId: this.activeAssistantMessageId,
-        chunkIndex: this.nextChunkIndex(),
-        toolCall: closed,
-        nowMs: this.now(),
-      }));
     }
-    return events;
+    const args =
+      input.args !== undefined && typeof input.args === 'object' && input.args !== null
+        ? input.args
+        : undefined;
+    const nestedStartMark = this.permissionMarkFor(input.toolCallId);
+    const toolCall: RuntimeToolCall = {
+      tool_name: input.toolName,
+      tool_call_id: input.toolCallId,
+      parent_tool_call_id: input.parentToolCallId,
+      status: 'started',
+      ...(args !== undefined ? { args } : {}),
+      ...(nestedStartMark ? { permission: nestedStartMark } : {}),
+      ...this.resolveToolCallProvenance({
+        phase: 'start',
+        toolName: input.toolName,
+        ...(args !== undefined ? { args } : {}),
+      }),
+    };
+    this.completedToolCalls.set(input.toolCallId, toolCall);
+    if (this.captureToolTiming) {
+      this.toolStartMs.set(input.toolCallId, this.now());
+    }
+    return {
+      events: [
+        buildToolCallChunk({
+          sessionId: this.ctx.sessionId,
+          turnId: this.ctx.turnId,
+          eventId: this.ctx.eventIdGenerator('coding_tool'),
+          runtimeSeq: this.ctx.runtimeSeqGenerator(),
+          msgId: this.activeAssistantMessageId,
+          chunkIndex: this.nextChunkIndex(),
+          toolCall,
+          nowMs: this.now(),
+        }),
+      ],
+    };
+  }
+
+  /**
+   * A host-executed nested child call finished. Overlays the terminal state
+   * on the started snapshot (args + provenance survive) and emits the final
+   * child chunk. The child's cancelled outcome is a `failed` call whose
+   * error text says it was cancelled — wire status has no cancelled value.
+   */
+  nestedToolEnd(input: NestedToolEventInput): BridgedEvents {
+    if (!this.activeAssistantMessageId) {
+      return {
+        events: [
+          buildDebugTraceEvent({
+            sessionId: this.ctx.sessionId,
+            turnId: this.ctx.turnId,
+            eventId: this.ctx.eventIdGenerator('coding_nested_tool_end_dropped'),
+            phase: 'event_bridge_nested_tool_end_dropped',
+            message: 'nested tool end arrived without an active assistant message_id',
+            level: 'warn',
+            attrs: {
+              tool_name: input.toolName,
+              tool_call_id: input.toolCallId,
+              parent_tool_call_id: input.parentToolCallId,
+            },
+          }),
+        ],
+      };
+    }
+    const startedSnapshot = this.completedToolCalls.get(input.toolCallId);
+    // §4: same guaranteed-final-status rule as direct calls.
+    const nestedEndMark = this.permissionMarkFor(input.toolCallId);
+    let durationMs = input.durationMs;
+    if (this.captureToolTiming) {
+      const startMs = this.toolStartMs.get(input.toolCallId);
+      this.toolStartMs.delete(input.toolCallId);
+      if (durationMs === undefined && startMs !== undefined) {
+        durationMs = this.now() - startMs;
+      }
+    }
+    const toolCall: RuntimeToolCall = {
+      tool_name: startedSnapshot?.tool_name ?? input.toolName,
+      tool_call_id: input.toolCallId,
+      parent_tool_call_id: startedSnapshot?.parent_tool_call_id ?? input.parentToolCallId,
+      ...(startedSnapshot?.args !== undefined ? { args: startedSnapshot.args } : {}),
+      status: input.error !== undefined ? 'failed' : 'completed',
+      ...(input.result !== undefined ? { result: input.result } : {}),
+      ...(input.error !== undefined
+        ? {
+            error: {
+              code: 0,
+              message: input.error,
+            } satisfies RuntimeProtocolError,
+          }
+        : {}),
+      ...(durationMs !== undefined ? { duration_ms: durationMs } : {}),
+      // §4: same guaranteed-final-status rule as direct calls.
+      ...(nestedEndMark ? { permission: nestedEndMark } : {}),
+      ...this.resolveToolCallProvenance(
+        {
+          phase: 'end',
+          toolName: startedSnapshot?.tool_name ?? input.toolName,
+          ...(startedSnapshot?.args !== undefined ? { args: startedSnapshot.args } : {}),
+          ...(input.result !== undefined ? { result: input.result } : {}),
+          isError: input.error !== undefined,
+        },
+        startedSnapshot?.plugin_provenances,
+      ),
+    };
+    this.completedToolCalls.set(input.toolCallId, toolCall);
+    return {
+      events: [
+        buildToolCallChunk({
+          sessionId: this.ctx.sessionId,
+          turnId: this.ctx.turnId,
+          eventId: this.ctx.eventIdGenerator('coding_tool'),
+          runtimeSeq: this.ctx.runtimeSeqGenerator(),
+          msgId: this.activeAssistantMessageId,
+          chunkIndex: this.nextChunkIndex(),
+          toolCall,
+          nowMs: this.now(),
+        }),
+      ],
+    };
+  }
+
+  /**
+   * §4 fail-open lookup of this call's permission mark. A missing source or
+   * entry is not an error: the status event simply ships without the
+   * `permission` field (e.g. hosts that never wired the permission gate's
+   * per-turn sink, or a call the gate skipped entirely).
+   */
+  private permissionMarkFor(toolCallId: string) {
+    try {
+      return this.ctx.permissionMarks?.get(toolCallId);
+    } catch {
+      return undefined;
+    }
   }
 
   private resolveToolCallProvenance(

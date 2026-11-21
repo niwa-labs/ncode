@@ -51,7 +51,6 @@ export interface NativeSessionRecordFactoryOptions {
   readonly nowMs?: () => number;
   readonly runLocation?: SessionRecordServiceDeps['runLocation'];
   readonly backfillDiagnostics?: SessionBackfillDiagnostics;
-  readonly toolCallMode?: SessionRecordServiceDeps['toolCallMode'];
 }
 
 export function createNativeSessionRecordService(
@@ -136,6 +135,5 @@ export function createNativeSessionRecordService(
       : {}),
     ...(options.makeSessionId ? { makeSessionId: options.makeSessionId } : {}),
     ...(options.backfillDiagnostics ? { backfillDiagnostics: options.backfillDiagnostics } : {}),
-    ...(options.toolCallMode ? { toolCallMode: options.toolCallMode } : {}),
   });
 }

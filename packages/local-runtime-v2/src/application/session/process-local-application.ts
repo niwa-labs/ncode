@@ -32,6 +32,14 @@ export interface ProcessLocalApplicationOptions {
   readonly workspace: NonNullable<LocalRuntimeApplication['workspace']>;
   readonly plan: NonNullable<LocalRuntimeApplication['plan']>;
   readonly sessionReports?: SessionReportCapability;
+  /** W10 `/session` warmer status: the turn-system owner's warming surface. */
+  readonly cacheWarming?: {
+    describeStatus(sessionId: string): string | undefined;
+  };
+  /** W1 §3.2 publish-stale status: the session-system owner's publisher surface. */
+  readonly publishStatus?: {
+    staleSessions(): readonly string[];
+  };
   readonly instructions?: LocalRuntimeApplication['instructions'];
   readonly modelProvider: {
     readonly application: Pick<ModelProviderApplication, 'list' | 'select'>;
@@ -124,6 +132,18 @@ export function createProcessLocalApplication(
         ? {
             collectSessionReport: (sessionId: string) => sessionReports.collect(sessionId),
           }
+        : {}),
+      ...(options.cacheWarming
+        ? {
+            getSessionCacheWarmingStatus: (sessionId: string) =>
+              options.cacheWarming?.describeStatus(sessionId),
+        }
+        : {}),
+      ...(options.publishStatus
+        ? {
+            getSessionPublishStaleSessions: () =>
+              options.publishStatus?.staleSessions() ?? [],
+        }
         : {}),
     },
     ...(options.instructions ? { instructions: options.instructions } : {}),

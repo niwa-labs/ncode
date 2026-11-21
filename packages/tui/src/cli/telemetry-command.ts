@@ -3,7 +3,11 @@ import {
   createMcodeBusinessTelemetryPreview,
   resolveMcodeBusinessTelemetryPolicy,
 } from '../analytics/business-telemetry.js';
-import { resolveMcodeAuthEnvironment, type McodeAuthEnvironment } from '../auth/environment.js';
+import {
+  readRuntimeRegion,
+  resolveMcodeAuthEnvironment,
+  type McodeAuthEnvironment,
+} from '../auth/environment.js';
 
 export type McodeTelemetryCliAction = 'status' | 'preview';
 
@@ -74,6 +78,6 @@ export function runMcodeTelemetryCommand(
 
 function defaultResolveEnvironment(environment: NodeJS.ProcessEnv): McodeAuthEnvironment {
   return resolveMcodeAuthEnvironment({
-    runtimeRegion: environment.MAVIS_REGION === 'en' ? 'en' : 'cn',
+    runtimeRegion: readRuntimeRegion(environment.MAVIS_REGION),
   });
 }

@@ -1,10 +1,13 @@
 import type { LocalBrowserAdapter } from '@mavis/agent-tools/desktop';
 import type { BrowserConfig, Config } from '@mavis/config';
+// The headless Chrome provider is runtime infrastructure (any process hosting
+// the runtime composes it — the mcoded daemon included), so it lives in
+// @mavis/local-runtime-v2 next to the Browser Use service that consumes it.
 import {
   disposeHeadlessSessionStorage,
   HeadlessChromeBrowserProvider,
   type HeadlessChromeBrowserProviderOptions,
-} from './browser/headless-chrome-provider.js';
+} from '@mavis/local-runtime-v2';
 
 export type TuiBrowserProvider = LocalBrowserAdapter & {
   close(): Promise<void>;
@@ -26,16 +29,9 @@ export function resolveTuiBrowserProviderOptions(
 ): HeadlessChromeBrowserProviderOptions | undefined {
   if (config.beta?.browserUseTooling !== true) return undefined;
   const chromePath = env.MCODE_CHROME_PATH?.trim() || config.browser?.chromePath?.trim();
-  const useSwiftShader = env.MCODE_BROWSER_USE_SWIFTSHADER?.trim().toLowerCase() === 'true';
   return {
     dataDir,
     ...(chromePath ? { chromePath } : {}),
-    // CPU rendering is an explicit opt-in for trusted local tests on GPU-less hosts.
-    ...(useSwiftShader
-      ? {
-          extraArgs: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
-        }
-      : {}),
   };
 }
 

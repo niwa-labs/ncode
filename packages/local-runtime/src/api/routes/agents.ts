@@ -2,12 +2,12 @@ import { join } from "node:path";
 
 import type {
   AgentDetail,
-  CreateAgentInput as CreateAgentInput,
+  CreateAgentInput,
 } from "@mavis/protocol/local";
 import type {
-  ConversationPluginAgentDefinition,
   ConversationSessionKind,
   ConversationTaskModelSelection,
+  ConversationTaskPluginAgent,
   RuntimeConversation,
 } from "@mavis/conversation-contract";
 import type { GlobalEventInput } from "@mavis/shared/global-events";
@@ -689,6 +689,7 @@ export class LocalApiAgentRoutes {
 
   async createSession(input: {
     agentName?: string;
+    taskPluginAgent?: ConversationTaskPluginAgent;
     workspaceDir?: string;
     sessionType?: "root" | "branch";
     sessionKind?: ConversationSessionKind;
@@ -703,8 +704,6 @@ export class LocalApiAgentRoutes {
     effectiveModelVariant?: string | null;
     effectiveModelThinking?: LocalModelThinkingSelection | null;
     taskModelSelection?: ConversationTaskModelSelection;
-    /** Trusted Task-only Plugin Agent; HTTP request mappers never set it. */
-    pluginAgentDefinition?: ConversationPluginAgentDefinition;
     isDefaultWorkspace?: boolean;
     /**
      * Creation provenance persisted on the session record. Defaults to
@@ -877,15 +876,10 @@ export class LocalApiAgentRoutes {
         typeof Object(error).code === "string"
           ? Object(error).code
           : "INTERNAL_ERROR";
-      // 5xx: generic client text (full error stays in server logs upstream).
-      // 4xx: keep the typed message the UI already keys on.
-      const message =
-        status >= 500
-          ? "Internal error"
-          : error instanceof Error
-            ? error.message
-            : "Request failed";
-      return json({ error: message, code }, { status });
+      return json(
+        { error: error instanceof Error ? error.message : String(error), code },
+        { status },
+      );
     }
   }
 

@@ -367,11 +367,12 @@ describe('Tasks in the regular terminal viewport', () => {
         chatLines.splice(-shrinkRows);
         tui.renderNow();
         await terminal.flush();
-        // Visible shrink preserves native history with temporary screen space.
+        // Visible shrink preserves native history with temporary screen space;
+        // the freed rows are blanked at the removal point, above the footer.
         // The 15-row case also removes historical text and still reconstructs.
         const afterShrink = shrinkRows === 15
           ? [...chatLines, 'COMPOSER', 'STATUS'].slice(-terminal.rows)
-          : [...Array<string>(shrinkRows).fill(''), ...chatLines.slice(26), 'COMPOSER', 'STATUS'];
+          : [...chatLines.slice(26), ...Array<string>(shrinkRows).fill(''), 'COMPOSER', 'STATUS'];
         expect(terminal.getViewport()).toEqual(
           afterShrink,
         );

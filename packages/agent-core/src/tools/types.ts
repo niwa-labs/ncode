@@ -25,15 +25,9 @@
  */
 
 import type { AgentToolUpdateCallback, ToolExecutionMode } from '@earendil-works/pi-agent-core';
-import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
+import type { ImageContent, JsonValue, TextContent, Usage } from '@earendil-works/pi-ai';
 import type { Static, TSchema } from '@sinclair/typebox';
 import type { IPluginCapabilityProvenance } from '@mavis/protocol';
-import type {
-  PtcChildDeadline,
-  PtcToolExecutor,
-  PtcToolFactCollector,
-  PtcToolResultProjection,
-} from './ptc.js';
 
 export type RuntimeToolSource = 'builtin' | 'builtin-matrix' | 'configured';
 
@@ -78,31 +72,45 @@ export interface ToolDefinition<S extends TSchema = TSchema> {
   readonly prepareArguments?: (args: unknown) => Static<S>;
   readonly executionMode?: ToolExecutionMode;
   readonly operationClassifier?: ToolOperationClassifier;
-}
-
-/**
- * A tool's own statement about whether its text output is complete on this
- * return path. Programmatic (PTC) hosts trust it only from verified native
- * tools; a missing statement means "unknown", never "complete".
- */
-export interface ProgrammaticToolCompleteness {
-  /** True when this output dropped content (page, byte cap, match limit, cut lines, ...). */
-  readonly truncated: boolean;
   /**
-   * The source has more beyond this page although nothing was cut, for
-   * example a `read` that stopped at the caller's `limit`.
+   * W04 (pin tool contract): JSON Schema of `structuredContent` in successful
+   * results. Forwarded to pi `AgentTool.outputSchema`; tools that declare it
+   * should always set `structuredContent` on success. Not sent to the model as
+   * a call parameter — it describes the programmatic result channel only.
    */
-  readonly hasMore?: boolean;
-  readonly nextOffset?: number;
-  readonly offsetUnit?: 'line' | 'match' | 'file';
+  readonly outputSchema?: TSchema;
 }
 
 /**
- * Machine-readable side channel for programmatic (PTC) callers only. The Pi
- * tool adapter never copies it into `content` or `details`, so it reaches no
- * model history, display record or persisted detail; the PTC executor reads it
- * from the tool's own return value and drops it when a hook rewrote the result.
+ * Tool result. `content` stays compatible with pi `AgentToolResult` (a single text segment is
+ * sufficient); `details` holds structured byproducts (read by the UI / caller, not the LLM);
+ * `terminate` maps to Pi `AgentToolResult.terminate`; `output` is a legacy field retained only for
+ * migration compatibility. New code should use `details`.
+ *
+ * W04 (pin tool contract): `structuredContent` is the machine-readable result matching the
+ * tool's `outputSchema` — never sent to the model; `usage` carries tool-owned usage/cost of the
+ * execution itself (not main-LLM context accounting); `isError` reports failure without
+ * throwing while `details`/`structuredContent` stay available to the UI and programmatic
+ * callers. `durationMs` is measured by the executor (monotonic clock, excludes hooks) and is
+ * not set here.
  */
+export interface ToolResult {
+  tool_name: string;
+  text: string;
+  content: ToolResultContent[];
+  isError?: boolean;
+  details?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  terminate?: boolean;
+  /** Machine-readable result for programmatic callers; matches `outputSchema` when declared. */
+  structuredContent?: JsonValue;
+  /** Usage/cost of the tool execution itself, when the tool can account it. */
+  usage?: Usage;
+  /** PTC-only payload; see `ProgrammaticToolResult`. Model calls ignore it. */
+  programmatic?: ProgrammaticToolResult;
+}
+
+/** Programmatic (PTC) side-channel payload of one tool result; model-invisible. */
 export interface ProgrammaticToolResult {
   /** Structured value; always a JSON object and never more than the text output shows. */
   readonly data?: Readonly<Record<string, unknown>>;
@@ -117,22 +125,45 @@ export interface ProgrammaticToolResult {
   readonly uncappedOutput?: boolean;
 }
 
+export interface ProgrammaticToolCompleteness {
+  /** True when this output dropped content (page, byte cap, match limit, cut lines, ...). */
+  readonly truncated: boolean;
+  /**
+   * The source has more beyond this page although nothing was cut, for
+   * example a `read` that stopped at the caller's `limit`.
+   */
+  readonly hasMore?: boolean;
+  readonly nextOffset?: number;
+  readonly offsetUnit?: 'line' | 'match' | 'file';
+}
+
+/** One nested (host-executed) child call of an outer tool such as `run_code`. */
+export interface NestedToolEventInput {
+  /** The child's own call id, `<parentToolCallId>/<n>`, assigned at registration. */
+  readonly toolCallId: string;
+  /** The outer tool call id the child is attributed to. */
+  readonly parentToolCallId: string;
+  readonly toolName: string;
+  /** Start only: validated child arguments. */
+  readonly args?: Record<string, unknown>;
+  /** End only: the child's result payload as it should be shown to clients. */
+  readonly result?: unknown;
+  /** End only: failure text (a cancelled child reports why it stopped). */
+  readonly error?: string;
+  /** End only: child wall-clock in ms. */
+  readonly durationMs?: number;
+}
+
 /**
- * Tool result. `content` stays compatible with pi `AgentToolResult` (a single text segment is
- * sufficient); `details` holds structured byproducts (read by the UI / caller, not the LLM);
- * `terminate` maps to Pi `AgentToolResult.terminate`; `output` is a legacy field retained only for
- * migration compatibility. New code should use `details`.
+ * Host-side sink for nested tool-call events. The turn runner owns event
+ * sequencing and the durable bridge; a host tool (e.g. `run_code`) only
+ * reports that a child started and finished, and the runner feeds the same
+ * STREAM_RESP path direct calls use. Children are never appended to the
+ * model-visible transcript as independent top-level calls.
  */
-export interface ToolResult {
-  tool_name: string;
-  text: string;
-  content: ToolResultContent[];
-  isError?: boolean;
-  details?: Record<string, unknown>;
-  output?: Record<string, unknown>;
-  terminate?: boolean;
-  /** PTC-only payload; see `ProgrammaticToolResult`. Model calls ignore it. */
-  programmatic?: ProgrammaticToolResult;
+export interface NestedToolEventSink {
+  start(input: NestedToolEventInput): void;
+  end(input: NestedToolEventInput): void;
 }
 
 /**
@@ -148,22 +179,8 @@ export interface ToolExecutionContext {
   readonly toolCallId?: string;
   /** Assistant message carrying this tool call; supplied by the runtime bridge when available. */
   readonly assistantMessageId?: string;
-  /** Parent run_code tool call for a PTC child invocation. */
-  readonly parentToolCallId?: string;
-  /** User-visible run_code description for a PTC child approval. */
-  readonly ptcParentDescription?: string;
-  /**
-   * Set only on PTC child contexts. Foreground Bash bounds its timeout by the
-   * time left until this deadline so a command cannot outlive its program;
-   * ordinary top-level calls never carry it and keep their own timeouts.
-   */
-  readonly ptcDeadline?: PtcChildDeadline;
-  /** Runner-owned PTC capability, available only while the turn is executing. */
-  ptcExecutor?: PtcToolExecutor;
-  /** Trusted host projection for PTC child facts; guest code cannot supply this. */
-  readonly ptcResultProjection?: PtcToolResultProjection;
-  /** Turn-local host fact collector for PTC plugin and approval outcomes. */
-  readonly ptcFactCollector?: PtcToolFactCollector;
+  /** Present when the host runner can record nested child calls (absent in bare test hosts). */
+  readonly nestedToolEvents?: NestedToolEventSink;
 }
 
 /**

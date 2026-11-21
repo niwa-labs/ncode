@@ -1,0 +1,31 @@
+{
+  "name": "@mavis/codemode-host",
+  "version": "0.1.0",
+  "description": "Codemode sandbox host (W07 part B): runs out-of-context tool-call scripts on @earendil-works/pi-codemode \u2014 the npm dependency per plan \u00a74 A5 (\u00abCodemode worker/inline/portable/remote \u0438 deterministic replay \u0432\u0445\u043e\u0434\u044f\u0442 \u0432 \u0441\u043b\u043e\u0439 \u0446\u0435\u043b\u0438\u043a\u043e\u043c\u00bb, plan :185). Nested tool calls go through the injected invoker (the ONE gateway executeTool), never around it; QuickJS is a capability sandbox parallel to the OS sandbox, not a replacement (U21); deterministic replay records and re-delivers call outcomes (replay safe/never, TOOL_OUTCOME_UNKNOWN distinct).",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "workspace:*",
+    "@earendil-works/pi-codemode": "workspace:*",
+    "@mavis/agent-core": "workspace:^",
+    "@sinclair/typebox": "^0.34.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "private": true,
+  "license": "MIT"
+}

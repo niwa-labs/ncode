@@ -1,7 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
-import { AuthStorage } from '@earendil-works/pi-coding-agent/auth-storage';
+import {
+  AuthStorage,
+  readStoredCredential,
+} from '@earendil-works/pi-coding-agent/auth-storage';
+import {
+  createModels,
+  ModelsError,
+  type AuthEvent,
+  type AuthInteraction,
+  type AuthPrompt,
+  type CredentialStore,
+  type MutableModels,
+} from '@earendil-works/pi-ai';
+import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
 
 import type {
   LocalByokConfigDraft,
@@ -55,14 +68,35 @@ type LoginAttempt = {
   timeout?: ReturnType<typeof setTimeout>;
 };
 
+/**
+ * Login interaction the manager builds for an attempt. The default storage
+ * adapter maps this onto the pin's `AuthInteraction` (`notify`/`prompt`);
+ * injected test storages keep receiving the same shape as before the W04
+ * AuthStorage migration.
+ */
+export interface CodexLoginCallbacks {
+  onAuth(info: { url: string }): void;
+  onDeviceCode?(info: {
+    userCode: string;
+    verificationUri: string;
+    intervalSeconds?: number;
+    expiresInSeconds?: number;
+  }): void;
+  onPrompt?(prompt: { message: string }): Promise<string>;
+  onSelect?(prompt: {
+    message: string;
+    options: readonly { id: string; label: string }[];
+  }): Promise<string>;
+  onManualCodeInput?(): Promise<string>;
+  signal: AbortSignal;
+  fetch?: typeof fetch;
+}
+
 interface CodexAuthStorage {
   getCredentials(): Promise<CodexModelCredentials | undefined>;
   hasOAuth(provider: typeof OPENAI_CODEX_PROVIDER_ID): boolean;
-  removeOAuth(provider: typeof OPENAI_CODEX_PROVIDER_ID): void;
-  login(
-    provider: typeof OPENAI_CODEX_PROVIDER_ID,
-    callbacks: Parameters<AuthStorage['login']>[1],
-  ): Promise<void>;
+  removeOAuth(provider: typeof OPENAI_CODEX_PROVIDER_ID): void | Promise<void>;
+  login(provider: typeof OPENAI_CODEX_PROVIDER_ID, callbacks: CodexLoginCallbacks): Promise<void>;
 }
 
 export interface CodexOAuthManagerDeps {
@@ -101,42 +135,7 @@ export class CodexOAuthManager {
   private lastError: string | undefined;
 
   constructor(private readonly deps: CodexOAuthManagerDeps) {
-    this.authStorageFactory =
-      deps.authStorageFactory ??
-      ((authPath) => {
-        const storage = AuthStorage.create(authPath);
-        return {
-          getCredentials: async () => {
-            if (storage.getAll()[OPENAI_CODEX_PROVIDER_ID]?.type !== 'oauth') return undefined;
-            const access = await storage.getApiKey(OPENAI_CODEX_PROVIDER_ID, {
-              includeFallback: false,
-              fetch: deps.fetchImpl,
-            });
-            const credentials = storage.getAll()[OPENAI_CODEX_PROVIDER_ID];
-            const accountId = credentials?.type === 'oauth' ? credentials.accountId : undefined;
-            return access && typeof accountId === 'string' && accountId
-              ? { access, accountId }
-              : undefined;
-          },
-          hasOAuth: (provider) => storage.getAll()[provider]?.type === 'oauth',
-          removeOAuth: (provider) => {
-            storage.logout(provider);
-            const [error] = storage.drainErrors();
-            if (error) throw error;
-          },
-          login: async (provider, callbacks) => {
-            // Keep late token responses from a cancelled attempt out of profile storage.
-            const pending = AuthStorage.inMemory();
-            await pending.login(provider, callbacks);
-            callbacks.signal?.throwIfAborted();
-            const credentials = pending.getAll()[provider];
-            if (!credentials) throw new Error('Codex OAuth credentials are unavailable.');
-            storage.set(provider, credentials);
-            const [error] = storage.drainErrors();
-            if (error) throw error;
-          },
-        };
-      });
+    this.authStorageFactory = deps.authStorageFactory ?? defaultCodexAuthStorageFactory(deps);
     this.catalogGetter =
       deps.catalogGetter ??
       (async () => {
@@ -280,7 +279,7 @@ export class CodexOAuthManager {
     attempt.timeout.unref?.();
   }
 
-  private loginCallbacks(attempt: LoginAttempt): Parameters<CodexAuthStorage['login']>[1] {
+  private loginCallbacks(attempt: LoginAttempt): CodexLoginCallbacks {
     const { signal } = attempt.controller;
     const settle = (details: Partial<CodexOAuthStartResult>) => {
       signal.throwIfAborted();
@@ -341,7 +340,7 @@ export class CodexOAuthManager {
     };
   }
 
-  removeCredentials(providerId: string): void {
+  async removeCredentials(providerId: string): Promise<void> {
     if (providerId !== OPENAI_CODEX_PROVIDER_ID) {
       throw new CodexOAuthError(
         404,
@@ -350,7 +349,7 @@ export class CodexOAuthManager {
       );
     }
     if (this.login) this.cancelLogin(this.login.id);
-    this.authStorage().removeOAuth(OPENAI_CODEX_PROVIDER_ID);
+    await this.authStorage().removeOAuth(OPENAI_CODEX_PROVIDER_ID);
     this.credentialGeneration += 1;
     this.pendingCatalog = undefined;
     this.lastError = undefined;
@@ -535,6 +534,91 @@ function mergeCodexModels(
   return Object.fromEntries(models);
 }
 
+/**
+ * Default storage adapter over the PIN AuthStorage surface (W04 migration).
+ *
+ * Memoized per `authPath`: `hasOAuth` stays synchronous for the status UI by
+ * keeping a snapshot seeded from auth.json and updated by the mutations this
+ * adapter itself performs — every call returns the SAME adapter, so a login
+ * completion is visible to the next `getStatus()` tick.
+ */
+function defaultCodexAuthStorageFactory(
+  deps: CodexOAuthManagerDeps,
+): (authPath: string) => CodexAuthStorage {
+  const cache = new Map<string, CodexAuthStorage>();
+  return (authPath) => {
+    const cached = cache.get(authPath);
+    if (cached !== undefined) return cached;
+    const storage = AuthStorage.create(authPath);
+    let hasOAuthSnapshot =
+      readStoredCredential(OPENAI_CODEX_PROVIDER_ID, authPath)?.type === 'oauth';
+    const adapter: CodexAuthStorage = {
+      getCredentials: async () => {
+        const stored = await storage.read(OPENAI_CODEX_PROVIDER_ID);
+        if (stored?.type !== 'oauth') return undefined;
+        try {
+          // Locked refresh through the provider registry (pin Models
+          // semantics: a refresh failure rejects ModelsError "oauth" and
+          // preserves the stored credential for a later retry). The
+          // refreshed credential persists in the same store.
+          await withHostFetch(deps.fetchImpl, async () => {
+            await codexModels(storage).getAuth(OPENAI_CODEX_PROVIDER_ID);
+          });
+        } catch (error) {
+          if (error instanceof ModelsError && error.code === 'oauth') return undefined;
+          throw error;
+        }
+        const credential = await storage.read(OPENAI_CODEX_PROVIDER_ID);
+        if (credential?.type !== 'oauth') return undefined;
+        const { access, accountId } = credential;
+        return access && typeof accountId === 'string' && accountId
+          ? { access, accountId }
+          : undefined;
+      },
+      hasOAuth: () => hasOAuthSnapshot,
+      removeOAuth: async (provider) => {
+        await storage.delete(provider);
+        hasOAuthSnapshot = false;
+      },
+      login: async (provider: typeof OPENAI_CODEX_PROVIDER_ID, callbacks: CodexLoginCallbacks) => {
+        // Two-phase login keeps late token responses from a cancelled
+        // attempt out of profile storage: the provider flow writes to a
+        // pending in-memory store; only an unaborted completion is copied
+        // to the profile store.
+        const pending = AuthStorage.inMemory();
+        const interaction: AuthInteraction = {
+          signal: callbacks.signal,
+          notify: (event) => notifyCallback(event, callbacks),
+          prompt: (prompt) => promptCallback(prompt, callbacks),
+        };
+        await withHostFetch(callbacks.fetch, () =>
+          codexModels(pending).login(provider, 'oauth', interaction),
+        );
+        callbacks.signal.throwIfAborted();
+        const credential = await pending.read(provider);
+        if (credential === undefined) {
+          throw new Error('Codex OAuth credentials are unavailable.');
+        }
+        await storage.modify(provider, async () => credential);
+        hasOAuthSnapshot = true;
+      },
+    };
+    cache.set(authPath, adapter);
+    return adapter;
+  };
+}
+
+/**
+ * A one-provider registry over `store`. The pin's `Models` starts empty;
+ * registering just the Codex provider keeps login/refresh on the upstream
+ * flow (no duplicated OAuth code) without pulling every built-in in.
+ */
+function codexModels(store: CredentialStore): MutableModels {
+  const models = createModels({ credentials: store });
+  models.setProvider(openaiCodexProvider());
+  return models;
+}
+
 function codexOAuthErrorMessage(error: unknown): string {
   if (error instanceof CodexOAuthError) return error.message;
   const message = error instanceof Error ? error.message : '';
@@ -548,4 +632,77 @@ function codexOAuthErrorMessage(error: unknown): string {
   }
   if (message === 'Login cancelled') return 'Codex OAuth login was cancelled.';
   return 'Codex OAuth login failed.';
+}
+
+/** Map a pin `AuthEvent` onto the manager's login callbacks. */
+function notifyCallback(event: AuthEvent, callbacks: CodexLoginCallbacks): void {
+  if (event.type === 'auth_url') {
+    callbacks.onAuth({ url: event.url });
+    return;
+  }
+  if (event.type === 'device_code') {
+    callbacks.onDeviceCode?.({
+      userCode: event.userCode,
+      verificationUri: event.verificationUri,
+      ...(event.intervalSeconds === undefined ? {} : { intervalSeconds: event.intervalSeconds }),
+      ...(event.expiresInSeconds === undefined ? {} : { expiresInSeconds: event.expiresInSeconds }),
+    });
+    return;
+  }
+  // `progress` / `info` events are informational; the manager surfaces
+  // device-code and auth-url state only.
+}
+
+/** Map a pin `AuthPrompt` onto the manager's login callbacks. */
+async function promptCallback(prompt: AuthPrompt, callbacks: CodexLoginCallbacks): Promise<string> {
+  if (prompt.type === 'select') {
+    const choice = await callbacks.onSelect?.({
+      message: prompt.message,
+      options: prompt.options.map((option) => ({ id: option.id, label: option.label })),
+    });
+    return choice ?? 'browser';
+  }
+  if (prompt.type === 'manual_code') {
+    if (callbacks.onManualCodeInput) return callbacks.onManualCodeInput();
+    throw new Error('Codex OAuth browser callback expired. Start login again.');
+  }
+  if (callbacks.onPrompt) return callbacks.onPrompt({ message: prompt.message });
+  throw new Error(prompt.message);
+}
+
+/**
+ * Run `run` with the host fetch installed as the global for the duration:
+ * the pin's OAuth flows call the module-global `fetch` directly, so the
+ * product's injected fetch (abort/timeout wrapper) is scoped around them
+ * rather than duplicated per endpoint (§5.1 provider-fetch family).
+ *
+ * Reentrancy: overlapping operations (a cancelled login settling while a
+ * newer attempt already swapped the global; a refresh racing a login) each
+ * push a frame, and an exit pops only its OWN frame — the global always
+ * reflects the most recent still-active frame. A plain save/restore here let
+ * the FIRST operation's finally install the real fetch while the second was
+ * still in flight, sending its device-code request to the network outside
+ * the host wrapper (regression: "stale cancel" test 403-ing on the live
+ * auth.openai.com instead of the injected mock).
+ */
+type HostFetchFrame = { wrapper: typeof fetch };
+const hostFetchFrames: HostFetchFrame[] = [];
+let hostFetchBase: typeof fetch | undefined;
+
+async function withHostFetch<T>(fetchImpl: typeof fetch | undefined, run: () => Promise<T>): Promise<T> {
+  if (fetchImpl === undefined || fetchImpl === globalThis.fetch) return run();
+  if (hostFetchFrames.length === 0) hostFetchBase = globalThis.fetch;
+  const frame: HostFetchFrame = {
+    wrapper: ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      fetchImpl(input, init)) as typeof fetch,
+  };
+  hostFetchFrames.push(frame);
+  globalThis.fetch = frame.wrapper;
+  try {
+    return await run();
+  } finally {
+    const index = hostFetchFrames.lastIndexOf(frame);
+    if (index !== -1) hostFetchFrames.splice(index, 1);
+    globalThis.fetch = hostFetchFrames[hostFetchFrames.length - 1]?.wrapper ?? hostFetchBase!;
+  }
 }

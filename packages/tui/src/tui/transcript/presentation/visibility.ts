@@ -64,6 +64,10 @@ export class TranscriptVisibilityProjection implements TranscriptProjectionSourc
     return this.source.cellAt(index);
   }
 
+  cellRevision(cell: TranscriptCell): number | undefined {
+    return this.source.cellRevision?.(cell);
+  }
+
   locateCell(id: string): TranscriptCellLocation | undefined {
     const location = this.source.locateCell(id);
     return location && location.index < this.visibleLength() ? location : undefined;

@@ -1,11 +1,18 @@
 import type { AgentMessage as PiAgentMessage, StreamFn } from '@earendil-works/pi-agent-core';
+// pi 48c8f322: `streamSimple` lives in the pi-ai `./compat` entry; streamFns
+// take the normalized TranscriptContext, where the system prompt and tool
+// declarations fold into the leading system message.
 import {
+  getCurrentTools,
+  getInitialSystemMessage,
+  getSystemMessageText,
   streamSimple,
   type Api,
   type Context,
   type Model,
   type SimpleStreamOptions,
-} from '@earendil-works/pi-ai';
+  type TranscriptContext,
+} from '@earendil-works/pi-ai/compat';
 import type { PiEventWriter } from '@mavis/agent-core/pi-turn-runner';
 import {
   RespDataType,
@@ -74,13 +81,19 @@ export class ContextUsageTurnTracker {
     return ((model, context, options) => {
       const seq = ++this.measurementSeq;
       const streamOptions = options as SimpleStreamOptions | undefined;
+      // pi 48c8f322: a normalized transcript folds the prompt and tool
+      // declarations into the leading system message; read them back from
+      // there so the diagnostics/calibration payloads keep the raw `Context`
+      // shape downstream consumers expect.
+      const { systemPrompt, tools } = transcriptPromptAndTools(context);
+      const rawContext: Context = {
+        systemPrompt,
+        tools: [...tools],
+        messages: [...(context.messages ?? [])],
+      };
       const diagnosticInput: PreparedMeasurement['diagnosticInput'] = this.providerDiagnosticCounter
         ? {
-            context: {
-              systemPrompt: context.systemPrompt,
-              tools: [...(context.tools ?? [])],
-              messages: [...(context.messages ?? [])],
-            },
+            context: rawContext,
             model,
             ...(streamOptions ? { streamOptions } : {}),
           }
@@ -90,21 +103,21 @@ export class ContextUsageTurnTracker {
         ? {
             context: {
               systemPrompt: '',
-              tools: [...(context.tools ?? [])],
+              tools: [...tools],
               messages: [],
             },
             model,
           }
         : undefined;
       const toolCalibration = this.calibrationCoordinator?.getCachedToolCalibration({
-        context,
+        context: rawContext,
         model,
       });
       const measurement: PreparedMeasurement = {
         seq,
         modelId: model.id,
         estimate: Promise.resolve().then(() =>
-          estimatePreparedContext(context, this.promptRanges, model),
+          estimatePreparedContext(rawContext, this.promptRanges, model),
         ),
         ...(toolCalibration ? { toolCalibration } : {}),
         ...(toolCalibrationInput ? { toolCalibrationInput } : {}),
@@ -113,7 +126,7 @@ export class ContextUsageTurnTracker {
       this.latestMeasurement = measurement;
       if (this.calibrationCoordinator && !toolCalibration) {
         measurement.toolCalibrationRequest = this.calibrationCoordinator.calibrateTools({
-          context,
+          context: rawContext,
           model,
           ...(streamOptions ? { streamOptions } : {}),
         });
@@ -380,4 +393,25 @@ function parseJsonValue(raw: string | undefined): unknown {
   } catch {
     return raw;
   }
+}
+
+/**
+ * The prompt and tool declarations of a stream context. pi 48c8f322: a
+ * normalized TranscriptContext folds them into the leading system message, so
+ * they are read back from there; a raw `Context` keeps its own fields.
+ */
+function transcriptPromptAndTools(context: {
+  readonly messages?: Context['messages'];
+  readonly systemPrompt?: string;
+  readonly tools?: Context['tools'];
+}): { readonly systemPrompt: string | undefined; readonly tools: NonNullable<Context['tools']> } {
+  if (context.systemPrompt !== undefined || context.tools !== undefined) {
+    return { systemPrompt: context.systemPrompt, tools: context.tools ?? [] };
+  }
+  const messages = context.messages ?? [];
+  const initial = getInitialSystemMessage(messages);
+  return {
+    systemPrompt: initial ? getSystemMessageText(initial) : undefined,
+    tools: getCurrentTools(messages),
+  };
 }

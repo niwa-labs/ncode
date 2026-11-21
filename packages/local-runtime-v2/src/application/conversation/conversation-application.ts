@@ -107,9 +107,6 @@ export interface ConversationApplicationOptions {
           readonly status: SessionStatus;
           /** Read only to gate Slash Review, which is coding-mode only. */
           readonly appMode?: "coding" | "work";
-          readonly sessionType?: "root" | "branch";
-          readonly sessionKind?: string;
-          readonly parentSessionId?: string | null;
         }
       | undefined
     >;
@@ -126,6 +123,28 @@ export interface ConversationApplicationOptions {
   readonly metrics?: ApplicationMetricsClient;
 }
 
+/**
+ * Wire-tolerant liveness view (incident 2026-11-15: a kagero run sat six
+ * minutes on "active" with zero events and no way to tell a thinking model
+ * from a stalled stream — integrators had no cheap read for "is a Turn
+ * running and when did it last move").
+ */
+export interface TurnStatusSnapshot {
+  /** The admitted active Turn, `null` when the Session is idle. */
+  readonly activeTurn: {
+    readonly turnId: string;
+    readonly busyReason: "turn" | "compaction";
+    readonly locallyOwned: boolean;
+  } | null;
+  /** Latest durable turn activity; `null` when no Turn was ever admitted. */
+  readonly latestActivity: {
+    readonly turnId: string;
+    readonly acceptedAtMs: number;
+    readonly completedAtMs?: number;
+    readonly activityAtMs: number;
+  } | null;
+}
+
 /** Owns the conversation use cases migrated from SessionController. */
 export class ConversationApplication {
   constructor(private readonly options: ConversationApplicationOptions) {}
@@ -135,6 +154,24 @@ export class ConversationApplication {
       this.options.turnInspection?.activeTurn(sessionId) ??
       Promise.resolve(undefined)
     );
+  }
+
+  /**
+   * Durable liveness: the active Turn plus the latest activity from the
+   * ingress ledger, in one read — the alternative being blind polling of
+   * session history pages.
+   */
+  async getTurnStatus(sessionId: string): Promise<TurnStatusSnapshot> {
+    const [activeTurn, latestActivity] = await Promise.all([
+      this.options.turnInspection?.activeTurn(sessionId) ??
+        Promise.resolve(undefined),
+      this.options.turnInspection?.latestTurnActivity?.(sessionId) ??
+        Promise.resolve(undefined),
+    ]);
+    return {
+      activeTurn: activeTurn ?? null,
+      latestActivity: latestActivity ?? null,
+    };
   }
 
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult> {
@@ -157,7 +194,7 @@ export class ConversationApplication {
   }
 
   async sendMessage(
-    ctx: ProcessLocalContext,
+    _ctx: ProcessLocalContext,
     req: ConversationSendMessageRequest,
     options: ConversationSendOptions = {},
   ): Promise<
@@ -167,7 +204,10 @@ export class ConversationApplication {
     if (gateError) return gateError;
     let prepared: PreparedDirectSendInput;
     try {
-      prepared = await toDirectSendInput(req, this.options.attachmentRegistration);
+      prepared = await toDirectSendInput(
+        req,
+        this.options.attachmentRegistration,
+      );
     } catch (error) {
       const mapped = sendMessagePreparationError(error);
       if (mapped) {
@@ -349,13 +389,6 @@ export class ConversationApplication {
     const result = await this.withSessionLifecycle("abort", async () => {
       if (!(await this.options.sessionReader.find(req.id)))
         throw sessionNotFound(req.id);
-      if ((await this.getActiveTurn(req.id))?.ownedByOtherRuntime) {
-        // Only the Runtime holding the lease can stop this Turn. Leaving the
-        // Session is a no-op here; an explicit stop must not report success or
-        // pause a Goal that the other Runtime is still driving.
-        if (abortSource === "session_leave") return { status: "not-running" as const };
-        throw turnOwnedByOtherRuntimeError();
-      }
       return this.options.turn.abort({
         sessionId: req.id,
         ...(req.turnId ? { turnId: req.turnId } : {}),
@@ -823,29 +856,40 @@ function invalidOutputFormat(message: string): ApplicationError {
 function messageProvenance(
   req: Pick<
     ConversationSendMessageRequest,
-    "id" | "reviewRequest" | "clientIntent" | "executionDiagnostics"
+    "id" | "reviewRequest" | "clientIntent" | "executionDiagnostics" | "interactiveSurface"
   >,
 ): DirectSendInput["provenance"] {
+  // The interactive marker rides every derived provenance: optional UI-only
+  // work (the next-message suggestion) must fire for TUI turns and never for
+  // headless callers (ACP, exec) that cannot render it.
+  const interactive =
+    req.interactiveSurface === true
+      ? { surface: "interactive" as const }
+      : {};
   if (req.clientIntent === "cloud-handoff") {
     return {
       source: "api",
       routingFingerprint: `cloud_handoff:${req.id}`,
-      sourceContext: { cloudHandoff: { trigger: "slash" } },
+      sourceContext: { cloudHandoff: { trigger: "slash" }, ...interactive },
     };
   }
   if (!req.reviewRequest) {
     return {
       source: "api",
       routingFingerprint: `api:${req.id}`,
-      ...(req.executionDiagnostics === true
-        ? { sourceContext: { executionDiagnostics: true } }
-        : {}),
+      sourceContext: {
+        ...interactive,
+        ...(req.executionDiagnostics === true
+          ? { executionDiagnostics: true }
+          : {}),
+      },
     };
   }
   return {
     source: "code_review",
     routingFingerprint: `code_review:${req.id}`,
     sourceContext: {
+      ...interactive,
       ...(req.executionDiagnostics === true
         ? { executionDiagnostics: true }
         : {}),
@@ -865,6 +909,9 @@ function enqueueMessageProvenance(
   return {
     source: "api",
     routingFingerprint: `api:${req.id}:${req.clientRequestId ?? "queue"}`,
+    ...(req.interactiveSurface === true
+      ? { sourceContext: { surface: "interactive" as const } }
+      : {}),
   };
 }
 
@@ -1005,8 +1052,20 @@ function compactionResponse(
   result: RequestCompactionResult,
   sessionId: string,
 ): RequestCompactionResp {
-  if (!result.accepted)
+  if (!result.accepted) {
+    // Wave-0 item 0.6 (owner decision: /compact при непустой очереди — FIFO):
+    // the request was NOT rejected — it stands at the back of the queue and
+    // the runtime runs it on the next session release. A distinct, honest
+    // code instead of the generic busy 409.
+    if (result.reason === "queue-deferred") {
+      throw new ApplicationError(
+        409,
+        "LOCAL_COMPACTION_DEFERRED",
+        "Compaction is queued behind earlier queued messages and will run when the queue drains.",
+      );
+    }
     throw compactionRejectionError(result.reason, sessionId);
+  }
   const outcome = result.outcome;
   if (outcome.status === "completed") {
     return {
@@ -1048,15 +1107,6 @@ function sessionNotFound(sessionId: string): ApplicationError {
     404,
     "local_session_not_found",
     `Session not found: ${sessionId}`,
-  );
-}
-
-/** Reuses the existing busy key so every client already recognizes it. */
-function turnOwnedByOtherRuntimeError(): ApplicationError {
-  return new ApplicationError(
-    409,
-    'local_session_busy',
-    'Session is running in another MCode process. Stop it from that process.',
   );
 }
 

@@ -1,5 +1,7 @@
 import {
   classifyLLMErrorToCode,
+  isLLMProviderRefusalStopReason,
+  isLLMProviderSafetyStopReason,
   toLLMProtocolClassification,
   type NormalizedLLMError,
 } from '@mavis/shared/llm-error-classifier';
@@ -21,10 +23,24 @@ export function failureReason(
   normalized?: NormalizedLLMError,
 ): TurnTerminationReason {
   const message = runError ?? 'pi-turn-runner: unknown failure';
-  const projected = normalized ? toLLMProtocolClassification(normalized) : null;
+  // A provider refusal/safety stop (structural `rawStopReason` on the
+  // normalized observation) is a policy outcome: the provider explanation
+  // text must never be mined for transport/quota status codes.
+  const providerSafetyStop =
+    normalized !== undefined &&
+    (normalized.facts.signals.has('refusal') ||
+      isLLMProviderRefusalStopReason(normalized.facts.rawStopReason) ||
+      isLLMProviderSafetyStopReason(normalized.facts.rawStopReason));
+  const projected = providerSafetyStop
+    ? null
+    : normalized
+      ? toLLMProtocolClassification(normalized)
+      : null;
   const classified = projected
     ? { status_code: projected.code, message: projected.message ?? message }
-    : classifyLLMErrorToCode(message);
+    : providerSafetyStop
+      ? null
+      : classifyLLMErrorToCode(message);
   if (classified !== null) {
     const protocolError: RuntimeProtocolError = {
       code: classified.status_code,

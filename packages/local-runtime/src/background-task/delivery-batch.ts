@@ -9,6 +9,10 @@ const MAX_GENERATED_TURN_ID = `turn_task_delivery_${'0'.repeat(32)}`;
 // Internal notification budget, not a guarantee of any model's remaining context; normal Task IDs are bg_ + UUID (39 bytes).
 // Shorten only notification previews; Task retains the full description and result.
 export function createDeliveryTaskPreview(task: BackgroundTask): BackgroundTask {
+  // The terminal-run generation (§3.1) survives the preview: the delivery
+  // idempotency key must distinguish repeated terminal runs even though the
+  // rest of the metadata never enters the notification.
+  const generation = task.metadata?.['subTurnId'];
   const preview: BackgroundTask = {
     taskId: task.taskId,
     ownerSessionId: task.ownerSessionId,
@@ -19,6 +23,9 @@ export function createDeliveryTaskPreview(task: BackgroundTask): BackgroundTask 
     ...(task.endedAt === undefined ? {} : { endedAt: task.endedAt }),
     ...(task.description
       ? { description: truncateUtf8(task.description, MAX_DESCRIPTION_BYTES) }
+      : {}),
+    ...(typeof generation === 'string' && generation !== ''
+      ? { metadata: { subTurnId: generation } }
       : {}),
   };
   if (deliveryInputBytes([preview]) <= MAX_DELIVERY_INPUT_BYTES) return preview;
@@ -50,7 +57,6 @@ function deliveryInputBytes(tasks: readonly BackgroundTask[]): number {
   const input = buildBackgroundTaskDeliveryInput({
     ownerSessionId,
     tasks,
-    batchTaskIds: tasks.map((task) => task.taskId),
     observedTerminalCount: Number.MAX_SAFE_INTEGER,
     requestedTurnId: MAX_GENERATED_TURN_ID,
   });

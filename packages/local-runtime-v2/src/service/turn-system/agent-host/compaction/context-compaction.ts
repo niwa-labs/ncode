@@ -5,10 +5,16 @@ import type {
   PiBeforeLlmCallReplaceMetadata,
   PiTurnRunnerLogger,
 } from '@mavis/agent-core/pi-turn-runner';
+import { recordSharedPrefixFallbackBestEffort } from './checkpoint-request-shape.js';
 import {
   CONTEXT_USAGE_COMPONENT_KINDS,
   type ContextUsageComponent,
 } from '@mavis/agent-core/protocol';
+import type { TriggerEvaluation } from '@mavis/context-compaction';
+import type {
+  WireCompactionBarrier,
+  WireCompactionCheckpoint,
+} from '../../compaction/context-wire.js';
 
 import type { AgentHostCompactionDependencies } from '../contracts.js';
 import type { AgentEventContext } from '../events/contracts.js';
@@ -33,7 +39,6 @@ import {
   validateCanonicalHistoryMessages,
 } from '../history/canonical-history-validation.js';
 import { captureSemanticSnapshot } from '../history/semantic-identity.js';
-import { recordSharedPrefixFallbackBestEffort } from './checkpoint-request-shape.js';
 import {
   compactionTokenUsageMetadata,
   createCompactionTokenUsageAccumulator,
@@ -64,7 +69,12 @@ class AutomaticContextCompactionHookAbortError extends Error {
 
 export type AgentHostCompactionHookDependencies = Pick<
   AgentHostCompactionDependencies,
-  'automatic' | 'lifecycle' | 'observer' | 'metricsClient'
+  | 'automatic'
+  | 'lifecycle'
+  | 'observer'
+  | 'metricsClient'
+  | 'wireCompactionBarrier'
+  | 'toolResultOffload'
 >;
 
 export class ContextCompactionAttemptFactory {
@@ -97,6 +107,63 @@ export function createAutomaticContextCompactionHook(
   const attempts = options.attempts ?? new ContextCompactionAttemptFactory();
   const trustedContext = captureSemanticSnapshot(context).value;
   return async (input): Promise<PiBeforeLlmCallHookDecision> => {
+    // В1 (opus-decisions-20261101): the wire-mode admission point runs FIRST
+    // — a blocking-level crossing of the unified scheduler must cut the
+    // window BEFORE this request is compiled (fact 1: nothing on the
+    // scheduler's own append path folds into the CURRENT turn's wire
+    // pipeline). The LEVEL GATE stays synchronous (none/background never
+    // wait here, and the ordinary flow below keeps its before-any-await
+    // probe contract); only a blocking crossing awaits — raced against the
+    // turn's abort signal — and its failure paths log + observe and FALL
+    // THROUGH to the ordinary flow (the request proceeds on the current
+    // window — automatic compaction is optional maintenance, always open).
+    const barrier = dependencies.wireCompactionBarrier?.(input.sessionId);
+    let barrierEvaluation: TriggerEvaluation | undefined;
+    if (barrier !== undefined) {
+      try {
+        barrierEvaluation = barrier.evaluate();
+      } catch {
+        // A broken trigger read is "no crossing": the ordinary flow decides.
+        barrierEvaluation = undefined;
+      }
+    }
+    if (barrier !== undefined && barrierEvaluation?.level === 'blocking') {
+      const barrierDecision = await runWireCompactionBarrier(
+        dependencies,
+        barrier,
+        trustedContext,
+        leaseId,
+        attempts,
+        options.logger,
+        input,
+      );
+      if (barrierDecision !== undefined) return barrierDecision;
+    }
+    // Wave 2 (canon 05 §2.2, item 2.4): the tool-result TEXT offload axis —
+    // the legacy tool_archive compaction demoted to an offload pass. Planned
+    // over the canonical history, applied as `offload` events; best-effort by
+    // contract (a fault logs and the request proceeds). Wire mode composes it
+    // together with `automatic: undefined` — the legacy probe below does not
+    // exist there anymore.
+    if (dependencies.toolResultOffload !== undefined) {
+      try {
+        await dependencies.toolResultOffload(input.sessionId);
+      } catch (error) {
+        options.logger?.error?.(
+          {
+            event: 'context_tool_result_offload_failed',
+            session_id: input.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          '[local-runtime-v2] tool-result text offload pass failed',
+        );
+      }
+    }
+    // Wave 2 (canon §2.2): wire mode composes NO legacy compactor — the hook
+    // is the unified barrier + the offload pass above, nothing else.
+    if (dependencies.automatic === undefined) {
+      return { type: 'continue' };
+    }
     const attemptId = attempts.create(trustedContext, leaseId, input.phase);
     const attemptState: {
       started: boolean;
@@ -231,6 +298,208 @@ export function createAutomaticContextCompactionHook(
   };
 }
 
+/**
+ * В1 (opus-decisions-20261101): the blocking half of the wire-mode admission
+ * point — reached only after the SYNCHRONOUS level gate in the hook body
+ * selected a `blocking` crossing (none/background never wait — the background
+ * threshold stays fire-and-forget; awaiting ANY job would erase it).
+ *
+ * - `await barrier.runBlocking(input.signal)`: the wait races the turn's
+ *   abort signal, so an Esc returns control at once (the user-stop budget)
+ *   while the job harmlessly finishes in the background.
+ * - A committed checkpoint → the `replaceMessages` decision with the
+ *   checkpoint's canonical replacement — the same path the legacy compactor
+ *   uses; the runner's delivery commits it and reseeds the session's wire
+ *   pipeline, so the NEXT `project()` compiles the CUT window.
+ * - A `null` outcome or a thrown failure → log + observation, `undefined`:
+ *   the request proceeds on the current window (pi: `catch → return false`
+ *   in `_runAutoCompaction`; the loop continues). The wire guard and the
+ *   overflow recovery stay the hard boundaries.
+ */
+async function runWireCompactionBarrier(
+  dependencies: AgentHostCompactionHookDependencies,
+  barrier: WireCompactionBarrier,
+  context: AgentEventContext,
+  leaseId: string,
+  attempts: ContextCompactionAttemptFactory,
+  logger: Pick<PiTurnRunnerLogger, 'info' | 'error'> | undefined,
+  input: PiBeforeLlmCallHookInput,
+): Promise<PiBeforeLlmCallHookDecision | undefined> {
+  const attemptId = attempts.create(context, leaseId, input.phase);
+  observeCompactionBestEffort(dependencies.observer, {
+    context,
+    attemptId,
+    status: 'started',
+    reason: 'wire-compaction-barrier',
+  });
+  try {
+    const checkpoint = await barrier.runBlocking(input.signal);
+    if (input.signal?.aborted) {
+      // The WAIT lost to Esc: return control at once (the 2-с user-stop
+      // budget); the compaction job keeps running in the background and its
+      // checkpoint stays harmless.
+      observeCompactionBestEffort(dependencies.observer, {
+        context,
+        attemptId,
+        status: 'aborted',
+        reason: 'wire_barrier_wait_aborted',
+      });
+      return { type: 'skip', reason: 'context_compaction_barrier_aborted' };
+    }
+    if (checkpoint === null) {
+      // Nothing was compacted (a joined job found nothing / no replacement
+      // recorded): the request proceeds on the current window.
+      logger?.info?.(
+        {
+          event: 'context_compaction_barrier_no_checkpoint',
+          session_id: context.sessionId,
+          turn_id: context.turnId,
+          turn_sequence: context.turnSequence,
+          attempt_id: attemptId,
+          phase: input.phase,
+        },
+        '[local-runtime-v2] wire compaction barrier settled without a checkpoint',
+      );
+      observeCompactionBestEffort(dependencies.observer, {
+        context,
+        attemptId,
+        status: 'unchanged',
+        reason: 'wire_barrier_no_checkpoint',
+      });
+      return undefined;
+    }
+    logger?.info?.(
+      {
+        event: 'context_compaction_barrier_completed',
+        session_id: context.sessionId,
+        turn_id: context.turnId,
+        turn_sequence: context.turnSequence,
+        attempt_id: attemptId,
+        phase: input.phase,
+        compaction_id: checkpoint.compactionId,
+        tokens_before: checkpoint.tokensBefore,
+        tokens_after: checkpoint.tokensAfter,
+        messages_before: checkpoint.messagesBefore,
+        messages_after: checkpoint.messagesAfter,
+        ...(checkpoint.deterministic ? { deterministic: true } : {}),
+      },
+      '[local-runtime-v2] wire compaction barrier committed the blocking checkpoint',
+    );
+    observeCompactionBestEffort(dependencies.observer, {
+      context,
+      attemptId,
+      status: 'completed',
+      compactionId: checkpoint.compactionId,
+      messagesBefore: checkpoint.messagesBefore,
+      messagesAfter: checkpoint.messagesAfter,
+      tokensBefore: checkpoint.tokensBefore,
+      tokensAfter: checkpoint.tokensAfter,
+    });
+    // Wave 3 (item 3.5, canon 05 §2.4): the WALL — after the deterministic
+    // fallback the projection is still above the blocking goal, there is no
+    // cheaper tool left (the LLM summarizer is paused behind its breaker),
+    // and letting the request through would re-enter the compact → «Продолжаю
+    // с того места» loop the canon forbids. The turn STOPS with a clear
+    // reason instead. An LLM checkpoint never triggers this — its own
+    // above-goal outcome is the `ineffective` failure class, which feeds the
+    // breaker and only THEN routes the next blocking edge through the
+    // fallback.
+    if (checkpoint.deterministic === true) {
+      const evaluation = barrier.evaluate();
+      if (evaluation.level === 'blocking') {
+        const reason =
+          'Context compaction wall: even the deterministic fallback could not bring the window below the goal. ' +
+          'The turn was stopped to avoid a compact-continue loop. Start a fresh conversation or raise the model context window.';
+        logger?.error?.(
+          {
+            event: 'context_compaction_wall_reached',
+            session_id: context.sessionId,
+            turn_id: context.turnId,
+            attempt_id: attemptId,
+            compaction_id: checkpoint.compactionId,
+          },
+          '[local-runtime-v2] context compaction wall reached after the deterministic fallback',
+        );
+        observeCompactionBestEffort(dependencies.observer, {
+          context,
+          attemptId,
+          status: 'unchanged',
+          reason: 'context_compaction_wall_reached',
+        });
+        return { type: 'abort', reason };
+      }
+    }
+    return {
+      type: 'replaceMessages',
+      messages: copyCanonicalHistoryForPiCompatibility(checkpoint.replacement),
+      metadata: wireCompactionReplaceMetadata(checkpoint, input.phase, attemptId),
+    };
+  } catch (error) {
+    // Отказ (the summarizer threw, the job failed): log + event, and the
+    // request goes on the CURRENT window — automatic compaction is optional
+    // maintenance and always fails open. The wire guard and the overflow
+    // recovery remain the hard boundaries.
+    await captureFailure(() =>
+      dependencies.lifecycle.failCommittedHistory({
+        context,
+        attemptId,
+        error,
+      }),
+    );
+    logCompactionFailureBestEffort(logger, {
+      context,
+      attemptId,
+      phase: input.phase,
+      thinkingLevel: input.thinkingLevel,
+      error,
+    });
+    observeCompactionBestEffort(dependencies.observer, {
+      context,
+      attemptId,
+      status: compactionFailureStatus(input.signal, undefined),
+      reason: describeUnknownError(error),
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Metadata of the В1 barrier's `replaceMessages` decision. The runner's
+ * required set (replacementId/strategyVersion/summary/compactedMessages/
+ * keptMessages/firstKeptIndex) plus the compaction identity fields; the
+ * unified checkpoint carries token/message counts but NO serialized-byte
+ * counts, and those are deliberately OMITTED rather than invented — the
+ * delivery then routes as a plain replace operation, never claiming a
+ * second compaction for the cut the canonical `compact` seam already
+ * recorded (the summary content makes the applied list identical).
+ */
+function wireCompactionReplaceMetadata(
+  checkpoint: WireCompactionCheckpoint,
+  phase: ContextCompactionPhase,
+  attemptId: string,
+): PiBeforeLlmCallReplaceMetadata {
+  return captureSemanticSnapshot({
+    compactionAttemptId: attemptId,
+    replacementId: checkpoint.compactionId,
+    committedReplacementId: checkpoint.compactionId,
+    strategyVersion: 'unified-compaction-wire-v1',
+    summary: checkpoint.summary,
+    compactedMessages: [],
+    keptMessages: [],
+    firstKeptIndex: 0,
+    compactionMethod: 'llm_checkpoint' as const,
+    compactionPhase: phase,
+    tokensBefore: checkpoint.tokensBefore,
+    tokensAfter: checkpoint.tokensAfter,
+    messagesBefore: checkpoint.messagesBefore,
+    messagesAfter: checkpoint.messagesAfter,
+    // Wave 3 (item 3.3, canon §2.6): the post-compaction unified measure —
+    // the compaction fact carries it and the owner's Context Usage surface
+    // drops to the SAME number the triggers evaluated.
+    ...(checkpoint.contextUsage ? { contextUsage: checkpoint.contextUsage } : {}),
+  }).value;
+}
+
 function automaticContextCompactionInput(
   input: PiBeforeLlmCallHookInput,
   maxSerializedInputBytes: number | undefined,
@@ -267,6 +536,7 @@ const CHECKPOINT_STOP_REASONS = new Set<CheckpointStopReason>([
   'stop',
   'length',
   'toolUse',
+  'deferred',
   'error',
   'aborted',
 ]);
@@ -448,6 +718,18 @@ export function logCompactionFailureBestEffort(
               output_tokens: input.checkpoint.outputTokens,
             }),
         error_code: failure?.[0] ?? 'UNKNOWN_ERROR',
+        // The stable classifier covers only shaped failures; a raw provider
+        // or JS error would otherwise be a silent UNKNOWN line. Never the
+        // full stack: one bounded, single-line cause is enough to act on.
+        ...(failure === undefined
+          ? {
+              err_name: input.error instanceof Error ? input.error.name : typeof input.error,
+              err_message: (input.error instanceof Error
+                ? input.error.message
+                : String(input.error)
+              ).slice(0, 500),
+            }
+          : {}),
         error_stage: failure?.[1] ?? 'unknown',
         ...captureCompactionSizeDiagnosticsFields(input.error),
       },
@@ -912,51 +1194,37 @@ type CompactionCommitMetadata =
       readonly summary: string;
       readonly replacementSourceIndexes: readonly number[];
       readonly currentUserSourceIndex?: number;
-      readonly placedMarkerCount?: number;
     }
   | {
       readonly compactionId: string;
       readonly method: 'llm_checkpoint';
       readonly summary: string;
       readonly currentUserSourceIndex?: number;
-      readonly placedMarkerCount?: number;
     };
-
-/** Placement-owned current-user tail: source lineage plus the hidden markers before it. */
-interface CurrentUserTailMetadata {
-  readonly currentUserSourceIndex: number;
-  readonly placedMarkerCount: number;
-}
 
 export function readCompactionCommitMetadata(value: unknown): CompactionCommitMetadata | undefined {
   const lifecycle = readCompactionLifecycleMetadata(value);
   if (!lifecycle || !isRecord(value)) return undefined;
   const summary = Reflect.get(value, 'summary');
   if (typeof summary !== 'string') return undefined;
-  const tail = readOptionalCurrentUserTail(value, lifecycle);
-  if (tail === null) return undefined;
+  const currentUserSourceIndex = readOptionalCurrentUserSourceIndex(value, lifecycle);
+  if (currentUserSourceIndex === null) return undefined;
   return lifecycle.method === 'llm_checkpoint'
-    ? readCheckpointCommitMetadata(lifecycle, summary, tail)
-    : readToolResultCommitMetadata(value, lifecycle, summary, tail);
+    ? readCheckpointCommitMetadata(lifecycle, summary, currentUserSourceIndex)
+    : readToolResultCommitMetadata(value, lifecycle, summary, currentUserSourceIndex);
 }
 
 function readCheckpointCommitMetadata(
   lifecycle: ContextCompactionLifecycleMetadata,
   summary: string,
-  tail: CurrentUserTailMetadata | undefined,
+  currentUserSourceIndex: number | undefined,
 ): CompactionCommitMetadata | undefined {
-  // Native summary, optional owned mode, then the exact markers + external user tail.
-  if (
-    tail !== undefined &&
-    lifecycle.messagesAfter !== 2 + tail.placedMarkerCount &&
-    lifecycle.messagesAfter !== 3 + tail.placedMarkerCount
-  )
-    return undefined;
+  if (currentUserSourceIndex !== undefined && lifecycle.messagesAfter !== 3) return undefined;
   return Object.freeze({
     compactionId: lifecycle.compactionId,
     method: 'llm_checkpoint',
     summary,
-    ...currentUserTailFields(tail),
+    ...(currentUserSourceIndex === undefined ? {} : { currentUserSourceIndex }),
   });
 }
 
@@ -964,14 +1232,12 @@ function readToolResultCommitMetadata(
   value: Readonly<Record<PropertyKey, unknown>>,
   lifecycle: ContextCompactionLifecycleMetadata,
   summary: string,
-  tail: CurrentUserTailMetadata | undefined,
+  currentUserSourceIndex: number | undefined,
 ): CompactionCommitMetadata | undefined {
   if (lifecycle.method === 'llm_checkpoint') return undefined;
   const replacementSourceIndexes = Reflect.get(value, 'replacementSourceIndexes');
   const expectedSourceCount =
-    tail === undefined
-      ? lifecycle.messagesAfter
-      : lifecycle.messagesAfter - 1 - tail.placedMarkerCount;
+    currentUserSourceIndex === undefined ? lifecycle.messagesAfter : lifecycle.messagesAfter - 2;
   if (
     !Array.isArray(replacementSourceIndexes) ||
     expectedSourceCount < 0 ||
@@ -981,7 +1247,7 @@ function readToolResultCommitMetadata(
         Number.isSafeInteger(index) &&
         index >= 0 &&
         index < lifecycle.messagesBefore &&
-        index !== tail?.currentUserSourceIndex &&
+        index !== currentUserSourceIndex &&
         (position === 0 || index > replacementSourceIndexes[position - 1]),
     )
   ) {
@@ -992,49 +1258,22 @@ function readToolResultCommitMetadata(
     method: lifecycle.method,
     summary,
     replacementSourceIndexes: Object.freeze([...replacementSourceIndexes]) as readonly number[],
-    ...currentUserTailFields(tail),
+    ...(currentUserSourceIndex === undefined ? {} : { currentUserSourceIndex }),
   });
 }
 
-function currentUserTailFields(
-  tail: CurrentUserTailMetadata | undefined,
-): Partial<CurrentUserTailMetadata> {
-  return tail === undefined
-    ? {}
-    : {
-        currentUserSourceIndex: tail.currentUserSourceIndex,
-        placedMarkerCount: tail.placedMarkerCount,
-      };
-}
-
-/**
- * Reads the placement-owned tail lineage. `placedMarkerCount` defaults to 1 so
- * metadata persisted before multi-marker placement stays readable; it is
- * invalid without `currentUserSourceIndex`. Returns null for invalid input.
- */
-function readOptionalCurrentUserTail(
+function readOptionalCurrentUserSourceIndex(
   value: Readonly<Record<PropertyKey, unknown>>,
   lifecycle: { readonly messagesBefore: number },
-): CurrentUserTailMetadata | undefined | null {
-  const hasMarkerCount = Object.hasOwn(value, 'placedMarkerCount');
-  if (!Object.hasOwn(value, 'currentUserSourceIndex')) return hasMarkerCount ? null : undefined;
+): number | undefined | null {
+  if (!Object.hasOwn(value, 'currentUserSourceIndex')) return undefined;
   const index = Reflect.get(value, 'currentUserSourceIndex');
-  if (!isSourceIndexInRange(index, lifecycle.messagesBefore)) return null;
-  if (!hasMarkerCount) return { currentUserSourceIndex: index, placedMarkerCount: 1 };
-  const count = Reflect.get(value, 'placedMarkerCount');
-  return isPositiveSafeInteger(count)
-    ? { currentUserSourceIndex: index, placedMarkerCount: count }
+  return typeof index === 'number' &&
+    Number.isSafeInteger(index) &&
+    index >= 0 &&
+    index < lifecycle.messagesBefore
+    ? index
     : null;
-}
-
-function isSourceIndexInRange(value: unknown, messagesBefore: number): value is number {
-  return (
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value < messagesBefore
-  );
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 export function readCompactionAttemptId(value: unknown): string | undefined {
@@ -1180,6 +1419,7 @@ function isCompactionPhase(value: unknown): value is ContextCompactionPhase {
   return value === 'initial' || value === 'iteration' || value === 'manual';
 }
 
+/** Shared with compaction-commit-metadata (the commit envelope reader). */
 export function isRecord(value: unknown): value is Readonly<Record<PropertyKey, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

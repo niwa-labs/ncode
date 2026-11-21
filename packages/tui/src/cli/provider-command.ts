@@ -164,6 +164,7 @@ async function createProviderCommandContext(
     workspaceDir,
     version,
     surface: 'headless',
+    managementSurface: true,
     ...(lane ? { lane } : {}),
   });
   return {

@@ -1,6 +1,5 @@
 import { getKeybindings } from "../keybindings.ts";
-import type { TUI } from "../tui.ts";
-import { Loader, type LoaderIndicatorOptions } from "./loader.ts";
+import { Loader } from "./loader.ts";
 
 /**
  * Loader that can be cancelled with Escape.
@@ -12,16 +11,6 @@ import { Loader, type LoaderIndicatorOptions } from "./loader.ts";
  * doWork(loader.signal).then(done);
  */
 export class CancellableLoader extends Loader {
-	constructor(
-		ui: TUI,
-		spinnerColorFn: (str: string) => string,
-		messageColorFn: (str: string) => string,
-		message?: string,
-		indicator?: LoaderIndicatorOptions,
-	) {
-		super(ui, spinnerColorFn, messageColorFn, message, indicator);
-	}
-
 	private abortController = new AbortController();
 
 	/** Called when user presses Escape */

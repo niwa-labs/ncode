@@ -37,6 +37,9 @@ export class UsageVisualization implements Component {
     if (this.data.cacheMetrics) {
       lines.push('', ...renderCacheSummary(this.data.cacheMetrics, width));
     }
+    if (this.data.cacheWarming) {
+      lines.push('', ...renderCacheWarmingSummary(this.data.cacheWarming, width));
+    }
     lines.push('', ...renderContextSummary(this.data.context, width));
     if (this.data.accountRows && this.data.accountRows.length > 0) {
       lines.push('', ...renderAccountSummary(this.data.accountRows, width));
@@ -88,6 +91,14 @@ function renderCacheSummary(
   if (width >= INLINE_METRICS_MIN_WIDTH) return [heading, metrics.join('     ')];
   if (width >= 26) return [heading, metrics.slice(0, 2).join('   '), metrics[2] ?? ''];
   return [heading, ...metrics];
+}
+
+/** The `/session` warmer status line (donor: interactive-mode `formatCacheWarmingStatus`). */
+function renderCacheWarmingSummary(status: string, width: number): string[] {
+  return [
+    sectionHeading('Cache warming'),
+    chalk.hex(colors.dim)(safeInline(status)),
+  ].map((line) => truncateToWidth(line, Math.max(width, 1), '…'));
 }
 
 function renderContextSummary(

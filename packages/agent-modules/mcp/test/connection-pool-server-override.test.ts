@@ -1,10 +1,18 @@
+/**
+ * Session server override tests — W08 pi-mcp absorption edition.
+ *
+ * The pool's connection-key semantics are facade policy and unchanged; what
+ * changed is the engine: transports come from the pi-mcp-backed factory and
+ * connections are pi `McpClient` instances (initialize handshake, roots,
+ * listTools array shape). The mocks pin the NEW signatures.
+ */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { McpConnectionPool } from '../src/runtime/connection-pool.js';
 
 const state = vi.hoisted(() => ({
   transports: [] as unknown[],
-  clients: [] as Array<{ transport?: unknown }>,
+  clients: [] as Array<{ transport?: unknown; options?: unknown }>,
 }));
 
 vi.mock('../src/runtime/transport/factory.js', () => ({
@@ -15,27 +23,42 @@ vi.mock('../src/runtime/transport/factory.js', () => ({
   }),
 }));
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
-  Client: class {
+vi.mock(import('@earendil-works/pi-mcp'), async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-mcp')>();
+  class FakeMcpClient {
     transport?: unknown;
+    options?: unknown;
 
-    constructor() {
+    constructor(options: unknown) {
+      this.options = options;
       state.clients.push(this);
     }
 
-    setRequestHandler(): void {}
-
-    async connect(transport: unknown): Promise<void> {
-      this.transport = transport;
+    onClose(): () => void {
+      return () => undefined;
     }
 
-    async listTools(): Promise<{ tools: Array<{ name: string; inputSchema: object }> }> {
-      return { tools: [{ name: 'ping', inputSchema: {} }] };
+    onError(): () => void {
+      return () => undefined;
+    }
+
+    async connect(transport: unknown): Promise<unknown> {
+      this.transport = transport;
+      return {
+        protocolVersion: '2025-06-18',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'fake-mcp', version: '1.0.0' },
+      };
+    }
+
+    async listTools(): Promise<Array<{ name: string; inputSchema: object }>> {
+      return [{ name: 'ping', inputSchema: {} }];
     }
 
     async close(): Promise<void> {}
-  },
-}));
+  }
+  return { ...actual, McpClient: FakeMcpClient };
+});
 
 describe('McpConnectionPool session server override', () => {
   beforeEach(() => {
@@ -70,6 +93,12 @@ describe('McpConnectionPool session server override', () => {
       expect.objectContaining({ transport: descriptor.transport }),
       expect.objectContaining({ transport: descriptor.transport }),
     ]);
+    // roots identity follows the ephemeral descriptor (no workspaceRoot → home)
+    const roots = state.clients.map(
+      (client) =>
+        (client.options as { roots?: Array<{ name: string }> }).roots?.[0]?.name,
+    );
+    expect(roots).toEqual(['home', 'home']);
 
     await pool.shutdown();
   });

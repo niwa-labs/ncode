@@ -15,17 +15,39 @@ import type {
 } from '../types/runtime-models.js';
 import type { TuiRuntimeEvent } from '../types/runtime-events.js';
 import type { TuiPermissionMode } from '../application/permission-mode.js';
+import type { TuiSandboxFilesystemMode } from '../application/sandbox-mode.js';
 import type { TuiMessage, TuiStreamEvent } from './stream-events.js';
 import type { McodeProviderRuntimePort } from '../provider/contract.js';
 import type { McodePluginRuntimeAccess } from '../plugin/contract.js';
 import type { TuiDailyCheckinOutcome } from '../checkin/application.js';
 import type {
   AbortSessionReq,
+  AcpPermissionMode,
   CliSendMessageReq,
   CliSendMessageOptions,
   ConversationSteerInput,
   ConversationSteerResult,
+  SessionPermissionModeEntry,
+  SetModeResult,
 } from '@mavis/local-runtime-v2/cli-service';
+
+/** Wire-legal per-session permission modes (spec §2.2). */
+export type TuiSessionPermissionMode = AcpPermissionMode;
+export type TuiSessionPermissionModeOrigin = SessionPermissionModeEntry['origin'];
+export type TuiSessionPermissionModeResult = SetModeResult;
+
+/**
+ * The runtime cannot serve per-session permission modes (an outdated daemon
+ * without the new RPC, or a host without the registry). ACP must fail loudly
+ * (-32603) instead of silently falling back to the process mode.
+ */
+export class TuiSessionPermissionModeUnsupportedError extends Error {
+  constructor(cause?: unknown) {
+    super('runtime does not support per-session permissionMode; restart mcoded');
+    this.name = 'TuiSessionPermissionModeUnsupportedError';
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
 
 export type { TuiMessage, TuiMessagePart, TuiStreamEvent, TuiToolCall } from './stream-events.js';
 export type { TuiRuntimeEvent } from '../types/runtime-events.js';
@@ -261,22 +283,6 @@ export interface TuiSessionForkPort {
   forkSession(input: ForkTuiSessionInput): Promise<TuiSessionForkResult>;
 }
 
-/**
- * Programmatic Tool Calling as new Sessions see it. A Session keeps the mode it
- * was created (or last compacted) with, so a change never rewrites a running one.
- */
-export interface TuiPtcSetting {
-  /** Effective switch for this process: `beta.ptc`, the build default, or `--ptc`. */
-  readonly enabled: boolean;
-  /**
-   * What config.yaml (shared with Desktop) resolves to without `--ptc`: the
-   * value a switch shows and flips. Equals `enabled` when there is no override.
-   */
-  readonly saved: boolean;
-  /** `--ptc` keeps PTC on for this process whatever config.yaml says. */
-  readonly launchOverride: boolean;
-}
-
 export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   getRuntimeDiagnostics(): Promise<TuiRuntimeDiagnostics>;
   getInstructionSources(workspaceDir: string): Promise<readonly TuiInstructionSource[]>;
@@ -286,20 +292,44 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   ): Promise<TuiAccountStatus>;
   getPermissionMode(): Promise<TuiPermissionMode | undefined>;
   setPermissionMode(mode: TuiPermissionMode): Promise<TuiPermissionMode>;
-  /** Effective next-message suggestion switch; undefined when the Runtime has none. */
-  getPromptSuggestionEnabled?(): Promise<boolean | undefined>;
   /**
-   * Persists `promptSuggestion.enabled`; resolves the effective value, or
-   * undefined when the Runtime cannot persist it.
+   * Per-session permission mode (spec §2.2): `bind` rides session/new, load
+   * and resume (it also lifts the lock); `set` rides set_config_option
+   * (refused with `locked` after the first accepted prompt); `get` reads the
+   * Session's bound mode. Optional so older runtime mocks stay assignable;
+   * the ACP layer treats an absent method like an outdated daemon (-32603).
    */
-  setPromptSuggestionEnabled?(enabled: boolean): Promise<boolean | undefined>;
-  /** Effective PTC switch for new Sessions; undefined when the Runtime has none. */
-  getPtcSetting?(): Promise<TuiPtcSetting | undefined>;
+  bindSessionPermissionMode?(
+    sessionId: string,
+    mode: TuiSessionPermissionMode,
+    origin: TuiSessionPermissionModeOrigin,
+  ): Promise<TuiSessionPermissionModeResult>;
+  setSessionPermissionMode?(
+    sessionId: string,
+    mode: TuiSessionPermissionMode,
+  ): Promise<TuiSessionPermissionModeResult>;
+  getSessionPermissionMode?(
+    sessionId: string,
+  ): Promise<TuiSessionPermissionMode | undefined>;
   /**
-   * Persists `beta.ptc`; resolves the effective setting, or undefined when the
-   * Runtime cannot persist it.
+   * Whether the destructive-delete guard is enforced. `undefined` means the
+   * host does not own this setting, which the UI reports instead of guessing.
+   *
+   * Optional like {@link setModelFavorite}: a host that predates the setting
+   * must degrade to "unmanaged", never break permission hydration.
    */
-  setPtcEnabled?(enabled: boolean): Promise<TuiPtcSetting | undefined>;
+  getDangerousCommandGateEnabled?(): Promise<boolean | undefined>;
+  setDangerousCommandGateEnabled?(enabled: boolean): Promise<boolean>;
+  /**
+   * The sandbox filesystem level the host enforces. `undefined` means the host
+   * runs no sandbox, which the UI reports instead of naming a level nothing is
+   * enforcing.
+   *
+   * Optional like the delete guard: a host that predates the setting must
+   * degrade to "managed by host", never break the sandbox command.
+   */
+  getSandboxFilesystemMode?(): Promise<TuiSandboxFilesystemMode | undefined>;
+  setSandboxFilesystemMode?(mode: TuiSandboxFilesystemMode): Promise<TuiSandboxFilesystemMode>;
   listModels(sessionId?: string): Promise<TuiModel[]>;
   selectModel(model: TuiModelSelection, sessionId?: string): Promise<boolean>;
   selectSessionModel(model: TuiModelSelection, sessionId: string): Promise<boolean>;
@@ -319,7 +349,21 @@ export interface TuiAccountStatusOptions {
 
 export interface TuiInspectionPort {
   getSessionUsage(sessionId: string): Promise<TuiSessionUsage>;
+  /**
+   * Durable liveness probe (incident 2026-11-15): the admitted active Turn
+   * and the latest turn activity from the ingress ledger — "is a Turn
+   * running and when did it last move" in one cheap read, for integrators
+   * that would otherwise poll session history pages. `undefined` when the
+   * runtime predates the port.
+   */
+  getTurnStatus?(sessionId: string): Promise<TuiTurnStatusSnapshot>;
   getSessionUsageSummary?(sessionId: string): Promise<TuiSessionUsageSummary>;
+  /**
+   * W10 `/session` warmer status: the one-line prompt-cache warming status
+   * of the Session, `undefined` when the host keeps no warmer state (warming
+   * off, unknown session, or a runtime that predates the port).
+   */
+  getSessionCacheWarmingStatus?(sessionId: string): Promise<string | undefined>;
   watchSessionUsageCommits?(signal: AbortSignal): AsyncGenerator<string>;
   requestCompaction(
     sessionId: string,
@@ -362,6 +406,21 @@ export interface TuiContextSnapshotResponse {
     readonly state: 'never' | 'running' | 'completed' | 'failed';
     readonly lastCompactedAtMs?: number;
   };
+}
+
+/** Mirrors the durable turn-liveness view served over the ACP extension. */
+export interface TuiTurnStatusSnapshot {
+  readonly activeTurn: {
+    readonly turnId: string;
+    readonly busyReason: 'turn' | 'compaction';
+    readonly locallyOwned: boolean;
+  } | null;
+  readonly latestActivity: {
+    readonly turnId: string;
+    readonly acceptedAtMs: number;
+    readonly completedAtMs?: number;
+    readonly activityAtMs: number;
+  } | null;
 }
 
 export interface TuiFeedbackPort {
@@ -565,6 +624,7 @@ export interface TuiDelegatedAgent {
   agentName?: string;
   task?: string;
   status: TuiDelegatedAgentStatus;
+  backgroundTaskId?: string;
   createdAtMs?: number;
   updatedAtMs?: number;
   errorMessage?: string;
@@ -599,18 +659,9 @@ export type TuiBackgroundTaskStatus =
   | 'canceled'
   | 'lost';
 
-/**
- * Runtime fact for a terminal Task's root notification: `pending` until a Turn takes it,
- * `settled` once it is steered into or admitted as a Turn, read, or stopped by the user.
- */
-export interface TuiBackgroundTaskNotification {
-  readonly state: 'pending' | 'settled';
-  readonly turnId?: string;
-}
-
 export interface TuiBackgroundTask {
   readonly taskId: string;
-  readonly kind: 'bash' | 'subagent' | 'workflow' | 'custom';
+  readonly kind: 'bash' | 'workflow' | 'custom' | 'subagent';
   readonly status: TuiBackgroundTaskStatus;
   readonly ownerSessionId: string;
   readonly description?: string;
@@ -624,24 +675,19 @@ export interface TuiBackgroundTask {
   readonly lastError?: string;
   /** Bash still owned by its foreground tool call (not auto-promoted to the background). */
   readonly foreground?: true;
-  /** Sub-Agent Task only: the child Session that runs it. */
-  readonly childSessionId?: string;
-  /** Terminal Tasks only, when the Runtime reports it; absent means settled. */
-  readonly notification?: TuiBackgroundTaskNotification;
-}
-
-export interface TuiBackgroundTaskListOptions {
-  /**
-   * `[V]` machine status only: also list sub-Agent Tasks and ask the Runtime for each terminal
-   * Task's root notification. Without it the list holds bash/workflow/custom Tasks only.
-   */
-  readonly machineStatus?: boolean;
 }
 
 export interface TuiBackgroundTaskCapability {
+  /**
+   * The work panel projection always includes subagent rows: a subagent
+   * promoted foreground→background is a background task of the session and
+   * must be visible in the work bar (owner bug 2026-11-06) — the agent-team
+   * panel keeps showing its child session as an agent. `includeSubagent` is
+   * accepted for the explicit lifetime callers (headless drain, §5.4 №20).
+   */
   listBackgroundTasks?(
     ownerSessionId: string,
-    options?: TuiBackgroundTaskListOptions,
+    options?: { readonly includeSubagent?: boolean },
   ): Promise<readonly TuiBackgroundTask[]>;
 }
 
@@ -653,11 +699,6 @@ export interface TuiActiveRunSnapshot {
   actions: {
     steer: boolean;
   };
-  /**
-   * Present only when another live MCode process owns the running Turn. This
-   * process can read the Session but cannot steer, queue, or stop that Turn.
-   */
-  runningElsewhere?: true;
   retryReason?: string;
 }
 
@@ -691,7 +732,7 @@ export type TuiRuntime = TuiSessionPort &
   Partial<TuiSessionForkPort> &
   Partial<TuiWorkspaceFilePort>;
 
-export type TuiPermissionDecision = 'allowOnce' | 'allowAlways' | 'deny';
+export type TuiPermissionDecision = 'allowOnce' | 'allowAlways' | 'deny' | 'denyAlways';
 export interface TuiModelThinkingSelection {
   /** Explicit think-effort level; omitted means "let Runtime pick the default". */
   effort?: string;
@@ -777,6 +818,20 @@ export interface TuiAccountStatus {
   tokenPlanQuotaState?: 'available' | 'not-subscribed' | 'unavailable';
   tokenPlanSummary?: TuiTokenPlanSummary;
   tokenPlanQuota?: TuiTokenPlanQuota;
+  /**
+   * Profile label the SERVING daemon pins its data plane with (`null` = the
+   * default profile; opus 2026-11-01, правка 5). Absent when the daemon
+   * predates the field — the /status panel then omits the Profile row.
+   */
+  profile?: string | null;
+  /** The data directory the daemon serves (the credential-store identity). */
+  dataDir?: string;
+  /**
+   * Login epoch of the daemon's own auth session. The thin client may only
+   * blend in ITS identity/quota view when its own epoch equals this one; a
+   * mismatch means client and daemon hold different logins.
+   */
+  loginEpoch?: string;
   warnings: string[];
 }
 

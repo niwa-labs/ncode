@@ -1,11 +1,19 @@
 # Agent guide
 
-This repository is the reviewed public projection of an internal monorepo, not an ordinary workspace. Every published file is listed in `release/public-source.json`, and upstream changes arrive through a three-way merge described in `docs/source-sync.md`. Moving or renaming files therefore has a cost that a normal repository does not have: it shows up as a conflict or an unreviewed new file at the next synchronization. Prefer changing content over changing layout.
+Use an English imperative subject of at most 72 characters. When the reason or
+compatibility impact needs explanation, add one or two short paragraphs capped
+at 100 words and wrap them at 72 columns.
+
+This Niwa Labs fork starts from the reviewed public MiniMax Code source
+projection. Register published paths in `release/public-source.json`. Preserve
+upstream Git ancestry when bringing in updates. The upstream
+[projection workflow](docs/source-sync.md) explains where that source comes from.
+Prefer content changes when an existing path can serve the same purpose.
 
 ## Layout
 
 - `packages/` — first-party workspace packages. `packages/agent-modules/*` is a second level of packages, not a package itself.
-- `third_party/` — vendored upstream packages (`pi-mono`, `sandbox-runtime`) with their own licenses. Their test suites are not part of this distribution's verification.
+- `third_party/` — vendored libraries with their own licenses. The port conformance gate runs selected Pi, Pi Durable and Chord suites.
 - `release/` — machine-read release contracts. `extraction.json` pins the source baseline and package scope, `public-source.json` is the file inventory, `dependency-licenses.json` records declared dependency licenses. Build, type-check, test resolution, and source checks all read from here.
 - `docs/` — human-readable documentation and supporting media.
 - `scripts/` — build and verification tooling. Shared constants live in `scripts/lib/`; import them instead of repeating literal paths or lists.

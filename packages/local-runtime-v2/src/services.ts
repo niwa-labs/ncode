@@ -3,10 +3,7 @@ import type {
   AgentExtension,
   InternalTurnPromptReadRegistry,
 } from "@mavis/agent-runtime";
-import type {
-  PromptSuggestionRemotePolicy,
-  RunawayGuardOverride,
-} from "@mavis/config";
+import type { RunawayGuardOverride } from "@mavis/config";
 import {
   getRuntimeRegion,
   isLocalSourceProvenanceEnabled,
@@ -24,6 +21,9 @@ import {
   createGoalBudgetToolPolicyGuard,
 } from "./application/agent/goal-budget-tool-policy.js";
 import { createGoalVerificationTranscriptReader } from "./application/agent/goal-verification-transcript.js";
+import { createOutputLimitRecoveryExtension } from "./application/agent/output-limit-recovery-extension.js";
+import { createRequestMediaEncodingExtension } from "./application/agent/request-media-extension.js";
+import { parseRequestMediaConfig } from "@mavis/config";
 import { createRuntimeSourceReferenceExtension } from "./application/agent/source-reference-extension.js";
 import {
   createQueryCollapseKeyResolver,
@@ -116,6 +116,8 @@ import {
 } from "./service/channel-system/index.js";
 import {
   initializeContentSafetyService,
+  reviewBlocks,
+  SAFETY_SCENE,
   type ContentSafetyService,
 } from "./service/content-safety/index.js";
 import {
@@ -204,9 +206,33 @@ import {
   requireTurnSystem,
   type AgentHostRuntimeLifecycle,
   type ToolResultCompactionConfig,
-  type TurnSystemOwner,
-  type SystemPromptOverrides,
+	type TurnSystemOwner,
+	type SystemPromptOverrides,
+	createSessionCacheWarming,
+	createPromptSuggestionService,
+	type PromptSuggestionTurnPort,
 } from "./service/turn-system/index.js";
+import {
+  createSessionPermissionModeRegistry,
+  type SessionPermissionModeRegistry,
+} from "./service/permission/session-permission-mode.js";
+import { resolvePromptSuggestionEnabled } from "@mavis/config";
+import { createLogger } from "@mavis/logging";
+
+const promptSuggestionLog = createLogger("mcode:prompt-suggestion");
+const servicesLog = createLogger("mcode:runtime");
+import { createDurableHistoryCacheWarmUsageSink } from "./service/turn-system/agent-host/cache-warming/durable-usage-sink.js";
+import { withProductTurnDriver } from "./service/turn-system/agent-host/driver/index.js";
+import {
+  createDurableHistoryStorage,
+  resolveHistoryProviderMode,
+  type DurableHistoryStorage,
+} from "./service/session-system/messages/history/durable-canonical-history-provider.js";
+import {
+  openDurableRuntimeOrchestration,
+  type RuntimeOrchestration,
+} from "./service/orchestration/runtime-orchestration.js";
+import { createRuntimeDelegationSteeringComposition } from "./service/turn-system/execution/steering/runtime-delegation-steering.js";
 import { composeV1Conversation } from "./service/v1-conversation-compat/index.js";
 import type { WorkspaceSystem } from "./service/workspace/index.js";
 
@@ -225,6 +251,13 @@ export interface RuntimeServices extends RuntimeMiniAppServices {
   /** V2 Agent owner and cross-capability Agent workflows. */
   readonly agent: AgentApplication;
   readonly safety: ContentSafetyService;
+  /**
+   * Per-session permission-mode registry (spec §2.1): ONE instance per
+   * runtime process, shared by the turn system (lock), the permission check
+   * seam (consumption), the CliService surface (bind/set/get) and the child
+   * Session creation points (inherit).
+   */
+  readonly sessionPermissionModes: SessionPermissionModeRegistry;
   readonly canvas: CanvasService;
   /** Electron-only scheduled execution capability; absent on embedded CLI. */
   readonly cron?: CronService;
@@ -259,6 +292,8 @@ export interface RuntimeServices extends RuntimeMiniAppServices {
   readonly sandbox: LocalSandboxService;
   /** Development-only LLM Context Inspector; absent when the build hides it. */
   readonly llmContextInspector?: ComposedInspector["service"];
+  /** W10 durable mode: the ONE pi scheduler composition (goal/background/cron/roster bridges). */
+  readonly orchestration?: RuntimeOrchestration;
   notifyAuthContextChanged(
     authState?: "pending" | "authenticated" | "logged_out",
   ): void | Promise<void>;
@@ -312,6 +347,14 @@ export interface CreateRuntimeServicesOptions
   readonly recoverPersistedState?: boolean;
   /** Composition owner mode; CLI omits Electron-only capabilities. */
   readonly runtimeOwnerKind?: string;
+  /**
+   * Owner decision 2026-11-18 (per-session durable history): this runtime
+   * owns the shared SYSTEM log (the mcoded daemon — the runtime that owns
+   * scheduling, delegation steering and the orchestration bridges). Embedded
+   * runtimes (off-mode TUI/exec/ACP) omit it: their writes land in the
+   * per-session files alone, and the hub features stay on the daemon.
+   */
+  readonly ownsSystemLog?: boolean;
   /** Electron-owned fixed key for encrypted Desktop Prompt bundles. */
   readonly promptConfigKey?: Uint8Array;
   /** Client capability ceiling; omitted owners retain the shared legacy surface. */
@@ -322,14 +365,11 @@ export interface CreateRuntimeServicesOptions
   readonly greetingEnabled?: boolean;
   /** Live optional Runaway Guard override injected by the owning product. */
   readonly getRunawayGuardConfig?: () => RunawayGuardOverride | undefined;
-  /** Live remote rollout policy for the next-message suggestion. */
-  readonly getPromptSuggestionPolicy?: () => PromptSuggestionRemotePolicy | undefined;
-  /** See `CreateLocalRuntimeHostOptions.promptSuggestionSurface`. */
-  readonly promptSuggestionSurface?: boolean;
   /** Live ToolResult compaction thresholds injected by the owning product. */
   readonly getToolResultCompactionConfig?: () =>
     | ToolResultCompactionConfig
     | undefined;
+  readonly subscriptionQuota?: (input: { provider: string; modelId: string; signal?: AbortSignal }) => Promise<{ resetAtMs?: number } | undefined>;
   readonly runtimeOwnerIdentity: RuntimeOwnerIdentity;
   readonly sandboxOperationsFactory?: DeferredLocalSandboxBashOperationsFactory;
   readonly sandboxConfig?: Parameters<
@@ -416,8 +456,70 @@ export async function createRuntimeServices(
   const prepared = options.prepared ?? prepareRuntimeServices(options);
   const nowMs = options.nowMs ?? Date.now;
   const processStartedAtMs = nowMs();
+  // Ш1 (per-session model, owner decision 2026-11-18): the runtime's durable
+  // history = ONE OWN log per session (`durable-history/sessions/<id>/`) plus
+  // a ROUTING storage worker; runtimes with `ownsSystemLog` (the mcoded
+  // daemon) additionally own the shared SYSTEM log (the legacy monolith) that
+  // carries the orchestration substrate. The DURABLE provider is the W10
+  // hybrid default; the explicit `MCODE_HISTORY_PROVIDER=jsonl` compatibility
+  // mode opens nothing and keeps the exact legacy composition. The
+  // session-system close() disposes it (durableHistory is passed down).
+  // Cross-process exclusion is per SESSION file: another live runtime owning
+  // a DIFFERENT session no longer blocks this one (the single-log era's
+  // fail-fast now applies only to the same session, or to a second daemon on
+  // the system log).
+  const durableHistory =
+    resolveHistoryProviderMode() === "durable"
+      ? await createDurableHistoryStorage({
+          dataDir: options.dataDir,
+          ownsSystemRoot: options.ownsSystemLog === true,
+        })
+      : undefined;
+  // W10 atomic scheduler swap (state/w08.md closure №1): in durable mode the
+  // cron wake lives on the ONE pi scheduler through the CronJobBridge and the
+  // croner Scheduler must NOT also be injected — three schedulers never live.
+  if (durableHistory && options.scheduler) {
+    throw new Error(
+      "Durable composition refuses an injected croner Scheduler client: the cron wake is owned by the durable orchestration bridge (three schedulers must never live); drop the scheduler option or select MCODE_HISTORY_PROVIDER=jsonl",
+    );
+  }
   const ownerLifecycle = createDeferredRuntimeOwnersLifecycle();
   const state: RuntimeServiceState = { closed: false };
+  // §2.1: the ONE per-process registry. The Turn probe is late-bound (the
+  // Turn system does not exist yet) so `bind` can refuse a mode change under
+  // a running Turn from the very first Session.
+  const sessionPermissionTurnProbe: {
+    read?: (sessionId: string) => boolean;
+  } = {};
+  const sessionPermissionModes = createSessionPermissionModeRegistry({
+    isTurnActive: (sessionId) => sessionPermissionTurnProbe.read?.(sessionId) === true,
+  });
+  // W10: the durable orchestration composition (the ONE pi scheduler over the
+  // gated SYSTEM storage + the goal/background/cron/roster bridges), with the
+  // fail-closed session→conversation resolver minting one pi conversation per
+  // product session. Owner decision 2026-11-18: the orchestration substrate
+  // is a SYSTEM-log capability — the mcoded daemon opens it, embedded
+  // runtimes (off-mode TUI/exec/ACP) run turns on their per-session files
+  // without the hub features, loudly.
+  const orchestration = durableHistory?.system
+    ? await openDurableRuntimeOrchestration({
+        durableSystem: durableHistory.system,
+        nativeForeground: isCommandLineRuntimeOwner(options.runtimeOwnerKind) &&
+          process.env.MCODE_FOREGROUND_EXECUTOR !== "agent-loop",
+        db: options.db,
+        nowMs,
+        metrics: options.metrics,
+      })
+    : undefined;
+  if (durableHistory && !durableHistory.system) {
+    servicesLog.warn(
+      "durable per-session mode without the system log: orchestration (goals, background tasks, cron), delegation steering and the usage mirror live on the daemon-owned system log; this runtime serves plain turns on its per-session files",
+      { dataDir: options.dataDir },
+    );
+  }
+  // The swapped cron scheduler client (bridge-backed); undefined keeps the
+  // legacy injected scheduler in jsonl compatibility mode.
+  const schedulerOverride = orchestration?.scheduler;
   const sandbox = initializeRuntimeSandbox(options);
   const { bindSessionSystem, inspector } =
     await createRuntimeInspector(options);
@@ -468,6 +570,7 @@ export async function createRuntimeServices(
     browserUse: browserUseComposition.service,
     promptSnapshots,
     globalInstructions,
+    ...(durableHistory ? { durableHistory } : {}),
   });
   bindSessionSystem(productionSessionComposition.sessionSystem);
   const {
@@ -484,7 +587,14 @@ export async function createRuntimeServices(
     product.preparation.configBuilder.config,
   );
   const canvas = initializeRuntimeCanvas(options, sessionSystem);
-  const promptBoundOwners = await initializePromptBoundRuntimeServiceOwners({
+  // Fail-closed failure path: if owner initialization throws after the
+  // orchestration opened, close the ONE scheduler before the error
+  // propagates (no half-composed durable runtime keeps running).
+  let promptBoundOwners: Awaited<
+    ReturnType<typeof initializePromptBoundRuntimeServiceOwners>
+  >;
+  try {
+    promptBoundOwners = await initializePromptBoundRuntimeServiceOwners({
     options,
     processStartedAtMs,
     product,
@@ -495,6 +605,8 @@ export async function createRuntimeServices(
     archiveTitleModel,
     facts,
     safety,
+    sessionPermissionModes,
+    sessionPermissionTurnProbe,
     turnCapabilities,
     agentSessionPorts,
     agentService: options.agentService,
@@ -510,7 +622,14 @@ export async function createRuntimeServices(
     enableChannel: ownsElectronRuntimeCapabilities(options.runtimeOwnerKind),
     readyOwners: ownerLifecycle.ready,
     closeOwners: ownerLifecycle.close,
+    ...(schedulerOverride ? { schedulerOverride } : {}),
+    ...(orchestration?.orchestration.foregroundLoop ? { foregroundLoop: orchestration.orchestration.foregroundLoop } : {}),
+    ...(durableHistory ? { durableHistory } : {}),
   });
+  } catch (error) {
+    if (orchestration) await orchestration.orchestration.close().catch(() => {});
+    throw error;
+  }
   const { channelSystem, owners, queryCollapseKeys } = promptBoundOwners;
   state.agentApplication = owners.agentApplication;
   const { conversation, skill } = createRuntimeUserApplications({
@@ -532,6 +651,20 @@ export async function createRuntimeServices(
     miniApp: owners.miniAppComposition.services.miniApp,
     planEntryEnabled,
     sessionReports: sessionSystem.reporting,
+    ...(owners.turnSystem.cacheWarming
+      ? { cacheWarming: owners.turnSystem.cacheWarming }
+      : {}),
+    // W1 §3.2 (review round 1): the publisher's publish-stale flag is
+    // consumable from the status surfaces (`mcode daemon status`) through the
+    // application diagnostics seam, not just the owner object.
+    ...(sessionSystem.durableJsonlPublisher
+      ? {
+          publishStatus: {
+            staleSessions: () =>
+              sessionSystem.durableJsonlPublisher!.publishStaleSessions(),
+          },
+        }
+      : {}),
     instructions: {
       listSources: (input) =>
         readLocalInstructionSources({ ...input, dataDir: options.dataDir }),
@@ -588,6 +721,7 @@ export async function createRuntimeServices(
   return {
     agent: owners.agentApplication,
     safety,
+    sessionPermissionModes,
     canvas,
     cron: owners.cron?.service,
     ...(cronDelivery ? { cronDelivery } : {}),
@@ -613,6 +747,7 @@ export async function createRuntimeServices(
     skill,
     sandbox,
     ...(inspector ? { llmContextInspector: inspector.service } : {}),
+    ...(orchestration ? { orchestration: orchestration.orchestration } : {}),
     ...owners.miniAppComposition.services,
     notifyAuthContextChanged: createRuntimePromptAuthNotifier(
       notifyAuthContextChanged,
@@ -620,7 +755,18 @@ export async function createRuntimeServices(
     ),
     builtinAgentDefinitionsReady: lifecycle.builtinAgentDefinitionsReady,
     ready: owners.miniAppComposition.ready,
-    close: owners.miniAppComposition.close,
+    close: orchestration
+      ? async () => {
+          // The ONE pi scheduler closes BEFORE the session system disposes
+          // the shared storage (lifecycle order: orchestration → owners →
+          // sessionSystem → durableHistory backend).
+          try {
+            await owners.miniAppComposition.close();
+          } finally {
+            await orchestration.orchestration.close();
+          }
+        }
+      : owners.miniAppComposition.close,
   };
 }
 
@@ -646,18 +792,6 @@ function createServiceGlobalEventWriter(
     observeTurn: (input) => sandbox.observeTurn(input),
     write: (event) => options.eventBus.write(event),
   });
-}
-
-function planFailureReporter(
-  product: ProductionSessionComposition['product'],
-  stage: 'lifecycle-reconcile' | 'review-fallback',
-): (error: unknown) => void {
-  return (error) => {
-    product.executor.reportFailure?.(
-      'plan-lifecycle',
-      `owner=plan;stage=${stage};error=${describeError(error)}`,
-    );
-  };
 }
 
 async function initializeRuntimeServiceOwners(
@@ -726,8 +860,12 @@ async function initializeRuntimeServiceOwners(
         requireTurnSystem(turnSystem).turns.dispatchQueue(sessionId),
       entryEnabled: input.planEntryEnabled,
       agentEntryEnabled: input.agentPlanEntryEnabled,
-      reportFailure: planFailureReporter(input.product, 'lifecycle-reconcile'),
-      reportReviewFallbackFailure: planFailureReporter(input.product, 'review-fallback'),
+      reportFailure: (error) => {
+        input.product.executor.reportFailure?.(
+          "plan-lifecycle",
+          `owner=plan;stage=lifecycle-reconcile;error=${describeError(error)}`,
+        );
+      },
       nowMs: input.nowMs,
     });
     bindConversationMutationPlanState({
@@ -759,6 +897,9 @@ async function initializeRuntimeServiceOwners(
       goalVerifierExtension: subagentVerification.extension,
       goalVerifierOutputTokenCap: subagentVerification.outputTokenCap,
     });
+    const turnSystemForProbe = turnSystem;
+    input.sessionPermissionTurnProbe.read = (sessionId) =>
+      turnSystemForProbe.inspection?.activeTurnId(sessionId) !== undefined;
     const sessionApplications = await initializeSessionApplications(
       input,
       turnSystem,
@@ -883,6 +1024,10 @@ interface RuntimeServiceOwnerInitializationInput
   readonly pinService: PinService;
   readonly archiveTitleModel: ProductionSessionComposition["archiveTitleModel"];
   readonly facts: ProductionSessionComposition["facts"];
+  /** §2.1 registry — shared instance for this runtime process. */
+  readonly sessionPermissionModes: SessionPermissionModeRegistry;
+  /** Late-bound Turn probe feeding the registry's `turn_active` refusal. */
+  readonly sessionPermissionTurnProbe: { read?: (sessionId: string) => boolean };
   readonly safety: ContentSafetyService;
   /** Electron-only channel feedback capability; absent on embedded CLI. */
   readonly channelSystem: ChannelSystemOwner | undefined;
@@ -895,12 +1040,17 @@ interface RuntimeServiceOwnerInitializationInput
   readonly writeGlobalEvent: (event: GlobalEventInput) => void;
   readonly nowMs: () => number;
   readonly enableCron: boolean;
+  /** W10 durable mode: the bridge-backed scheduler client replacing the croner one. */
+  readonly schedulerOverride?: SchedulerClient;
+  readonly foregroundLoop?: RuntimeOrchestration["foregroundLoop"];
   readonly runtimeOwnerIdentity: RuntimeOwnerIdentity;
   readonly planEntryEnabled: () => boolean;
   readonly agentPlanEntryEnabled: () => boolean;
   readonly inspector: ComposedInspector | undefined;
   readonly readyOwners: () => Promise<void>;
   readonly closeOwners: () => Promise<void>;
+  /** Ш1/Ш2: the runtime's single durable-history storage; present only in durable mode. */
+  readonly durableHistory?: DurableHistoryStorage;
 }
 
 interface RuntimeTurnSystemInitializationDeps {
@@ -934,12 +1084,54 @@ async function initializeRuntimeTurnSystem(
     ownerId: input.runtimeOwnerIdentity.createOwnerId("background-task"),
     isOwnerAlive: input.runtimeOwnerIdentity.isOwnerAlive,
   });
-  return initializeTurnSystem({
+  // Ш6: the delegation-steering composition lives on the SYSTEM log (owner
+  // decision 2026-11-18: the seam's records are runtime-level, keyed by
+  // delegation ids — the one shared substrate beside the orchestration
+  // bridges). Daemon-owned runtimes compose it exactly as before; embedded
+  // per-session runtimes and the jsonl default pass nothing: the steer
+  // service keeps the pre-durable behavior in both cases.
+  const delegationSteering = input.durableHistory?.system
+    ? await createRuntimeDelegationSteeringComposition({
+        system: input.durableHistory.system,
+      })
+    : undefined;
+  // W06 cache warming: the ONE per-session CacheWarmer controller, composed
+  // into every agent turn's MAIN stream path (see createHost below). W10 part
+  // B binds the `cache_warm` billing mirror: in durable mode the mcode.usage
+  // entries ride the SAME Ш1 durable log as the canonical history and the
+  // checkpoint barrier (one worker per runtime); the jsonl default keeps the
+  // documented degradation (no medium, warmer logging records the spend).
+  const sessionCacheWarming = createSessionCacheWarming(
+    input.durableHistory
+      ? {
+          appendUsage: createDurableHistoryCacheWarmUsageSink(input.durableHistory),
+        }
+      : {},
+  );
+  // W10 `/session` warmer status: the owner-facing slice of the controller
+  // (the application layer reads it for the usage/status inspection).
+  const ownerCacheWarmingSurface = {
+    describeStatus: (sessionId: string) => sessionCacheWarming.describeStatus(sessionId),
+  };
+  try {
+    const durableJsonlPublisher = input.sessionSystem.durableJsonlPublisher;
+    const owner = await initializeTurnSystem({
     db: input.options.db,
     userStop: input.options.compatibility.backgroundTasks.userStop,
+    sessionPermissionModes: input.sessionPermissionModes,
     ...(input.options.logger ? { logger: input.options.logger } : {}),
     sessions: input.sessionSystem,
     processStartedAtMs: input.processStartedAtMs,
+    // I-PUB-1b (W1): the turn-end jsonl flush completes before the turn lease
+    // is released — the point F8 (settleAndRelease, after the last durable
+    // write of the turn). Durable mode only; jsonl mode keeps the absent
+    // option and today's behavior.
+    ...(durableJsonlPublisher
+      ? {
+          publishBeforeRelease: ({ sessionId }: { readonly sessionId: string }) =>
+            durableJsonlPublisher.flushBeforeRelease(sessionId),
+        }
+      : {}),
     makeLeaseId: () => input.runtimeOwnerIdentity.createOwnerId("turn-lease"),
     makeDeletionOwnerId: () =>
       input.runtimeOwnerIdentity.createOwnerId("session-delete"),
@@ -966,14 +1158,71 @@ async function initializeRuntimeTurnSystem(
       pluginHookSessionOwnership,
     }) => {
       const goalFinalReply = createGoalFinalReply();
+      // Post-turn next-message suggestion (upstream 0.7.2 prompt-suggestion).
+      // The upstream open-source release ships the service WITHOUT a
+      // composition root; this is ours. The TUI-sender gate lives in the
+      // capture (provenance sourceContext.surface === 'interactive'), so
+      // headless clients (ACP/exec) never generate a request. The user switch
+      // is `promptSuggestion.enabled` in config.yaml; there is no remote
+      // rollout policy in this build, so absent = on for TUI turns.
+      const promptSuggestionService = createPromptSuggestionService({
+        enabled: () => {
+          const config = input.product.preparation.configBuilder.config();
+          return resolvePromptSuggestionEnabled(config.promptSuggestion?.enabled, undefined);
+        },
+        publish: (event) => input.writeGlobalEvent(event),
+        review: async (text) => {
+          const result = await input.safety.review(text, SAFETY_SCENE.MessageOutput);
+          // A refusal must be diagnosable AND must not hide the feature when
+          // the review gateway simply does not answer (owner decision
+          // 2026-11-16: no gateway answer → show the chip; a real moderation
+          // reject still hides it, with the offending text in the log).
+          if (!result.pass) {
+            promptSuggestionLog.warn('prompt suggestion safety verdict', {
+              error_kind: result.errorKind ?? 'rejected',
+              ...(result.errorKind === 'local_error'
+                ? {}
+                : { content_head: text.slice(0, 300) }),
+            });
+            // An unreachable/timeout gateway (local_error) is a transport
+            // failure, not a moderation verdict: degrade-pass for the chip.
+            // auth_error keeps the fail-closed semantics (a rejected token is
+            // an account-level signal, not a transport blip).
+            if (result.errorKind === 'local_error') return true;
+          }
+          return reviewBlocks(result);
+        },
+        policy: () => ({ killSwitch: false, sampleRate: 1 }),
+        identity: {
+          // Stable per daemon process: results live at most TTL minutes and are
+          // never serialized, so a process-local key is sufficient isolation.
+          identity: () => input.options.dataDir,
+        },
+        // Failures surface as WARN: without this the optional feature is
+        // silent in BOTH directions (generated vs refused), which made the
+        // first live check undiagnosable.
+        log: (fields) =>
+          promptSuggestionLog.warn('prompt suggestion event', fields),
+      });
+      const promptSuggestionPort: PromptSuggestionTurnPort = {
+        enabled: () => promptSuggestionService.isEnabled(),
+        // A new Turn of this Session supersedes any suggestion still generating.
+        turnStarted: (sessionId) => promptSuggestionService.cancel(sessionId),
+        committed: (scope, capture) =>
+          promptSuggestionService.schedule(scope.sessionId, scope.turnId, capture, scope.messageId),
+      };
       const production = await createLocalAgentHost({
-        product: input.product,
+        product: input.foregroundLoop
+          ? { ...input.product, runner: { ...input.product.runner, runLoopForSession: input.foregroundLoop } }
+          : input.product,
         db: input.options.db,
         preparation: input.preparation,
         sessions: input.sessionSystem,
         safety: input.safety,
         turnControl,
         turnFacts,
+        publishCompactionProgress: input.writeGlobalEvent,
+        promptSuggestion: promptSuggestionPort,
         pluginHookSessionOwnership,
         turnCapabilities: input.turnCapabilities,
         // `sessionTitle.enabled: false` disables title generation: wire a
@@ -999,7 +1248,20 @@ async function initializeRuntimeTurnSystem(
           createGoalBudgetToolPolicyGuard(),
         ),
         outputTokenCap: goalVerifierOutputTokenCap,
-        resolveLlmRetry: () => ({ observer: llmRetryObserver }),
+        resolveLlmRetry: () => ({ observer: llmRetryObserver, subscriptionQuota: input.options.subscriptionQuota }),
+        // Reactive subagents §1.7 (wave 3): the sequential executor's
+        // yield-to-owner-input probe over the steering composition's native
+        // wait binding. jsonl (no delegationSteering) omits it — the batch
+        // behavior stays exactly as before.
+        ...(delegationSteering
+          ? {
+              resolveOwnerInputGeneration: ({ sessionId }: { sessionId: string; turnId: string }) => {
+                const generation = () =>
+                  Promise.resolve(delegationSteering.nativeWaits.ownerInputGeneration(sessionId));
+                return generation;
+              },
+            }
+          : {}),
         normalExtensions: [
           ...(!isLocalSourceProvenanceEnabled(input.options.runtimeOwnerKind)
             ? []
@@ -1012,6 +1274,25 @@ async function initializeRuntimeTurnSystem(
           goalVerifierExtension,
           createGoalBudgetSummaryExtension(),
           goalFinalReply.extension,
+          // М1: every tool-result image re-encodes to the requestMedia limits
+          // once, on the after-tool seam; the browser preprocessor's stricter
+          // post-action ceiling still wins for its own screenshots.
+          createRequestMediaEncodingExtension({
+            getImageEncoding: () => {
+              const { image } = parseRequestMediaConfig(
+                input.product.preparation.configBuilder.config().requestMedia,
+              );
+              return {
+                maxWidth: image.max_width,
+                maxHeight: image.max_height,
+                maxBase64Bytes: image.max_base64_bytes,
+              };
+            },
+          }),
+          // М2: a response cut off by the output limit before any visible
+          // reply is retried with a hint (transcript-counted), then fails
+          // visibly; the context-overflow path (В1) stays separate.
+          createOutputLimitRecoveryExtension(),
           ...normalExtensions,
         ],
         eventObserver: combineAgentEventObservers(
@@ -1037,14 +1318,50 @@ async function initializeRuntimeTurnSystem(
                 input.options.getToolResultCompactionConfig,
             }
           : {}),
+        // Ш2: the fail-closed checkpoint barrier is composed around the
+        // runtime's single durable storage worker — present (and active)
+        // only in durable mode; jsonl keeps the dormant-by-composition path.
+        ...(input.durableHistory
+          ? { checkpointStorageWorker: input.durableHistory.worker }
+          : {}),
+        // W06: the session cache-warming controller (MCODE_CACHE_WARMING,
+        // product default "off" — donor "streaming" is opt-in); absent
+        // sessions keep the legacy path.
+        cacheWarming: sessionCacheWarming,
       });
       agentRuntime = production.lifecycle;
-      return production.host;
+      // W10 (review w10-review-p1 item 1): in durable mode the product turn
+      // path runs through the durable turn-driver — composeProductTurnDriver
+      // over the runtime's REAL pi composition root (the same ONE storage as
+      // the canonical history, the checkpoint barrier and the orchestration
+      // scheduler), delegating every turn step to the part-A product loop
+      // (the existing executor) through the TurnStepExecutor seam. jsonl
+      // compatibility mode keeps the direct part-A host — the mode follows
+      // MCODE_HISTORY_PROVIDER exactly like the history resolver (no
+      // separate behavioral flag).
+      const durableStores = input.durableHistory;
+      const host = durableStores
+        ? withProductTurnDriver({
+            // Per-session model: the driver's durable state rides the
+            // SESSION's own pi root (its port and bridge conversation are
+            // file-local), so driver checkpoints coexist across processes
+            // exactly like the history files.
+            rootOfSession: (sessionId) => durableStores.piOf(sessionId),
+            host: production.host,
+            sessions: input.sessionSystem.sessions.repository,
+            agents: input.product.agents,
+            canonicalHistory: input.sessionSystem.canonicalHistory,
+            ...(input.nowMs ? { nowMs: input.nowMs } : {}),
+          })
+        : production.host;
+      return host;
     },
     disposeRuntimeSession: async (sessionId) => {
       try {
         await requireAgentRuntime(agentRuntime).disposeSession(sessionId);
       } finally {
+        input.sessionPermissionModes.release(sessionId);
+        sessionCacheWarming.disposeSession(sessionId);
         await dependencies.disposeMcpSession(sessionId);
       }
     },
@@ -1118,8 +1435,49 @@ async function initializeRuntimeTurnSystem(
       input.product.executor.reportFailure,
       "runtime_recovery_failed",
     ),
+    ...(delegationSteering ? { delegationSteering } : {}),
     nowMs: input.nowMs,
-  });
+    });
+    if (!delegationSteering) {
+      // W10: the warmer status rides the owner (`/session`-status surface)
+      // and every warmed run cancels with the turn system even when the
+      // durable steering composition is absent (default jsonl mode).
+      const closeTurnSystemPlain = owner.close.bind(owner);
+      return {
+        ...owner,
+        cacheWarming: ownerCacheWarmingSurface,
+        close: async () => {
+          try {
+            await closeTurnSystemPlain();
+          } finally {
+            sessionCacheWarming.dispose();
+          }
+        },
+      };
+    }
+    // The composition closes with the turn system — before the session-system
+    // close disposes the shared storage worker and backend (lifecycle order:
+    // turnSystem.close() runs first in the runtime services lifecycle).
+    const closeTurnSystem = owner.close.bind(owner);
+    return {
+      ...owner,
+      cacheWarming: ownerCacheWarmingSurface,
+      // Native task-wait binding (verdict 09 §1.4): the host late-binds it
+      // onto the API host (with the task-row projection) once both exist.
+      nativeTaskWaits: delegationSteering.nativeWaits,
+      close: async () => {
+        try {
+          await closeTurnSystem();
+        } finally {
+          sessionCacheWarming.dispose();
+          await delegationSteering.close();
+        }
+      },
+    };
+  } catch (error) {
+    if (delegationSteering) await delegationSteering.close();
+    throw error;
+  }
 }
 
 function initializeRuntimeCron(
@@ -1128,7 +1486,8 @@ function initializeRuntimeCron(
   applications: RuntimeApplications,
   lifecycle: Pick<SessionLifecycleService, "mutateSession">,
 ): InitializedCronService {
-  if (!input.options.scheduler) {
+  const scheduler = input.schedulerOverride ?? input.options.scheduler;
+  if (!scheduler) {
     throw new Error("Runtime Cron services require an owned Scheduler client.");
   }
   const sessionPorts =
@@ -1145,7 +1504,7 @@ function initializeRuntimeCron(
     });
   return initializeCronService({
     db: input.options.db,
-    scheduler: input.options.scheduler,
+    scheduler,
     ...(input.options.metrics ? { metrics: input.options.metrics } : {}),
     sessionPorts,
     modelSelection: {
@@ -1214,12 +1573,12 @@ async function initializeSessionApplications(
       rewindPreview: input.options.compatibility.sessionV2.diff.rewind,
       operations: input.sessionSystem.sessions.operationIntents,
       mutationPlanState: input.sessionSystem.conversationMutationState,
-      ...rewindEditActiveTurn(turnSystem),
       stream: input.sessionSystem.stream,
       turn: turnSystem.turns,
       trustedEditSubmission: turnSystem.trustedEditSubmission,
       questionnaires:
         input.options.compatibility.questionnaires.createService(),
+      sessionPermissionModes: input.sessionPermissionModes,
       worktree: input.options.forkWorktree ?? unavailableForkWorktree,
       attachmentRegistration:
         input.options.compatibility.attachmentRegistration,
@@ -1255,14 +1614,6 @@ async function initializeSessionApplications(
     agentApplication,
     runtimeConversation,
   };
-}
-
-/** Lets Rewind/Edit refuse a Turn that another live Runtime owns. */
-function rewindEditActiveTurn(turnSystem: TurnSystemOwner) {
-  const inspection = turnSystem.inspection;
-  return inspection
-    ? { activeTurn: (sessionId: string) => inspection.activeTurn(sessionId) }
-    : {};
 }
 function createOptionalCronDelivery(
   cron: InitializedCronService | undefined,

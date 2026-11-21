@@ -23,9 +23,12 @@ export class TuiConversationAccess implements TuiConversationPort {
   ): AsyncGenerator<TuiStreamEvent> {
     signal?.throwIfAborted();
     const context = signal ? { signal } : {};
+    // The TUI owns a composer: the turn may serve optional UI-only work
+    // (next-message suggestion). Headless callers never send this marker.
+    const marked = { ...req, interactiveSurface: true };
     const opened = options
-      ? await this.service.sendMessage(req, context, options)
-      : await this.service.sendMessage(req, context);
+      ? await this.service.sendMessage(marked, context, options)
+      : await this.service.sendMessage(marked, context);
     if (!opened.ok) {
       throw new TuiFailure('runtime', opened.body.message, {
         code: opened.body.key,

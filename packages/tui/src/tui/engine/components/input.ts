@@ -1,9 +1,15 @@
 import { getKeybindings } from "../keybindings.js";
 import { decodeKittyPrintable } from "../keys.js";
 import { KillRing } from "../kill-ring.js";
-import { type Component, CURSOR_MARKER, type Focusable } from "../tui.js";
+import { type Component, CURSOR_MARKER, type Focusable, renderFakeCursor } from "../tui.js";
 import { UndoStack } from "../undo-stack.js";
-import { getGraphemeSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.js";
+import {
+	getGraphemeSegmenter,
+	isWhitespaceChar,
+	sliceByColumn,
+	visibleWidth,
+	truncateToWidth,
+} from "../utils.js";
 import { findWordBackward, findWordForward } from "../word-navigation.js";
 
 const segmenter = getGraphemeSegmenter();
@@ -17,6 +23,9 @@ export interface InputOptions {
 	prompt?: string;
 	transformPaste?: (value: string) => string;
 	mask?: string;
+	/** Display-only text shown while the value is empty; never enters the editable value. */
+	placeholder?: string;
+	placeholderStyle?: (text: string) => string;
 }
 
 /**
@@ -42,8 +51,12 @@ export class Input implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<InputState>();
 	private readonly options: InputOptions;
+	private readonly placeholder: string;
+	private readonly placeholderStyle: (text: string) => string;
 
 	constructor(options: InputOptions = {}) {
+		this.placeholder = options.placeholder ?? "";
+		this.placeholderStyle = options.placeholderStyle ?? ((text) => text);
 		this.options = options;
 	}
 
@@ -400,6 +413,18 @@ export class Input implements Component, Focusable {
 
 		if (availableWidth <= 0) {
 			return [prompt];
+		}
+
+		if (this.value.length === 0 && this.placeholder) {
+			const placeholder = truncateToWidth(this.placeholder, availableWidth, "");
+			const graphemes = [...getGraphemeSegmenter().segment(placeholder)];
+			const atCursor = graphemes[0]?.segment ?? " ";
+			const afterCursor = placeholder.slice(atCursor.length);
+			const marker = this.focused ? CURSOR_MARKER : "";
+			const cursorChar = renderFakeCursor(this.placeholderStyle(atCursor));
+			const textWithCursor = marker + cursorChar + this.placeholderStyle(afterCursor);
+			const padding = " ".repeat(Math.max(0, availableWidth - visibleWidth(textWithCursor)));
+			return [prompt + textWithCursor + padding];
 		}
 
 		const renderedValue = this.options.mask ? [...this.value].map(() => this.options.mask).join("") : this.value;

@@ -1,4 +1,5 @@
 import type { TurnAssemblyCtx, TurnEndHandler, TurnStartHandler } from '@mavis/agent-runtime';
+import { createLogger } from '@mavis/logging';
 import { pluginHookEffort } from '@mavis/plugin-hooks';
 
 import type { SessionRecord } from '../../session-system/index.js';
@@ -25,7 +26,6 @@ import {
   ContextCompactionAttemptFactory,
   createAutomaticContextCompactionHook,
 } from './compaction/context-compaction.js';
-import { resolveCheckpointRequestShape } from './compaction/checkpoint-request-shape.js';
 import {
   assertAgentHostCapabilityAvailable,
   assertAgentHostCompactionDependenciesReady,
@@ -114,6 +114,21 @@ interface AgentHostFailurePlan {
   readonly message: string;
 }
 
+/** mcode:turn lifecycle (spec §4): start/end info, phase debug, failure error. */
+const turnLifecycleLog = createLogger('mcode:turn');
+
+function asLogError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(safeHostErrorText(error));
+}
+
+function safeHostErrorText(error: unknown): string {
+  try {
+    return String(error);
+  } catch {
+    return 'unknown non-Error failure';
+  }
+}
+
 /** Ordered, fail-closed adapter between Turn ownership and the Agent loop. */
 export class LocalAgentHost<
   TAgent extends AgentExecutionSnapshot = AgentExecutionSnapshot,
@@ -154,18 +169,11 @@ export class LocalAgentHost<
     this.preflight = new TurnPreflight(dependencies);
   }
 
-  private notifyTurnStarted(context: AgentEventContext): void {
-    try {
-      // A new Turn supersedes any suggestion still generating for this Session.
-      this.dependencies.promptSuggestion?.turnStarted(context.sessionId);
-    } catch {
-      /* An optional suggestion can never fail a Turn. */
-    }
-  }
-
   async run(input: AgentHostRunInput): Promise<AgentHostTurnOutcome> {
+    const turnStartedAtMs = performance.now();
     const lease = captureAcceptedTurnLease(readUnknownProperty(input, 'lease'));
     const control = scopeTurnControl(this.dependencies, lease);
+    const turnLog = turnLifecycleLog.child({ sessionId: lease.sessionId, turnId: lease.turnId });
     let context = createBaseAgentEventContext({ lease });
     let acceptedInput: AgentHostRunInput;
     const setupLogContext = {
@@ -237,11 +245,21 @@ export class LocalAgentHost<
           message: 'Agent preflight failed.',
         });
       }
+      turnLog.debug('turn phase', {
+        phase: 'preflight',
+        durationMs: Math.max(0, performance.now() - turnStartedAtMs),
+      });
       const executionContext: AgentEventContext = {
         ...context,
         executionModel: preflight.assemblyContext.model,
         resourceAgentName: preflight.agent.resourceAgentName ?? preflight.agent.agentName,
       };
+      turnLog.info('turn start', {
+        model: preflight.preparation.llm.model.id,
+        provider: preflight.preparation.llm.model.provider,
+        agent: executionContext.resourceAgentName,
+        executionMode: setupLogContext.executionMode,
+      });
       try {
         await observeAgentTurnSetupStage(
           this.dependencies.logger,
@@ -264,7 +282,7 @@ export class LocalAgentHost<
           message: 'Agent turn-start handling failed.',
         });
       }
-      return await this.execute(
+      const outcome = await this.execute(
         { ...acceptedInput, session: preflight.session },
         {
           context: executionContext,
@@ -273,6 +291,17 @@ export class LocalAgentHost<
           ...(capabilityLease?.capabilities ? { capabilities: capabilityLease.capabilities } : {}),
         },
       );
+      turnLog.info('turn end', {
+        status: outcome.status,
+        durationMs: Math.max(0, performance.now() - turnStartedAtMs),
+      });
+      return outcome;
+    } catch (error) {
+      turnLog.error('turn failed', {
+        err: asLogError(error),
+        durationMs: Math.max(0, performance.now() - turnStartedAtMs),
+      });
+      throw error;
     } finally {
       capabilityLease?.release();
     }
@@ -506,6 +535,15 @@ export class LocalAgentHost<
     return outcome;
   }
 
+  private notifyTurnStarted(context: AgentEventContext): void {
+    try {
+      // A new Turn supersedes any suggestion still generating for this Session.
+      this.dependencies.promptSuggestion?.turnStarted(context.sessionId);
+    } catch {
+      /* An optional suggestion can never fail a Turn. */
+    }
+  }
+
   private afterSuccessfulCommit(outcome: AgentHostTurnOutcome): void {
     try {
       this.dependencies.executor.afterSuccessfulCommit?.(outcome);
@@ -618,10 +656,6 @@ export class LocalAgentHost<
       input.lease.leaseId,
       {
         maxSerializedInputBytes: preflight.preparation.llm.maxRequestBodyBytes,
-        checkpointRequestShape: resolveCheckpointRequestShape(
-          preflight.preparation.llm,
-          this.dependencies.compaction.checkpointSharedPrefixEnabled,
-        ),
         attempts: this.compactionAttempts,
         logger: this.dependencies.logger,
         ...(pluginHooks.length

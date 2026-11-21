@@ -12,11 +12,14 @@ export function normalizeCallResult(value: Record<string, unknown>): LocalMcpCal
           typeof (item as { type?: unknown }).type === 'string',
       )
     : [{ type: 'text', text: JSON.stringify(value) }];
-  const structuredContent = readRecord(value['structuredContent']);
+  // MCP 2026-07-28 allows structuredContent to be ANY JSON value (pi-mcp types
+  // it `unknown`), so readRecord's plain-object narrowing would silently drop
+  // arrays and scalars here. Keep every defined value; mapMcpContent formats it.
+  const structuredContent = value['structuredContent'];
   const meta = readRecord(value['_meta']);
   return {
     content: content as LocalMcpCallResult['content'],
-    ...(structuredContent ? { structuredContent } : {}),
+    ...(structuredContent !== undefined ? { structuredContent } : {}),
     ...(typeof value['isError'] === 'boolean' ? { isError: value['isError'] } : {}),
     ...(meta ? { _meta: meta } : {}),
   };
@@ -33,7 +36,9 @@ export function mapMcpContent(result: LocalMcpCallResult): {
     mapContentItem(rawItem, content, summary);
   }
 
-  if (result.structuredContent) {
+  // Same JSON-value rule as normalizeCallResult: non-object structured
+  // content (array/scalar per MCP 2026-07-28) still earns its text fallback.
+  if (result.structuredContent !== undefined) {
     pushTextFallback(content, summary, formatStructuredContent(result.structuredContent));
   }
 
@@ -114,7 +119,7 @@ function formatResourceLink(item: Record<string, unknown>): string | undefined {
   return `[MCP resource link: ${fields.join('; ')}]`;
 }
 
-function formatStructuredContent(value: Record<string, unknown>): string {
+function formatStructuredContent(value: unknown): string {
   try {
     return `[MCP structured content]\n${JSON.stringify(value)}`;
   } catch {

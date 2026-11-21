@@ -19,6 +19,7 @@ export interface CreateDefaultMcodeAuthApplicationOptions {
   telemetrySource?: McodeAuthApplicationOptions['telemetrySource'];
   writeRegionPreference?: McodeAuthApplicationOptions['writeRegionPreference'];
   sharedAuthCore?: McodeAuthApplicationOptions['sharedAuthCore'];
+  fetchImpl?: McodeAuthApplicationOptions['fetchImpl'];
 }
 
 export function createDefaultMcodeAuthApplication(
@@ -37,6 +38,7 @@ export function createDefaultMcodeAuthApplication(
     ...(options.telemetry ? { telemetry: options.telemetry } : {}),
     ...(options.telemetrySource ? { telemetrySource: options.telemetrySource } : {}),
     writeRegionPreference: options.writeRegionPreference ?? writeTuiRegionPreference,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
   } satisfies Omit<McodeAuthApplicationOptions, 'sharedAuthCore'>;
   const createSharedAuthCore = (requestedRegion: MavisRegion) =>
     (options.createSharedSession ?? createMcodeSharedAuthSession)({
