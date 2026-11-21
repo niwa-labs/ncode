@@ -217,7 +217,7 @@ describe('LocalModelResolver', () => {
     expect(resolved.headers).toMatchObject({
       Authorization: 'Bearer managed-token',
       'User-Agent': 'MiniMaxAgent',
-      'Accept-Encoding': 'identity',
+      'Accept-Encoding': 'gzip',
       'X-Mavis-Session-Id': 'session-managed',
     });
     expect(resolved.fileApiGatewayAuth).toMatchObject({

@@ -57,9 +57,8 @@ export function buildLocalProviderHeaders(input: {
     if (normalized === 'bedrock-lane' || normalized === 'bedrock_lane') delete headers[key];
   }
   if (input.managedProvider) {
-    // Compressed managed SSE can arrive in one batch at the end of generation.
     if (!Object.keys(headers).some((key) => key.toLowerCase() === 'accept-encoding')) {
-      headers['Accept-Encoding'] = 'identity';
+      headers['Accept-Encoding'] = 'gzip';
     }
     headers['User-Agent'] = MANAGED_PROVIDER_USER_AGENT;
     Object.assign(headers, managedBackendRoutingHeaders(input.routingContext));
