@@ -565,7 +565,7 @@ async function externalizeImages(
   onIssue?: CasIssueListener,
 ): Promise<V2Envelope> {
   const content = envelope.message.content;
-  if (content === undefined) return envelope;
+  if (content === undefined || typeof content === 'string') return envelope;
   const blocks = content as V2ContentBlock[]; // decoded fresh this line; owned here
   for (const [index, block] of blocks.entries()) {
     if (!isV2ImageBlock(block)) continue;

@@ -32,7 +32,7 @@ export interface V2Message {
    * compatible with roles this build does not know.
    */
   readonly role: string;
-  readonly content?: readonly V2ContentBlock[];
+  readonly content?: string | readonly V2ContentBlock[];
   readonly timestamp?: number;
   readonly [key: string]: unknown;
 }
@@ -138,8 +138,11 @@ function decodeMessage(value: unknown, at: LineLocation): V2Message {
     fail(at, 'message.role must be a non-empty string');
   }
   const contentValue = message['content'];
-  if (contentValue !== undefined) {
-    if (!Array.isArray(contentValue)) fail(at, 'message.content must be an array');
+  if (role === 'assistant' && typeof contentValue === 'string') {
+    fail(at, 'assistant content must be an array');
+  }
+  if (contentValue !== undefined && typeof contentValue !== 'string') {
+    if (!Array.isArray(contentValue)) fail(at, 'message.content must be a string or an array');
     for (const block of contentValue) {
       if (!isPlainObject(block)) fail(at, 'message.content blocks must be plain objects');
       if (typeof block['type'] !== 'string') {

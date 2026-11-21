@@ -151,7 +151,7 @@ describe('readEnvelopes streaming', () => {
       });
       const content = envelopes[0]?.message.content;
       expect(content).toHaveLength(2);
-      const image = content?.[1];
+      const image = typeof content === 'string' ? undefined : content?.[1];
       expect(image?.['type']).toBe('image');
       expect(Buffer.from(String(image?.['data']), 'base64').equals(payload)).toBe(true);
     } finally {
@@ -191,7 +191,8 @@ describe('readEnvelopes validation', () => {
     ['empty turn_id', { message_id: 'msg-1', turn_id: '', message: { role: 'user' } }],
     ['message is not an object', { message_id: 'msg-1', turn_id: 't', message: 'user' }],
     ['message without role', { message_id: 'msg-1', turn_id: 't', message: { content: [] } }],
-    ['content is not an array', { message_id: 'msg-1', turn_id: 't', message: { role: 'user', content: {} } }],
+    ['assistant content is text', { message_id: 'msg-1', turn_id: 't', message: { role: 'assistant', content: 'text' } }],
+    ['content is neither text nor an array', { message_id: 'msg-1', turn_id: 't', message: { role: 'user', content: {} } }],
     [
       'content block is not an object',
       { message_id: 'msg-1', turn_id: 't', message: { role: 'user', content: ['text'] } },
