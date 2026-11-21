@@ -77,6 +77,8 @@ export interface PiBeforeLlmCallReplaceMetadata {
   replacementId: string;
   /** The host already installed this checkpoint; delivery must preserve its canonical IDs. */
   committedReplacementId?: string;
+  /** Typed history operation for a host compaction decision. */
+  compactionMethod?: 'tool_archive' | 'tool_trim' | 'llm_checkpoint';
   strategyVersion: string;
   summary: string;
   compactedMessages: AgentMessage[];
