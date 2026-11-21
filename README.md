@@ -1,6 +1,6 @@
 # Ncode · Niwa Labs
 
-Ncode is an independent fork of MiniMax Code (MCode) maintained by Niwa Labs. It uses Pi for terminal, headless and ACP sessions. It adds a resident daemon, durable session history and context, and account profiles.
+Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of MiniMax Code (MCode) on Pi. Use MiniMax models or connect your own provider.
 
 <p align="center">
   <a href="#quick-start">Get started</a> ·
@@ -15,13 +15,9 @@ Ncode is an independent fork of MiniMax Code (MCode) maintained by Niwa Labs. It
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
-Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, and celebrate when the timer ends.” Watch a request become something you can actually use.
+![Ncode terminal showing the local server online and the sign-in prompt in the pocket-pet workspace](docs/assets/ncode-terminal.png)
 
-[![Pocket Pet: from a blinking face to a working focus companion](docs/assets/pocket-pet-demo.png)](docs/demo.md)
-
-<p align="center"><a href="docs/demo.md">Watch the build story and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
-
-**No hardware required.** The example runs locally in your browser, with no frontend dependencies. Asking the CLI to edit code requires a MiniMax account with available credits or your own compatible model API; model calls may incur charges. The finished example runs without a model account.
+Start a task in the terminal, queue a follow-up while the agent works, and reopen the conversation with `ncode --continue`. The terminal, `ncode exec` and ACP clients share a local daemon for the selected profile. Each session has its own durable history. [How sessions and recovery work](docs/architecture.md)
 
 ## Quick start
 
@@ -97,6 +93,14 @@ Providers added this way are stored under `custom_provider` in the active profil
 </details>
 
 ### 3. Build the pocket pet
+
+Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, and celebrate when the timer ends.” Watch a request become something you can actually use.
+
+[![Pocket Pet: from a blinking face to a working focus companion](docs/assets/pocket-pet-demo.png)](docs/demo.md)
+
+<p align="center"><a href="docs/demo.md">Watch the build story and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
+
+**No hardware required.** The example runs locally in your browser, with no frontend dependencies. Asking the CLI to edit code requires a MiniMax account with available credits or your own compatible model API; model calls may incur charges. The finished example runs without a model account.
 
 Clone this repository and copy the starter into a separate directory:
 

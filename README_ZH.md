@@ -1,6 +1,6 @@
 # Ncode · Niwa Labs
 
-Ncode 是 Niwa Labs 独立维护的 MiniMax Code（MCode）分支，使用 Pi 构建，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
+Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MCode）和 Pi 构建。你可以使用 MiniMax 模型，也可以连接自己的模型服务。
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·
@@ -15,13 +15,9 @@ Ncode 是 Niwa Labs 独立维护的 MiniMax Code（MCode）分支，使用 Pi �
   <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
 </p>
 
-给一个会眨眼的小宠物加上番茄钟，再追问一句：“长按才能暂停，结束时跳舞。”看代码变成可以亲手操作的结果。
+![Ncode 终端欢迎界面，显示本地服务在线，当前尚未登录，工作区为 pocket-pet](docs/assets/ncode-terminal.png)
 
-[![Pocket Pet：从会眨眼到会陪你专注](docs/assets/pocket-pet-demo.png)](docs/demo.md)
-
-<p align="center"><a href="docs/demo.md">看真实修改与浏览器演示 →</a> · <a href="examples/pocket-pet">自己做一次 →</a></p>
-
-**无需硬件。** 示例在本地浏览器运行，不需要前端依赖。让 CLI 修改代码需要 MiniMax 账号及可用额度，或你自己的兼容模型 API；模型调用可能产生费用。完成版可直接运行，无需模型账号。
+在终端发起任务，运行中可将后续指令加入队列，之后用 `ncode --continue` 继续对话。终端、`ncode exec` 和 ACP 客户端共用当前配置档的本地守护进程，每个会话都有独立的持久化历史。[了解会话与恢复机制](docs/architecture.md)
 
 ## 快速开始
 
@@ -79,6 +75,14 @@ ncode
 </details>
 
 ### 3. 做一个自己的桌面宠物
+
+给一个会眨眼的小宠物加上番茄钟，再追问一句：“长按才能暂停，结束时跳舞。”看代码变成可以亲手操作的结果。
+
+[![Pocket Pet：从会眨眼到会陪你专注](docs/assets/pocket-pet-demo.png)](docs/demo.md)
+
+<p align="center"><a href="docs/demo.md">看真实修改与浏览器演示 →</a> · <a href="examples/pocket-pet">自己做一次 →</a></p>
+
+**无需硬件。** 示例在本地浏览器运行，不需要前端依赖。让 CLI 修改代码需要 MiniMax 账号及可用额度，或你自己的兼容模型 API；模型调用可能产生费用。完成版可直接运行，无需模型账号。
 
 克隆仓库，把起始工程复制到独立目录：
 
