@@ -1,6 +1,7 @@
 import type { Component } from '../../rendering/component.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../../theme/runtime.js';
-import { buildChannelSuffix } from '../../../application/build-marker.js';
+import { visibleWidth } from '../../rendering/text.js';
+import { buildChannelSuffix, MCODE_BASE_VERSION, PI_VENDOR_VERSION } from '../../../application/build-marker.js';
 import type { TuiShellState } from '../contracts.js';
 import {
   fitLine,
@@ -190,18 +191,19 @@ function renderWelcomeHeader(state: TuiShellState, width: number, staticBanner: 
   const publisher = chalk.hex(colors.orbit)('by Niwa Labs');
   const version = chalk.hex(colors.muted)(`v${state.version}${buildChannelSuffix()}`);
   const title = width >= 30 ? `${product} ${publisher}` : product;
-  const header = renderFrameHeader(
-    `${title} ${version}`,
-    staticBanner ? '' : renderActivity(state),
-    width,
-  );
-  const origin = width >= 44 ? 'Independent fork of MiniMax Code (MCode)' : 'MiniMax Code fork';
-  const engine = 'Built with Pi';
+  const left = `${title} ${version}`;
+  const activity = staticBanner ? '' : renderActivity(state);
+  const inlineActivity = visibleWidth(left) + visibleWidth(activity) + 8 <= width;
+  const header = renderFrameHeader(left, inlineActivity ? activity : '', width);
+  const longOrigin = `Independent fork of MiniMax Code (MCode) ${MCODE_BASE_VERSION}`;
+  const origin = longOrigin.length <= width - 4 ? longOrigin : `MCode ${MCODE_BASE_VERSION} fork`;
+  const engine = `Built with Pi ${PI_VENDOR_VERSION}`;
   const credits = `${origin} · ${engine}`;
   const lines = credits.length <= width - 4 ? [credits] : [origin, engine];
   return [
     header,
     ...(width < 30 ? [renderFrameRow(publisher, width)] : []),
+    ...(activity && !inlineActivity ? [renderFrameRow(activity, width)] : []),
     ...lines.map((line) => renderFrameRow(chalk.hex(colors.text)(line), width)),
   ];
 }
@@ -250,6 +252,17 @@ function renderWelcomeAccountNoticeRows(state: TuiShellState, width: number): st
 }
 
 function renderActivity(state: TuiShellState): string {
+  switch (state.daemonConnection) {
+    case 'ready':
+      return chalk.bold.hex(colors.orbit)('● Server online');
+    case 'connecting':
+      return chalk.bold.hex(colors.signal)('◌ Connecting to server');
+    case 'reconnecting':
+      return chalk.bold.hex(colors.signal)('◌ Reconnecting to server');
+    case 'disconnected':
+    case 'closed':
+      return chalk.bold.hex(colors.warning)('○ Server disconnected');
+  }
   if (state.accountStatus === 'Sign in with /login') {
     return chalk.bold.hex(colors.warning)('○ Login required');
   }
@@ -266,7 +279,7 @@ function renderActivity(state: TuiShellState): string {
     return chalk.bold.hex(colors.warning)('○ Account unavailable');
   }
   if (state.runtimeStatus === 'ready') {
-    return chalk.bold.hex(colors.orbit)('● Ready');
+    return chalk.bold.hex(colors.orbit)('● Local runtime ready');
   }
   if (state.runtimeStatus === 'starting') {
     return chalk.bold.hex(colors.signal)('◌ Starting');

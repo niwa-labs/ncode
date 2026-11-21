@@ -1978,7 +1978,7 @@ describe('TranscriptView', () => {
         status: 'resolved',
         title: 'Answers sent',
         content: 'Release channel  Stable\nCollaboration  Mixed mode',
-        detail: 'MCode is continuing…',
+        detail: 'Continuing…',
         createdAtMs: 6,
       }),
     ]);
@@ -1996,7 +1996,7 @@ describe('TranscriptView', () => {
     expect(rendered).toContain('✓ Answers sent');
     expect(rendered).toContain('Release channel  Stable');
     expect(rendered).toContain('Collaboration  Mixed mode');
-    expect(rendered).toContain('MCode is continuing');
+    expect(rendered).toContain('Continuing');
     expect(rendered).not.toContain('/allow');
     expect(rendered).not.toContain('/q1');
   });

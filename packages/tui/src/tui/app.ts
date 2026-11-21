@@ -555,6 +555,7 @@ export function createTuiApp(options: CreateTuiAppOptions): TuiApp {
       return {
         providerId: model.providerId,
         modelId: model.modelId,
+        ...(model.contextLimit !== undefined ? { contextLimit: model.contextLimit } : {}),
         ...(model.variant !== undefined ? { variant: model.variant } : {}),
         ...(effort ? { thinking: { effort } } : {}),
       };

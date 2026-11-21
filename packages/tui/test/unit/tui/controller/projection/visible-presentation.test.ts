@@ -616,8 +616,8 @@ describe("visible presentation selector", () => {
   });
 
   it.each([
-    ["BYOK without a managed account", "api-key", false, [], "Ready", false],
-    ["BYOK with a managed account", "api-key", true, [], "Ready", false],
+    ["BYOK without a managed account", "api-key", false, [], "Local runtime ready", false],
+    ["BYOK with a managed account", "api-key", true, [], "Local runtime ready", false],
     [
       "BYOK with no saved API key",
       "api-key",
@@ -643,7 +643,7 @@ describe("visible presentation selector", () => {
       "Login required",
       true,
     ],
-    ["official model signed in", "managed-login", true, [], "Ready", false],
+    ["official model signed in", "managed-login", true, [], "Local runtime ready", false],
   ] as const)(
     "renders the selected route's readiness: %s",
     (_name, authMode, tokenPresent, warnings, activity, loginRequired) => {
@@ -671,18 +671,33 @@ describe("visible presentation selector", () => {
       for (const width of [50, 80, 120]) {
         const rendered = stripAnsi(new TuiWelcome(shell).render(width).join("\n"));
         expect(rendered).toContain("Ncode by Niwa Labs");
-        expect(rendered).toContain("Independent fork of MiniMax Code (MCode)");
-        expect(rendered).toContain("Built with Pi");
+        expect(rendered).toContain("Independent fork of MiniMax Code (MCode) 0.7.2");
+        expect(rendered).toContain("Built with Pi 1.5.2");
         expect(rendered).toContain(activity);
         expect(rendered.includes("Sign in with /login")).toBe(loginRequired);
         expect(rendered.includes("Login required")).toBe(loginRequired);
         if (warnings.length && !loginRequired) {
-          expect(rendered).not.toContain("● Ready");
+          expect(rendered).not.toContain("● Local runtime ready");
           expect(rendered).toContain("/provider or /status");
         }
       }
     },
   );
+
+  it.each([
+    ["ready", "Server online"],
+    ["connecting", "Connecting to server"],
+    ["reconnecting", "Reconnecting to server"],
+    ["disconnected", "Server disconnected"],
+    ["closed", "Server disconnected"],
+  ] as const)("shows the daemon connection %s on the welcome screen", (connection, label) => {
+    const { shell } = resolve({ daemonConnection: connection });
+    const welcome = new TuiWelcome(shell);
+    for (const width of [32, 80]) {
+      expect(stripAnsi(welcome.render(width).join("\n"))).toContain(label);
+      expect(stripAnsi(welcome.renderPrelude(width).join("\n"))).not.toContain(label);
+    }
+  });
 
   it("does not infer readiness from a model label while account state is unknown", () => {
     for (const account of [
@@ -695,7 +710,7 @@ describe("visible presentation selector", () => {
       });
       const rendered = stripAnsi(new TuiWelcome(shell).render(80).join("\n"));
       expect(rendered).toContain(account ? "Account unavailable" : "Checking account");
-      expect(rendered).not.toContain("● Ready");
+      expect(rendered).not.toContain("● Local runtime ready");
       expect(rendered).not.toContain("Login required");
       expect(rendered).not.toContain("Sign in with /login");
     }

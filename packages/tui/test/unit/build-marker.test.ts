@@ -19,7 +19,7 @@ describe('build marker', () => {
   it('claims the fork build only for the exact chimera channel', () => {
     expect(resolveBuildChannel(env('chimera'))).toBe('chimera');
     expect(buildChannelSuffix(env('chimera'))).toBe(
-      ' · fork · pi 1.5.2 · chimera build',
+      ' · chimera build',
     );
   });
 
@@ -40,7 +40,7 @@ describe('build marker', () => {
 
   it('trims surrounding whitespace from the channel value', () => {
     expect(buildChannelSuffix(env('  chimera  '))).toBe(
-      ' · fork · pi 1.5.2 · chimera build',
+      ' · chimera build',
     );
   });
 

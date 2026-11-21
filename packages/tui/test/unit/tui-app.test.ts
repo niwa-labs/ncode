@@ -2535,7 +2535,7 @@ describe("createTuiApp", () => {
 
       await vi.waitFor(() => expect(app.tui.render(120).join("\n")).toContain("✦ m3.05"));
       const welcome = stripAnsi(app.tui.render(120).join("\n"));
-      expect(welcome).toContain("● Ready");
+      expect(welcome).toContain("● Local runtime ready");
       expect(welcome).not.toContain("Login required");
       expect(welcome).not.toContain("Sign in with /login");
       await app.stop();
@@ -3039,7 +3039,7 @@ describe("createTuiApp", () => {
     app.start();
     await app.ready;
     const welcome = stripAnsi(app.tui.render(120).join("\n"));
-    expect(welcome).toContain("● Ready");
+    expect(welcome).toContain("● Local runtime ready");
     expect(welcome).toContain("state=ready");
     expect(welcome).not.toContain("Sign in with /login");
     expect(welcome).not.toContain("Login required");
@@ -10998,7 +10998,7 @@ describe("createTuiApp", () => {
     await vi.waitFor(() =>
       expect(app.transcript.get("question:question-review")).toMatchObject({
         status: "resolved",
-        detail: "Answer sent · MCode is continuing…",
+        detail: "Answer sent · Continuing…",
       }),
     );
 
@@ -11087,7 +11087,7 @@ describe("createTuiApp", () => {
         app.transcript.get("question:question-delayed-reply"),
       ).toMatchObject({
         status: "resolved",
-        detail: "Answer sent · MCode is continuing…",
+        detail: "Answer sent · Continuing…",
       }),
     );
     await vi.waitFor(() =>
@@ -12475,7 +12475,7 @@ describe("createTuiApp", () => {
     await app.stop();
   });
 
-  it("queues a thinking-on model with the configured effort even when the Session stored none", async () => {
+  it("queues the selected context window and the configured effort when the Session stored no effort", async () => {
     const terminal = new FakeTerminal();
     const runtime = createRuntime();
     let finishTurn: (() => void) | undefined;
@@ -12484,6 +12484,8 @@ describe("createTuiApp", () => {
         providerId: "minimax",
         modelId: "deep-reasoner-1",
         displayName: "deep-reasoner-1",
+        contextLimit: 1_000_000,
+        contextWindowOptions: [512_000, 1_000_000],
         selected: true,
         variant: "thinking",
         thinkingConfig: { mode: "switchable", defaultValue: "true" },
@@ -12525,6 +12527,7 @@ describe("createTuiApp", () => {
           providerId: "minimax",
           modelId: "deep-reasoner-1",
           variant: "thinking",
+          contextLimit: 1_000_000,
           thinking: { effort: "xhigh" },
         }),
       }),

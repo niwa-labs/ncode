@@ -1,3 +1,4 @@
+import { formatComponentVersions } from '../application/build-marker.js';
 import { Command, InvalidArgumentError } from 'commander';
 import type { MavisRegion } from '@mavis/config';
 import { TuiContributionRegistry } from '../contributions/index.js';
@@ -99,12 +100,19 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     new Command()
       .name('ncode')
       .description('Ncode — terminal coding agent for MiniMax\nAn independent Niwa Labs fork of MiniMax Code (MCode), built with Pi.')
-      .version(options.version)
+      .version(process.stdout.isTTY ? formatComponentVersions(options.version) : options.version)
       .enablePositionalOptions(),
     { allowStartupEnvironmentSelection: options.allowStartupEnvironmentSelection },
   ).action((prompt: string | undefined, commandOptions: RawTuiInteractiveOptions) =>
     options.launchTui(withLane(resolveInteractiveLaunchRequest(prompt, commandOptions))),
   );
+
+  program
+    .command('version')
+    .description('Show the Ncode, upstream MCode, and Pi versions')
+    .action(() => {
+      process.stdout.write(`${formatComponentVersions(options.version)}\n`);
+    });
 
   program.hook('preAction', (_program, actionCommand) => {
     rejectUnsupportedSystemPromptOptions(actionCommand);

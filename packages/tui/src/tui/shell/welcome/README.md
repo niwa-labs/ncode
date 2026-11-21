@@ -11,7 +11,7 @@ Welcome and `/changelog` share the local changelog bundled with the package. `CH
 The welcome hero uses the six-line `NCODE` wordmark at 44 columns or more
 and the `N` glyph on narrower terminals. The frame header identifies the
 client as `Ncode by Niwa Labs`. The next row credits MiniMax Code (MCode)
-and Pi. On narrow terminals the publisher moves below the header.
+and Pi with their versions. The server badge reflects the daemon connection. On narrow terminals the publisher moves below the header.
 
 Shared colors live in `src/tui/theme/palettes.ts`; borders and terminal-width adaptation live in `src/tui/shell/frame.ts`. Initial theme detection and rendering gates belong to infrastructure in `src/tui/theme/render-binding.ts` and `src/tui/renderer/interactive-renderer.ts`. Do not add startup sequencing to Welcome.
 
