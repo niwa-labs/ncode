@@ -3,6 +3,9 @@
   "compilerOptions": {
     "noEmit": true,
     "baseUrl": ".",
+    "typeRoots": [
+      "./node_modules/@types"
+    ],
     "paths": {
       "@earendil-works/chord": [
         "./third_party/chord/src/index.ts"
