@@ -411,6 +411,7 @@ test(
     // Pin the production default shape: PTC is a beta flag that defaults on in the test
     // channel, and this acceptance checks the direct-tool contract (read, bash) a user gets.
     effortConfig.beta = { ...(effortConfig.beta ?? {}), ptc: false };
+    effortConfig.promptSuggestion = { enabled: false };
     writeFileSync(configPath, stringifyYaml(effortConfig));
     // The packaged command must carry the declaration through saving, a fresh
     // process/config reload, attachment preparation and SDK serialization.
@@ -427,20 +428,15 @@ test(
       const beforeImage = requests.length;
       await run(["exec", "IMAGE_INPUT_TEST", "--model", model, "--file", imagePath,
         "--timeout", "20s", "--max-steps", "1"]);
-      const turns = requests.slice(beforeImage).filter((r) => r.body.stream === true);
-      assert.ok(turns.length > 0, `Expected a runtime request for ${model}`);
+      // The same provider also serves checkpoints. The coding request offers
+      // tools, while checkpoint requests use their own tool-free protocol.
+      const turns = requests.slice(beforeImage).filter(({ body }) =>
+        body.stream === true && body.tools?.some((tool) => tool.function?.name === "read"),
+      );
+      assert.ok(turns.length > 0, `Expected a coding request for ${model}`);
       for (const { body } of turns) {
         const parts = body.messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []));
         const images = parts.filter((part) => part.type === "image_url");
-        // A compaction checkpoint summarizes the conversation instead of continuing it, and
-        // describes each image by its saved path rather than inlining it.
-        const isSummaryRequest = parts.some(
-          (part) => part.type === "text" && part.text.startsWith("[Image not sent to the summary request."),
-        );
-        if (isSummaryRequest) {
-          assert.deepEqual(images, [], `A summary request must not inline images for ${model}`);
-          continue;
-        }
         if (supportsImage) {
           assert.equal(images.length, 1, `Expected an inline image for ${model}`);
           // requestMedia.image is the only resize, and this PNG is inside every default limit,
@@ -712,6 +708,7 @@ test(
       path.join(dataDir, "config.yaml"),
       stringifyYaml({
         defaultModel: "custom_provider:fixture/fixture",
+        promptSuggestion: { enabled: false },
         custom_provider: {
           fixture: {
             name: "fixture",
@@ -1076,7 +1073,7 @@ function cancellationTest(cancellation) {
       .map((line) => JSON.parse(line).message?.role);
     assert.deepEqual(
       roles,
-      cancellation === "tool" ? ["user", "assistant", "toolResult"] : ["user"],
+      cancellation === "tool" ? ["system", "user", "assistant", "toolResult"] : ["system", "user"],
       "Abort reconciliation must preserve executed tools without retaining cancelled text output",
     );
   };

@@ -114,6 +114,7 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       const previousMessages = agent.state.messages.filter(
         (message) => message.role !== 'system' || message.sections !== undefined,
       );
+      const plannedMessages = replacement.messages;
       // A compaction/replacement may discard historical section patches. Keep
       // one native replay baseline in the retained history, after its summary.
       if (turn.input.systemPromptSections &&
@@ -131,7 +132,16 @@ export function setLLMHook(agent: Agent, turn: turnState, history: turnHistory):
       messages.splice(0, messages.length, ...transcriptReplacement);
       agent.state.messages = transcriptReplacement;
       try {
-        await history.replace(replacement.messages, previousMessages, replacement.metadata);
+        // The canonical checkpoint writer restores the system baseline from
+        // the covered history. Send the typed plan without the live copy so
+        // the baseline is not mistaken for a retained envelope.
+        const canonicalMessages =
+          plannedMessages[0]?.role === 'compactionSummary' &&
+          replacement.metadata.compactionMethod === 'llm_checkpoint' &&
+          replacement.metadata.committedReplacementId === undefined
+            ? plannedMessages
+            : replacement.messages;
+        await history.replace(canonicalMessages, previousMessages, replacement.metadata);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`before_llm_checkpoint_persistence_failed: ${message}`);
