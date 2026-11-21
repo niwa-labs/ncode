@@ -1,8 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { streamAnthropic } from "../src/providers/anthropic.ts";
+import { getModel } from "../src/compat.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
+import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import type { Context, Tool, ToolCall } from "../src/types.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
 import { validateToolArguments } from "../src/utils/validation.ts";
@@ -27,7 +28,7 @@ function toolUseSse(tool: string, partialJsonChunks: string[]): Response {
 }
 
 function fakeClient(response: Response): Anthropic {
-	return { messages: { create: () => ({ asResponse: async () => response }) } } as unknown as Anthropic;
+	return { beta: { messages: { create: () => ({ asResponse: async () => response }) } } } as unknown as Anthropic;
 }
 
 async function streamToolCall(tool: Tool, partialJsonChunks: string[]): Promise<ToolCall> {
@@ -35,7 +36,7 @@ async function streamToolCall(tool: Tool, partialJsonChunks: string[]): Promise<
 		messages: [{ role: "user", content: "Submit the result.", timestamp: Date.now() }],
 		tools: [tool],
 	};
-	const stream = streamAnthropic(getModel("anthropic", "claude-haiku-4-5"), context, {
+	const stream = streamAnthropic(getModel("anthropic", "claude-haiku-4-5"), normalizeContext(context), {
 		client: fakeClient(toolUseSse(tool.name, partialJsonChunks)),
 	});
 	const result = await stream.result();

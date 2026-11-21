@@ -132,7 +132,7 @@ export function parseJsonWithRepair<T>(json: string, reviver?: JsonReviver): T {
 export function parseToolCallArguments(json: string | undefined): Pick<ToolCall, "arguments" | "argumentsError"> {
 	if (!json?.trim()) return { arguments: {} };
 	try {
-		const parsed = parseJsonWithRepair<ToolCall["arguments"] | null>(json);
+		const parsed = parseJsonWithRepair<ToolCall["arguments"] | null>(json, preserveUnsafeIntegerSource);
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			throw new Error("Tool arguments must be a JSON object");
 		}

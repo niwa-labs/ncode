@@ -121,7 +121,7 @@ export function isLLMProviderRefusalMessage(message: string | undefined): boolea
  * The diagnostics after it are event counts and timings, so they must never feed
  * the numeric status/code heuristics.
  */
-const MISSING_STOP_REASON_MESSAGE_RE = /\bstream ended without stop_reason\b/;
+const MISSING_STOP_REASON_MESSAGE_RE = /\bstream ended without (?:stop_reason|a stop reason)\b/;
 
 function isLLMIncompleteStreamMessage(message: string | undefined): boolean {
   return typeof message === 'string' && MISSING_STOP_REASON_MESSAGE_RE.test(message);

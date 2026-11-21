@@ -9,7 +9,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { resolveReadPathAsync } from "./path-utils.ts";
 import { readRenderers } from "./renderers/read.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationOptions, type TruncationResult, truncateHead } from "./truncate.ts";
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
@@ -103,6 +103,8 @@ export interface ReadToolOptions {
 	resizeOptions?: ModelImageResizeOptions;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
+	/** Override text output limits for this tool instance. */
+	truncation?: TruncationOptions;
 }
 
 /** The image block and its note, or the text for text files and images that could not be processed. */
@@ -139,10 +141,15 @@ function isStreamableRange(offset: number | undefined, limit: number | undefined
 }
 
 /** Select lines from a whole file in memory: for operations without createReadStream and unusual ranges. */
-function selectLinesFromBuffer(buffer: Buffer, startLine: number, limit: number | undefined): SelectedLines {
+function selectLinesFromBuffer(
+	buffer: Buffer,
+	startLine: number,
+	limit: number | undefined,
+	caps: Required<TruncationOptions>,
+): SelectedLines {
 	const allLines = buffer.toString("utf-8").split("\n");
 	const endLine = limit === undefined ? undefined : Math.min(startLine + limit, allLines.length);
-	const truncation = truncateHead(allLines.slice(startLine, endLine).join("\n"));
+	const truncation = truncateHead(allLines.slice(startLine, endLine).join("\n"), caps);
 	const firstLineBytes = truncation.firstLineExceedsLimit ? Buffer.byteLength(allLines[startLine], "utf-8") : 0;
 	return { totalFileLines: allLines.length, truncation, firstLineBytes };
 }
@@ -155,6 +162,7 @@ async function selectLinesFromStream(
 	chunks: AsyncIterable<Uint8Array>,
 	startLine: number,
 	limit: number | undefined,
+	caps: Required<TruncationOptions>,
 	signal: AbortSignal | undefined,
 ): Promise<SelectedLines> {
 	const endLine = limit === undefined ? Number.POSITIVE_INFINITY : startLine + limit;
@@ -179,7 +187,7 @@ async function selectLinesFromStream(
 		const piece = text.slice(start, end);
 		// A line over the byte cap is never shown, and a first line over it is only measured: never store
 		// all of a 1 GB line.
-		if (lineBytes <= DEFAULT_MAX_BYTES) pieces.push(piece);
+		if (lineBytes <= caps.maxBytes) pieces.push(piece);
 		lineBytes += Buffer.byteLength(piece, "utf-8");
 	};
 	const finishLine = () => {
@@ -187,7 +195,7 @@ async function selectLinesFromStream(
 			if (selectedLines === 0) firstLineBytes = lineBytes;
 			// Storing continues one line past the caps: truncateHead ignores a trailing empty line, so the
 			// line after the cap must be there for it to decide truncation as for the full text.
-			if (storedLines.length > DEFAULT_MAX_LINES || storedBytes > DEFAULT_MAX_BYTES) storedPastCaps = true;
+			if (storedLines.length > caps.maxLines || storedBytes > caps.maxBytes) storedPastCaps = true;
 			const text = pieces.join("");
 			storedBytes += Buffer.byteLength(text, "utf-8") + (storedLines.length > 0 ? 1 : 0);
 			storedLines.push(text);
@@ -230,7 +238,7 @@ async function selectLinesFromStream(
 	select(decoder.decode());
 	if (line >= startLine && line < endLine) finishLine();
 	const truncation: TruncationResult = {
-		...truncateHead(storedLines.join("\n")),
+		...truncateHead(storedLines.join("\n"), caps),
 		// truncateHead's counts for the joined selected lines, which drop a trailing empty line.
 		totalLines: selectedBytes === 0 ? 0 : selectedLines - (lastLineEmpty ? 1 : 0),
 		totalBytes: selectedBytes,
@@ -245,6 +253,10 @@ export function createReadToolDefinition(
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const fallbackResizeOptions = options?.resizeOptions;
 	const ops = options?.operations ?? defaultReadOperations;
+	const caps = {
+		maxLines: options?.truncation?.maxLines ?? DEFAULT_MAX_LINES,
+		maxBytes: options?.truncation?.maxBytes ?? DEFAULT_MAX_BYTES,
+	};
 	return {
 		name: "read",
 		label: "read",
@@ -315,9 +327,10 @@ export function createReadToolDefinition(
 												ops.createReadStream(absolutePath, { signal }),
 												startLine,
 												limit,
+												caps,
 												signal,
 											)
-										: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit);
+										: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit, caps);
 								if (aborted) return;
 								// Check if offset is out of bounds.
 								if (startLine >= totalFileLines) {
@@ -330,7 +343,7 @@ export function createReadToolDefinition(
 								if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
 									const firstLineSize = formatSize(firstLineBytes);
-									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(truncation.maxBytes)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${truncation.maxBytes}]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
 									// Truncation occurred. Build an actionable continuation notice.
@@ -340,7 +353,7 @@ export function createReadToolDefinition(
 									if (truncation.truncatedBy === "lines") {
 										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
 									} else {
-										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
+										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(truncation.maxBytes)} limit). Use offset=${nextOffset} to continue.]`;
 									}
 									details = { truncation };
 								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < totalFileLines) {

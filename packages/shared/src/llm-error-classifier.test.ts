@@ -237,3 +237,11 @@ describe('llm-error-classifier availability statuses (the live "ретраи с�
     expect(toLLMRetryDecision(permanentWords).retryable).toBe(false);
   });
 });
+
+it.each([
+  'Anthropic stream ended without stop_reason (messageDeltaCount=429, eofAtMs=1008)',
+  'Anthropic stream ended without a stop reason',
+])('classifies %j as an incomplete upstream response', (errorMessage) => {
+  expect(normalize({ errorMessage }).facts.signals.has('incomplete_stream')).toBe(true);
+  expect(classifyLLMErrorToCode(errorMessage)).toMatchObject({ status_code: 50113 });
+});

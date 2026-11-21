@@ -546,3 +546,15 @@ For future changes, add one entry per MiniMax patch with:
 ## Foreground loop injection
 
 Agent accepts an optional host loop implementation and retains lifecycle, events and steering queues. The durable CLI host supplies its GenerationTask adapter. The adapter shares the tool declaration, unexpected tool call normalization and truncated tool call result helpers with the standard Agent loop.
+
+## Pi v1.5.2 conformance in the Niwa Labs fork
+
+The model and provider entries resolve workspace source in the Node child
+process used by conformance tests. The Anthropic fixtures use the v1.5.2
+stream API and beta client. Missing stop reasons remain upstream errors.
+The final tool argument parser uses the same integer-source reviver as the
+streaming parser, so schema coercion receives the original digits.
+
+The v1.5.2 streaming and buffered read paths both honor the existing host
+truncation option. Default caps and offset handling stay in effect. The
+port conformance gate selects these provider and read regression suites.

@@ -1,14 +1,14 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { streamAnthropic } from "../src/providers/anthropic.ts";
+import { getModel } from "../src/compat.ts";
+import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import type { Context } from "../src/types.ts";
 
 // Synthetic fixtures shaped like a gateway stream that was cut mid-thinking and then closed
 // with an empty stop_reason. No real user content.
 
 const encoder = new TextEncoder();
-const MISSING_STOP_REASON = "Anthropic stream ended without stop_reason (";
+const MISSING_STOP_REASON = "Anthropic stream ended without a stop reason";
 const THINKING_TEXT = "synthetic-thinking-fragment";
 
 function sseChunk(event: string, data: unknown): string {
@@ -17,11 +17,7 @@ function sseChunk(event: string, data: unknown): string {
 
 function createFakeAnthropicClient(response: Response): Anthropic {
 	return {
-		messages: {
-			create: () => ({
-				asResponse: async () => response,
-			}),
-		},
+		beta: { messages: { create: () => ({ asResponse: async () => response }) } },
 	} as unknown as Anthropic;
 }
 
@@ -116,9 +112,7 @@ describe("Anthropic stream without stop_reason", () => {
 		]);
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage?.startsWith(MISSING_STOP_REASON)).toBe(true);
-		expect(result.errorMessage).toContain("messageDeltaCount=1");
-		expect(result.errorMessage).toMatch(/eofAtMs=\d+/);
+		expect(result.errorMessage).toBe(MISSING_STOP_REASON);
 		expect(result.errorMessage).not.toContain(THINKING_TEXT);
 		expect(result.errorMessage).not.toContain("data=");
 		expect(result.content).toEqual([expect.objectContaining({ type: "thinking", thinking: THINKING_TEXT })]);
@@ -128,14 +122,14 @@ describe("Anthropic stream without stop_reason", () => {
 		const result = await runStream([MESSAGE_START, TEXT_BLOCK, messageDelta({}), MESSAGE_STOP]);
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage?.startsWith(MISSING_STOP_REASON)).toBe(true);
+		expect(result.errorMessage).toBe(MISSING_STOP_REASON);
 	});
 
 	it("fails a message with no content blocks and an empty stop_reason", async () => {
 		const result = await runStream([MESSAGE_START, messageDelta({ stop_reason: "" }), MESSAGE_STOP]);
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage?.startsWith(MISSING_STOP_REASON)).toBe(true);
+		expect(result.errorMessage).toBe(MISSING_STOP_REASON);
 		expect(result.content).toEqual([]);
 	});
 

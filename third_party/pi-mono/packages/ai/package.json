@@ -19,6 +19,7 @@
 			"import": "./dist/index.js"
 		},
 		"./models": {
+			"source": "./src/models.ts",
 			"types": "./dist/models.d.ts",
 			"import": "./dist/models.js"
 		},
@@ -27,6 +28,7 @@
 			"import": "./dist/compat.js"
 		},
 		"./providers/*": {
+			"source": "./src/providers/*.ts",
 			"types": "./dist/providers/*.d.ts",
 			"import": "./dist/providers/*.js"
 		},
