@@ -6,7 +6,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { c as createTar } from 'tar';
-import { cliBuildVersion, cliExternalModules, isUpstreamCliSource } from './lib/cli-release.mjs';
+import {
+  cliBuildVersion,
+  cliExternalModules,
+  cliReleaseArchiveName,
+  cliReleaseIdentity,
+  isUpstreamCliSource,
+} from './lib/cli-release.mjs';
 import { readExtraction, dependencyLicensesPath } from './lib/release-metadata.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -55,6 +61,7 @@ function copyLicenses(stage) {
 export function releaseManifest(importers, version) {
   const source = json(path.join(root, 'package.json'));
   const upstream = isUpstreamCliSource(source);
+  const identity = cliReleaseIdentity(source);
   const repository = source.repository ?? (upstream
     ? { type: 'git', url: 'https://github.com/MiniMax-AI/minimax-code.git' }
     : undefined);
@@ -67,11 +74,11 @@ export function releaseManifest(importers, version) {
     target[name] = [...versions][0];
   }
   return {
-    name: '@minimax-ai/code', version, private: true, type: 'module', license: 'MIT',
+    name: identity.packageName, version, private: true, type: 'module', license: 'MIT',
     description: upstream
       ? 'MiniMax Code CLI built from the tagged public source.'
-      : 'MCode CLI built from the Niwa Labs source fork.',
-    bin: { mcode: 'cli.js' },
+      : 'Ncode by Niwa Labs for MiniMax.',
+    bin: { [identity.command]: 'cli.js', mcode: 'cli.js' },
     engines: source.engines,
     ...(repository === undefined ? {} : { repository }),
     dependencies, optionalDependencies,
@@ -80,6 +87,8 @@ export function releaseManifest(importers, version) {
 
 export async function packageCliRelease({ tag, out }) {
   const version = cliBuildVersion(root, tag);
+  const source = json(path.join(root, 'package.json'));
+  const identity = cliReleaseIdentity(source);
   const dist = path.join(root, 'dist');
   if (json(path.join(dist, 'package.json')).version !== version) throw new Error('Build version does not match the release tag. Build with MCODE_RELEASE_TAG first.');
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
@@ -93,18 +102,17 @@ export async function packageCliRelease({ tag, out }) {
     writeFileSync(path.join(stage, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     copyLicenses(stage);
     writeFileSync(path.join(stage, 'release.json'), JSON.stringify({ version, tag, revision, buildNode: process.version }, null, 2) + '\n');
-    writeFileSync(path.join(stage, 'README.md'), `# MCode ${version}
+    writeFileSync(path.join(stage, 'README.md'), `# ${identity.title} ${version}
 
 ${manifest.description}
 Built locally from source commit ${revision}.
 Install this tar.gz with npm. Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
-The archive uses the upstream package name, mcode command and default data directory.
+Run \`${identity.command}\` after installation. ${isUpstreamCliSource(source) ? '' : 'The mcode command is also available for existing integrations.'}
 Use a separate npm prefix and profile to keep local testing isolated.
-Rebuild from source to update the Niwa Labs fork.
 `);
     mkdirSync(out, { recursive: true });
-    const archive = path.join(out, `minimax-code-${version}.tar.gz`);
+    const archive = path.join(out, cliReleaseArchiveName(source, version));
     if (existsSync(archive) || existsSync(`${archive}.sha256`)) throw new Error(`Output already exists: ${archive}`);
     await createTar({ file: archive, gzip: true, cwd: temporary, portable: true }, ['package']);
     writeFileSync(`${archive}.sha256`, `${digest(readFileSync(archive))}  ${path.basename(archive)}\n`, { flag: 'wx' });

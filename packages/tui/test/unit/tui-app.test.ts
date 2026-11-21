@@ -1535,13 +1535,13 @@ describe("createTuiApp", () => {
       await app.ready;
 
       expect(stripAnsi(app.tui.render(80).join("\n"))).toContain(
-        "Ask Mcode to do anything",
+        "Ask Ncode to do anything",
       );
 
       app.editor.handleInput("R");
 
       expect(stripAnsi(app.tui.render(80).join("\n"))).not.toContain(
-        "Ask Mcode to do anything",
+        "Ask Ncode to do anything",
       );
       expect(app.editor.getText()).toBe("R");
     } finally {
@@ -3084,7 +3084,7 @@ describe("createTuiApp", () => {
     expect(conversation).toContain("Say hello");
     expect(conversation).toContain("Hello from the Agent");
     expect(terminal.started).toBe(true);
-    expect(terminal.title).toBe("Done | workspace (session-) | MCode");
+    expect(terminal.title).toBe("Done | workspace (session-) | Ncode");
     const programReports = () =>
       terminal.writes.filter((value) => value.startsWith("\u001b]7501;"));
     expect(programReports()).toContain("\u001b]7501;state=working:app=mcode\u001b\\");
@@ -3873,7 +3873,7 @@ describe("createTuiApp", () => {
         expect(rendered).toContain("Ctrl+O details");
         expect(rendered).toContain("Esc stop");
         expect(rendered).toContain("Thinking…");
-        expect(rendered).not.toContain("MCode ·");
+        expect(rendered.match(/Ncode · MiniMax/g)).toHaveLength(1);
         expect(rendered).not.toContain("Thinking · Inspecting the repository");
         expandedThinkingRows = countThinkingBodyRows(rendered);
         expect(expandedThinkingRows).toBeGreaterThan(0);
@@ -7129,7 +7129,7 @@ describe("createTuiApp", () => {
         expect(history.filter((line) => line.trimEnd().endsWith(`› Message ${index}`))).toHaveLength(1);
       }
       expect(history.join("\n")).not.toContain("Session usage");
-      expect(terminal.getViewport().join("\n")).toContain("Ask Mcode to do anything");
+      expect(terminal.getViewport().join("\n")).toContain("Ask Ncode to do anything");
       expect(terminal.getViewport().join("\n")).toContain("/workspace");
     } finally {
       await app.stop();
@@ -10463,7 +10463,7 @@ describe("createTuiApp", () => {
     await app.ready;
     await app.submit("/resume session-existing");
     await vi.waitFor(() =>
-      expect(terminal.title).toBe("Needs approval | Existing session | MCode"),
+      expect(terminal.title).toBe("Needs approval | Existing session | Ncode"),
     );
     expect(programReports().at(-1)).toBe(
       "\u001b]7501;state=blocked:kind=permission:app=mcode\u001b\\",
@@ -10471,7 +10471,7 @@ describe("createTuiApp", () => {
 
     await app.submit("/allow");
     await vi.waitFor(() =>
-      expect(terminal.title).toBe("Needs input | Existing session | MCode"),
+      expect(terminal.title).toBe("Needs input | Existing session | Ncode"),
     );
     expect(programReports().at(-1)).toBe(
       "\u001b]7501;state=blocked:kind=question:app=mcode\u001b\\",
@@ -10494,7 +10494,7 @@ describe("createTuiApp", () => {
     app.start();
     await app.ready;
     await app.submit("Say hello");
-    expect(terminal.title).toBe("Done | workspace (session-) | MCode");
+    expect(terminal.title).toBe("Done | workspace (session-) | Ncode");
     await app.stop();
     expect(terminal.writes.some((value) => value.includes("\u001b]7501;"))).toBe(false);
   });
@@ -12679,7 +12679,7 @@ describe("createTuiApp", () => {
     });
     expect(app.tui.render(80).join("\n")).toContain("Loading");
     expect(app.tui.render(80).join("\n")).not.toContain("Loading · 0s");
-    expect(app.tui.render(80).join("\n")).not.toContain("MCode ·");
+    expect(app.tui.render(80).join("\n").match(/Ncode · MiniMax/g)).toHaveLength(1);
     terminal.input?.("\x1b");
     await vi.waitFor(() =>
       expect(app.controller.snapshot().activeTurnId).toBeUndefined(),
@@ -15227,7 +15227,7 @@ describe("createTuiApp", () => {
         expect(screen.getScrollBuffer().filter((line) => line.match(/Answer (\d+)/u)?.[1] === String(index))).toHaveLength(1);
       }
       screen.scrollLines(10000);
-      expect(screen.getViewport().join("\n")).toContain("Ask Mcode to do anything");
+      expect(screen.getViewport().join("\n")).toContain("Ask Ncode to do anything");
     } finally {
       finish?.();
       await app.stop();

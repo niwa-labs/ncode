@@ -1,6 +1,6 @@
 # Source boundaries
 
-By default, the terminal, `mcode exec`, and ACP connect to the same daemon for
+By default, the terminal, `ncode exec`, and ACP connect to the same daemon for
 the selected profile and data directory. The CLI starts the daemon on demand.
 It runs the local runtime and owns the shared orchestration log. Set
 `MCODE_SERVER_MODE=off` to run the runtime in the client process.

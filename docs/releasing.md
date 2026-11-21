@@ -1,6 +1,6 @@
 # Source release
 
-Publish the reviewed source commit on the Niwa Labs fork. Run `pnpm verify`
+Publish the reviewed source commit on the Ncode fork. Run `pnpm verify`
 from a clean checkout and check the source inventory and licenses in the export.
 The `Source candidate` workflow can build and verify a source archive and
 upload it as a GitHub Actions artifact. The fork builds and updates from source.
@@ -14,7 +14,7 @@ Use an unused output directory outside the repository.
 export MCODE_RELEASE_TAG="v$(node -p 'require("./package.json").version')"
 pnpm build
 node scripts/package-cli-release.mjs "$MCODE_RELEASE_TAG" /tmp/mcode-release
-MCODE_RELEASE_ARCHIVE="/tmp/mcode-release/minimax-code-${MCODE_RELEASE_TAG#v}.tar.gz" pnpm verify --profile package
+MCODE_RELEASE_ARCHIVE="/tmp/mcode-release/ncode-${MCODE_RELEASE_TAG#v}.tar.gz" pnpm verify --profile package
 ```
 
 The archive includes the CLI, runtime assets, licenses, and its source receipt.

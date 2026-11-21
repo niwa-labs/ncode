@@ -57,9 +57,9 @@ test("CLI version and command help work outside the source directory", (t) => {
   const options = fixture(t);
   for (const [args, expected] of [
     [["--version"], version],
-    [["--help"], "terminal coding agent"],
+    [["--help"], "Ncode — terminal coding agent for MiniMax"],
     [["exec", "--help"], "prompt"],
-    [["update"], "Update MCode by rebuilding a newer Niwa Labs source checkout."],
+    [["update"], "Update Ncode by rebuilding a newer Niwa Labs source checkout."],
   ]) {
     const result = spawnSync(process.execPath, [cli, ...args], {
       ...options,

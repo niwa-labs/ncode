@@ -1,9 +1,9 @@
 {
-  "name": "@niwa-labs/minimax-code-source",
+  "name": "@niwa-labs/ncode",
   "version": "0.7.2",
   "private": true,
   "type": "module",
-  "description": "Niwa Labs source fork of MiniMax Code with durable sessions, a local daemon and ACP.",
+  "description": "Ncode by Niwa Labs, a fork of MiniMax Code with durable sessions, a local daemon and ACP.",
   "packageManager": "pnpm@9.12.0",
   "engines": {
     "node": ">=22.19 <23 || >=24.2 <27"
@@ -12,6 +12,7 @@
     "build": "node scripts/build.mjs",
     "release:cli": "node scripts/release-cli.mjs",
     "start": "node dist/cli.js",
+    "ncode": "node dist/cli.js",
     "mcode": "node dist/cli.js",
     "verify": "node scripts/verify.mjs",
     "test:smoke": "node --test test/smoke.test.mjs",

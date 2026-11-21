@@ -1,12 +1,12 @@
 # Installation packages and source builds
 
-## Install the Niwa Labs fork from source
+## Install Ncode from source
 
 Open your checkout of the Niwa Labs fork and build it below. For MiniMax’s
 installers, npm packages and GitHub release archives, see the
 [upstream installation guide](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/installation.md).
 Update this build by checking out a newer fork revision and rebuilding it.
-`mcode update` shows the same instruction.
+`ncode update` shows the same instruction.
 
 For a source build, you need Git, Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26, and pnpm 9.12.0. Regular CI uses Node.js 24 across Linux and macOS. The weekly and manual compatibility matrix covers Node.js 22.19.0, 24.2.0, 25, and 26 on both platforms. Windows CI and source-candidate validation are temporarily paused while their checks are made reliable. Initial installation and build require access to public npm.
 
@@ -20,8 +20,8 @@ corepack prepare pnpm@9.12.0 --activate
 node scripts/check-windows-source-location.mjs
 pnpm install --frozen-lockfile
 pnpm build
-pnpm mcode --help
-pnpm mcode
+pnpm ncode --help
+pnpm ncode
 ```
 
 If your Node.js installation does not include Corepack, install the exact pnpm version using your existing package manager. Native dependencies without matching prebuilt binaries require C/C++ build tools and Python: the C++ workload in Visual Studio Build Tools on Windows, Command Line Tools on macOS, or the system build toolchain on Linux.
@@ -34,13 +34,14 @@ To use the CLI in another project, open that project's directory and run the bui
 node /absolute/path/to/your-checkout/dist/cli.js
 ```
 
-On Windows, also use `node` with the appropriate local absolute path. Do not overwrite another globally installed command with this source build.
+On Windows, use `node` with the appropriate local absolute path. Builds from
+this checkout use the `ncode` command and include `mcode` for existing clients.
 
 ## Local daemon
 
 Terminal, headless, and ACP sessions start or reuse a local daemon for the
 selected data directory. The daemon keeps running after the client exits.
-Inspect it with `mcode daemon status`, or stop it with `mcode daemon stop`.
+Inspect it with `ncode daemon status`, or stop it with `ncode daemon stop`.
 Use the same `--profile` as the client. A normal stop refuses to interrupt
 active work.
 

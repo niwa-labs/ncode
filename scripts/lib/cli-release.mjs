@@ -15,6 +15,16 @@ export function isUpstreamCliSource(manifest) {
   return manifest.name === 'minimax-code';
 }
 
+export function cliReleaseIdentity(manifest) {
+  return isUpstreamCliSource(manifest)
+    ? { packageName: '@minimax-ai/code', command: 'mcode', archiveBase: 'minimax-code', title: 'MiniMax Code' }
+    : { packageName: manifest.name, command: 'ncode', archiveBase: 'ncode', title: 'Ncode' };
+}
+
+export function cliReleaseArchiveName(manifest, version) {
+  return `${cliReleaseIdentity(manifest).archiveBase}-${version}.tar.gz`;
+}
+
 export function assertUpstreamCliPublication(root) {
   const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
   if (!isUpstreamCliSource(manifest)) {

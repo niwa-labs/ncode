@@ -595,7 +595,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         : {}),
       agentInfo: {
         name: 'minimax-code',
-        title: 'MiniMax Code',
+        title: 'Ncode · MiniMax',
         version: options.version,
       },
       _meta: {

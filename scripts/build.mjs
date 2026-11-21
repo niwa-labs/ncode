@@ -18,11 +18,12 @@ import { shouldCopyTuiRuntimeResource } from "./lib/tui-package-privacy.mjs";
 import { TUI_DISABLED_BUILTIN_SKILL_NAMES } from "./lib/builtin-skills.mjs";
 import { copyMcodeToolsArtifact } from './lib/mcode-tools-artifact.mjs';
 import { readExtraction } from "./lib/release-metadata.mjs";
-import { cliBuildVersion, cliExternalModules, isUpstreamCliSource } from './lib/cli-release.mjs';
+import { cliBuildVersion, cliExternalModules, cliReleaseIdentity, isUpstreamCliSource } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const metadata = readExtraction(root);
 const sourceManifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+const cliIdentity = cliReleaseIdentity(sourceManifest);
 const packages = new Map(
   metadata.packageRoots.map((directory) => {
     const manifest = JSON.parse(
@@ -196,14 +197,14 @@ writeFileSync(
   JSON.stringify(result.metafile, null, 2) + "\n",
 );
 console.log(
-  `Built MiniMax Code ${version} from ${Object.keys(result.metafile.inputs).length} source files.`,
+  `Built ${cliIdentity.title} ${version} from ${Object.keys(result.metafile.inputs).length} source files.`,
 );
 
 writeFileSync(
   path.join(outdir, "package.json"),
   JSON.stringify(
     {
-      name: "@minimax-ai/code", version, type: "module", private: true,
+      name: cliIdentity.packageName, version, type: "module", private: true,
       ...(process.env.MCODE_RELEASE_TAG ? {
         gitHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
       } : {}),

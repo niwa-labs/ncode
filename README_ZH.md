@@ -1,6 +1,6 @@
-# MCode · Niwa Labs
+# Ncode · Niwa Labs
 
-Niwa Labs 维护的 MiniMax Code 分支，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
+Ncode 是 Niwa Labs 维护的 MiniMax Code 分支，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·
@@ -33,11 +33,11 @@ Niwa Labs 维护的 MiniMax Code 分支，支持终端、无界面运行和 ACP�
 node scripts/check-windows-source-location.mjs
 pnpm install --frozen-lockfile
 pnpm build
-pnpm mcode --version
+pnpm ncode --version
 ```
 
-在工作目录中运行 `pnpm mcode`，或在其他目录中用 Node.js 运行构建后的
-`dist/cli.js`。下文用 `mcode` 指代构建后的 CLI。MiniMax 官方安装器、软件包和更新渠道属于
+在工作目录中运行 `pnpm ncode`，或在其他目录中用 Node.js 运行构建后的
+`dist/cli.js`。下文用 `ncode` 指代构建后的 CLI，现有集成仍可使用 `mcode`。MiniMax 官方安装器、软件包和更新渠道属于
 [上游项目](https://github.com/MiniMax-AI/minimax-code)。要更新此分支，请切换到较新的源码版本并重新构建。
 
 ### 2. 登录账号或配置 API Key
@@ -45,16 +45,16 @@ pnpm mcode --version
 中国大陆账号运行：
 
 ```bash
-mcode login
+ncode login
 ```
 
 Global 账号运行：
 
 ```bash
-mcode login --region global
+ncode login --region global
 ```
 
-在浏览器中完成登录，再启动 `mcode`，通过 `/status` 检查账号、通过 `/provider` 选择模型。退出登录使用 `mcode logout`。
+在浏览器中完成登录，再启动 `ncode`，通过 `/status` 检查账号、通过 `/provider` 选择模型。退出登录使用 `ncode logout`。
 
 Token Plan 需要账号与可用额度。从本仓库构建的版本与已发布的 npm CLI `@minimax-ai/code@0.6.9` 均默认将用户数据保存在 `~/.minimax`（选择 profile 时为 `~/.minimax-<profile>`）。`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 可以覆盖数据目录。安装脚本使用的 `~/.minimax-code` 安装目录与数据目录的选择是两回事。查找或删除配置和会话前，请参阅[账号与数据](docs/installation.md#accounts-and-data)。
 
@@ -64,13 +64,13 @@ Token Plan 需要账号与可用额度。从本仓库构建的版本与已发布
 BYOK 无需先登录 MiniMax。先在当前 shell 中设置 `MCODE_PROVIDER_API_KEY`，再添加提供方；将下方示例地址和模型名替换为实际配置：
 
 ```bash
-mcode provider add --name my-provider --base-url https://example.com/v1 \
+ncode provider add --name my-provider --base-url https://example.com/v1 \
   --api-format openai-completions --model my-model \
   --api-key-env MCODE_PROVIDER_API_KEY --use
-mcode
+ncode
 ```
 
-`--use` 会先测试第一个模型，成功后保存并设为默认模型；连接测试失败时不保存。省略 `--use` 则仅保存，不测试，也不改变默认模型。对于自定义或本地模型，可添加 `--context-limit 32768 --output-limit 4096`（请填写服务器的实际限制）。两个值都必须是正安全整数，并应用于所有重复指定的 `--model`。可通过 `mcode provider list --json` 查看已配置的限制。省略这两个参数时保持现有的模型限制默认值。
+`--use` 会先测试第一个模型，成功后保存并设为默认模型；连接测试失败时不保存。省略 `--use` 则仅保存，不测试，也不改变默认模型。对于自定义或本地模型，可添加 `--context-limit 32768 --output-limit 4096`（请填写服务器的实际限制）。两个值都必须是正安全整数，并应用于所有重复指定的 `--model`。可通过 `ncode provider list --json` 查看已配置的限制。省略这两个参数时保持现有的模型限制默认值。
 
 支持 `openai-completions`、`openai-responses` 和 `anthropic-messages`。连接测试、单次模型切换及环境变量设置见 [模型示例](docs/examples.md#2-choose-your-own-model)。
 
@@ -88,7 +88,7 @@ cd ../my-pocket-pet
 node serve.mjs
 ```
 
-打开 `http://127.0.0.1:4173`。另开一个终端，在 `my-pocket-pet` 目录运行 `mcode`，依次粘贴[第一条提示词](examples/pocket-pet/README.md#first-request)和[追加需求](examples/pocket-pet/README.md#change-the-requirement)，每次修改后刷新浏览器。
+打开 `http://127.0.0.1:4173`。另开一个终端，在 `my-pocket-pet` 目录运行 `ncode`，依次粘贴[第一条提示词](examples/pocket-pet/README.md#first-request)和[追加需求](examples/pocket-pet/README.md#change-the-requirement)，每次修改后刷新浏览器。
 
 想先体验成品？在仓库根目录运行 `node examples/pocket-pet/serve.mjs finished`，打开同一地址。加上 `?demo=1` 可体验有明确标识的 10 秒演示模式。
 
@@ -101,36 +101,36 @@ node serve.mjs
 
 ```bash
 cd /path/to/your/project
-mcode
+ncode
 ```
 
 在 TUI 中描述任务，也可以在启动时直接提交：
 
 ```bash
-mcode "Find a failing test, fix the implementation, and run the relevant tests."
+ncode "Find a failing test, fix the implementation, and run the relevant tests."
 ```
 
-使用 `mcode init .` 生成或更新 `AGENTS.md` 项目指导。任务中应说明期望结果、修改边界和验证方式。
+使用 `ncode init .` 生成或更新 `AGENTS.md` 项目指导。任务中应说明期望结果、修改边界和验证方式。
 
 | 入口 | 命令 | 适用场景 |
 | --- | --- | --- |
-| 交互式 TUI | `mcode [prompt]` | 探索代码、持续对话、审阅修改与权限确认。 |
-| Headless | `mcode exec [prompt]` | Shell、CI、批处理与评测。 |
-| ACP | `mcode acp` | 支持 Agent Client Protocol 的编辑器与客户端。 |
-| TypeScript SDK | [`@minimax-ai/code-sdk`](packages/code-sdk/README.md) | 在 Node.js 代码中驱动 `mcode exec`：启动、流式读取和续跑对话。 |
+| 交互式 TUI | `ncode [prompt]` | 探索代码、持续对话、审阅修改与权限确认。 |
+| Headless | `ncode exec [prompt]` | Shell、CI、批处理与评测。 |
+| ACP | `ncode acp` | 支持 Agent Client Protocol 的编辑器与客户端。 |
+| TypeScript SDK | [`@minimax-ai/code-sdk`](packages/code-sdk/README.md) | 在 Node.js 代码中驱动 `ncode exec`：启动、流式读取和续跑对话。 |
 
 ### 轻量对话
 
 对于简单对话或通用知识问答，可用 `--mode lightweight` 创建新会话：
 
 ```bash
-mcode --mode lightweight "解释 DNS 缓存的工作原理。"
-mcode exec --mode lightweight "概述 CAP 定理。"
+ncode --mode lightweight "解释 DNS 缓存的工作原理。"
+ncode exec --mode lightweight "概述 CAP 定理。"
 ```
 
 轻量模式只发送精简的对话系统提示词，不发送工具 schema，并从提供方上下文中省略工作区
 指令、Skills、memory 块、MCP schema 和完整环境块，因此不能检查或修改本地文件。需要编程或工具能力时，请使用
-`mcode --mode standard` 或 `mcode exec --mode standard` 创建新的标准会话；省略 `--mode`
+`ncode --mode standard` 或 `ncode exec --mode standard` 创建新的标准会话；省略 `--mode`
 与标准模式完全一致。
 
 模式在根会话创建时固定，因此 `--mode lightweight` 不能与 `--session` 或 `--continue`
@@ -144,10 +144,10 @@ mcode exec --mode lightweight "概述 CAP 定理。"
 
 ```bash
 # 恢复当前工作区最近的会话
-mcode --continue
+ncode --continue
 
 # 打开会话选择器
-mcode --session
+ncode --session
 ```
 
 在 TUI 中输入 `/sessions` 查找历史会话，输入 `/help` 查看完整命令与快捷键。
@@ -229,23 +229,23 @@ profile 使用 `~/.minimax-<profile>`；`MINIMAX_DATA_DIR` 或 `MAVIS_DATA_DIR` 
 
 ## 从源码构建
 
-开发 MCode 或运行本仓库源码需要 Git、Node.js **22.19+（22 系列）、24.2+（24 系列）、25 或 26**，以及 **pnpm 9.12.0**。在 Windows 上，请将源码放在本地 NTFS 卷上，并避开云同步目录；下面的预检命令会在 pnpm 创建 workspace link 前检查卷类型。
+开发 Ncode 或运行本仓库源码需要 Git、Node.js **22.19+（22 系列）、24.2+（24 系列）、25 或 26**，以及 **pnpm 9.12.0**。在 Windows 上，请将源码放在本地 NTFS 卷上，并避开云同步目录；下面的预检命令会在 pnpm 创建 workspace link 前检查卷类型。
 ```bash
 node scripts/check-windows-source-location.mjs
 pnpm install --frozen-lockfile
 pnpm build
-pnpm mcode
+pnpm ncode
 ```
 
 首次构建需要联网；依赖和经过校验的 `mcode-tools` 均来自公共 npm。pnpm 安装、系统依赖和更新方法见[源码安装指南](docs/installation.md)。
 
-从源码目录运行时，将上方示例中的 `mcode` 替换为 `pnpm mcode`。要在自己的项目中工作，先切换到项目目录，再运行构建产物：
+从源码目录运行时，将上方示例中的 `ncode` 替换为 `pnpm ncode`。要在自己的项目中工作，先切换到项目目录，再运行构建产物：
 
 ```bash
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-本仓库构建 **Niwa Labs MCode 0.7.2**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
+本仓库构建 **Niwa Labs Ncode 0.7.2**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
 
 ## 文档与贡献
 

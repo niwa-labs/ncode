@@ -1,7 +1,7 @@
-# MCode ACP
+# Ncode ACP
 
 Build the Niwa Labs fork using the [source instructions](../../README.md#quick-start).
-Then run `pnpm mcode acp` in the checkout. An editor can start the same server by
+Then run `pnpm ncode acp` in the checkout. An editor can start the same server by
 running `node` with the absolute path to the checkout's `dist/cli.js` and the
 `acp` argument.
 

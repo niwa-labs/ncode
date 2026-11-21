@@ -6,10 +6,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { versionFromTag } from './lib/cli-release.mjs';
+import { cliReleaseIdentity, versionFromTag } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const version = versionFromTag(process.env.MCODE_RELEASE_TAG);
+const identity = cliReleaseIdentity(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')));
 if (!process.env.MCODE_RELEASE_ARCHIVE) throw new Error('MCODE_RELEASE_ARCHIVE is required.');
 if (!['linux', 'darwin'].includes(process.platform)) throw new Error('Package validation currently supports Linux and macOS.');
 const archive = path.resolve(process.env.MCODE_RELEASE_ARCHIVE);
@@ -41,13 +42,16 @@ try {
     '--registry=https://registry.npmjs.org/', '--include=optional', '--ignore-scripts=false',
     '--allow-scripts=better-sqlite3', '--no-audit', '--no-fund', archive],
   { cwd: home, env, stdio: 'inherit', timeout: 300000 });
-  const installed = path.join(prefix, 'lib/node_modules/@minimax-ai/code');
+  const installed = path.join(prefix, 'lib/node_modules', identity.packageName);
   const release = JSON.parse(readFileSync(path.join(installed, 'release.json'), 'utf8'));
   assert.equal(release.version, version);
   assert.equal(release.tag, process.env.MCODE_RELEASE_TAG);
   assert.equal(release.revision, revision);
-  const result = execFileSync(path.join(prefix, 'bin/mcode'), ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
-  assert.equal(result.trim(), version);
+  for (const command of new Set([identity.command, 'mcode'])) {
+    const launcher = path.join(prefix, 'bin', command);
+    const result = execFileSync(launcher, ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.trim(), version);
+  }
   const require = createRequire(path.join(installed, 'package.json'));
   const Database = require('better-sqlite3');
   const db = new Database(':memory:');

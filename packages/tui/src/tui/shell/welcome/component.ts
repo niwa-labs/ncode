@@ -64,7 +64,7 @@ export class TuiWelcome implements Component {
   private renderFrame(width: number, height: number, staticBanner: boolean): string[] {
     const safeWidth = normalizeWidth(width);
     if (safeWidth === 0) return [];
-    if (safeWidth < 4) return [fitLine('M', safeWidth)];
+    if (safeWidth < 4) return [fitLine('N', safeWidth)];
 
     const policy = resolveTuiLayoutPolicy(safeWidth);
     const options = { keybindings: this.keybindings, content: this.content, staticBanner };
@@ -173,11 +173,7 @@ function renderCompactWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderFrameHeader(
-      `${chalk.bold.hex(colors.brand)('MCode')} ${chalk.hex(colors.muted)(`v${state.version}${buildChannelSuffix()}`)}`,
-      staticBanner ? '' : renderActivity(state),
-      width,
-    ),
+    renderWelcomeHeader(state, width, staticBanner),
     ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameRow(renderSectionTitle('Tips'), width),
     ...tips.map((text) =>
@@ -190,8 +186,11 @@ function renderCompactWelcome(
 }
 
 function renderWelcomeHeader(state: TuiShellState, width: number, staticBanner: boolean): string {
+  const title = width >= 30 ? 'Ncode · MiniMax' : 'Ncode';
+  const brand = chalk.bold.hex(colors.brand)(title);
+  const version = chalk.hex(colors.muted)(`v${state.version}${buildChannelSuffix()}`);
   return renderFrameHeader(
-    chalk.hex(colors.muted)(`v${state.version}${buildChannelSuffix()}`),
+    `${brand} ${version}`,
     staticBanner ? '' : renderActivity(state),
     width,
   );

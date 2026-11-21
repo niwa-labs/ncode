@@ -487,7 +487,8 @@ test('npm release manifests require native SQLite and pin installed external dep
   const manifest = releaseManifest([f.root], '0.4.13');
   assert.equal(manifest.version, '0.4.13');
   assert.equal(manifest.private, true);
-  assert.equal(manifest.bin.mcode, 'cli.js');
+  assert.equal(manifest.name, '@niwa-labs/ncode');
+  assert.deepEqual(manifest.bin, { ncode: 'cli.js', mcode: 'cli.js' });
   assert.equal(manifest.dependencies['better-sqlite3'], '1.2.3');
   assert.equal(manifest.dependencies['@vscode/ripgrep'], '1.2.3');
   assert.equal(manifest.optionalDependencies['@mariozechner/clipboard'], '1.2.3');
@@ -563,7 +564,9 @@ test('CLI release publishes only upstream tag pushes after verification and inst
   assert.equal(workflow.jobs.publish.permissions.contents, 'write');
   assert.equal(workflow.jobs.install.strategy.matrix, '${{ fromJSON(needs.build.outputs.matrix) }}');
   const install = workflow.jobs.install.steps.find(step => step.run === 'pnpm verify --profile package');
-  assert.ok(install.env.MCODE_RELEASE_ARCHIVE.endsWith('.tar.gz'));
+  assert.equal(workflow.jobs.build.outputs.archive, '${{ steps.release.outputs.archive }}');
+  assert.ok(workflow.jobs.build.steps.some(step => step.run?.includes('cliReleaseArchiveName(source, version)')));
+  assert.equal(install.env.MCODE_RELEASE_ARCHIVE, '${{ runner.temp }}/package/${{ needs.build.outputs.archive }}');
   for (const job of Object.values(workflow.jobs)) {
     for (const step of job.steps) {
       if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[a-f0-9]{40}$/);

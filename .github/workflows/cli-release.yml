@@ -34,6 +34,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       matrix: ${{ steps.release.outputs.matrix }}
       tag: ${{ steps.release.outputs.tag }}
+      archive: ${{ steps.release.outputs.archive }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -48,7 +49,17 @@ jobs:
         id: release
         shell: bash
         run: |
-          node --input-type=module -e 'import { appendFileSync } from "node:fs"; import { cliBuildVersion, cliReleaseTargets } from "./scripts/lib/cli-release.mjs"; const tag = process.env.REQUESTED_TAG || `v${cliBuildVersion(process.cwd())}`; const version = cliBuildVersion(process.cwd(), tag); appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ntag=${tag}\nmatrix=${JSON.stringify({include: cliReleaseTargets})}\n`); appendFileSync(process.env.GITHUB_ENV, `MCODE_RELEASE_TAG=${tag}\n`);'
+          node --input-type=module <<'JS'
+          import { appendFileSync, readFileSync } from "node:fs";
+          import { cliBuildVersion, cliReleaseArchiveName, cliReleaseTargets } from "./scripts/lib/cli-release.mjs";
+          const source = JSON.parse(readFileSync("package.json", "utf8"));
+          const tag = process.env.REQUESTED_TAG || `v${cliBuildVersion(process.cwd())}`;
+          const version = cliBuildVersion(process.cwd(), tag);
+          const archive = cliReleaseArchiveName(source, version);
+          const matrix = JSON.stringify({ include: cliReleaseTargets });
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ntag=${tag}\narchive=${archive}\nmatrix=${matrix}\n`);
+          appendFileSync(process.env.GITHUB_ENV, `MCODE_RELEASE_TAG=${tag}\n`);
+          JS
           if [ "$EVENT_NAME" = push ]; then
             test "$(git rev-parse "refs/tags/$REQUESTED_TAG^{commit}")" = "$(git rev-parse HEAD)"
           fi
@@ -104,7 +115,7 @@ jobs:
           path: ${{ runner.temp }}/package
       - run: pnpm verify --profile package
         env:
-          MCODE_RELEASE_ARCHIVE: ${{ runner.temp }}/package/minimax-code-${{ needs.build.outputs.version }}.tar.gz
+          MCODE_RELEASE_ARCHIVE: ${{ runner.temp }}/package/${{ needs.build.outputs.archive }}
           MCODE_VERIFY_REPORT_DIR: ${{ runner.temp }}/install-report
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: ${{ always() }}

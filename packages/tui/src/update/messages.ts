@@ -1,6 +1,6 @@
 import { translateRuntimeText } from '@mavis/shared/runtime-i18n';
 
-export const MCODE_SOURCE_UPDATE_MESSAGE = 'Update MCode by rebuilding a newer Niwa Labs source checkout.';
+export const MCODE_SOURCE_UPDATE_MESSAGE = 'Update Ncode by rebuilding a newer Niwa Labs source checkout.';
 
 export function mcodePrefixActivationScheduledMessage(
   _environment: NodeJS.ProcessEnv = process.env,

@@ -97,8 +97,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       : defaultRunProfile(request);
   const program = applyInteractiveCliContract(
     new Command()
-      .name('mcode')
-      .description('Minimax Code — terminal coding agent')
+      .name('ncode')
+      .description('Ncode — terminal coding agent for MiniMax')
       .version(options.version)
       .enablePositionalOptions(),
     { allowStartupEnvironmentSelection: options.allowStartupEnvironmentSelection },
