@@ -35,6 +35,7 @@
     "test:release-tools": "node --test test/source-sync.test.mjs",
     "lint": "pnpm run lint:tui",
     "lint:tui": "eslint packages/tui/src packages/tui/test --ext .ts,.mjs --quiet",
+    "test:port-deps": "node scripts/run-vitest-suite.mjs port-deps",
     "test:port-conformance": "node scripts/run-port-conformance.mjs"
   },
   "devDependencies": {

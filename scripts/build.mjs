@@ -1,7 +1,6 @@
 import { build } from "esbuild";
 import {
   readFileSync,
-  existsSync,
   mkdirSync,
   rmSync,
   cpSync,
@@ -17,6 +16,7 @@ import { createTuiBundleModuleLocationConfig } from "./lib/tui-npm-bundle-profil
 import { shouldCopyTuiRuntimeResource } from "./lib/tui-package-privacy.mjs";
 import { TUI_DISABLED_BUILTIN_SKILL_NAMES } from "./lib/builtin-skills.mjs";
 import { copyMcodeToolsArtifact } from './lib/mcode-tools-artifact.mjs';
+import { workspacePackageExports, resolveExportSpecifier } from "./lib/package-exports.mjs";
 import { readExtraction } from "./lib/release-metadata.mjs";
 import { cliBuildVersion, cliExternalModules, cliReleaseIdentity, isUpstreamCliSource } from './lib/cli-release.mjs';
 
@@ -24,14 +24,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const metadata = readExtraction(root);
 const sourceManifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const cliIdentity = cliReleaseIdentity(sourceManifest);
-const packages = new Map(
-  metadata.packageRoots.map((directory) => {
-    const manifest = JSON.parse(
-      readFileSync(path.join(root, directory, "package.json"), "utf8"),
-    );
-    return [manifest.name, { directory, manifest }];
-  }),
-);
+const packages = workspacePackageExports(root, metadata.packageRoots);
 const location = createTuiBundleModuleLocationConfig();
 const outdir = path.join(root, "dist");
 rmSync(outdir, { recursive: true, force: true });
@@ -39,45 +32,6 @@ mkdirSync(outdir, { recursive: true });
 
 // Bundle checked-in workspace sources and resolve npm dependencies from each importer.
 // Native and optional platform integrations keep their installed module locations.
-
-/**
- * Resolve `subpath` against the wildcard patterns of a package export map
- * (`"./utils/*"`), substituting the matched suffix into every target string.
- * Exact entries win (checked by the caller first); among patterns the longest
- * prefix matches first — the same preference Node's resolver applies.
- */
-function matchWildcardExport(exports, subpath) {
-  if (exports === undefined || typeof exports !== "object") return undefined;
-  const patterns = Object.entries(exports)
-    .filter(([pattern]) => pattern.includes("*"))
-    .sort((a, b) => b[0].length - a[0].length);
-  for (const [pattern, entry] of patterns) {
-    const star = pattern.indexOf("*");
-    const prefix = pattern.slice(0, star);
-    const suffix = pattern.slice(star + 1);
-    if (
-      subpath.startsWith(prefix) &&
-      subpath.endsWith(suffix) &&
-      subpath.length >= prefix.length + suffix.length
-    ) {
-      const matched = subpath.slice(
-        prefix.length,
-        subpath.length - suffix.length,
-      );
-      const substitute = (value) =>
-        typeof value === "string" ? value.replaceAll("*", matched) : value;
-      if (typeof entry === "string") return substitute(entry);
-      if (entry !== null && typeof entry === "object") {
-        const mapped = {};
-        for (const [condition, target] of Object.entries(entry)) {
-          mapped[condition] = substitute(target);
-        }
-        return mapped;
-      }
-    }
-  }
-  return undefined;
-}
 
 const sourcePlugin = {
   name: "standalone-workspace-sources",
@@ -87,39 +41,11 @@ const sourcePlugin = {
       const name = specifier.startsWith("@")
         ? parts.slice(0, 2).join("/")
         : parts[0];
-      const pkg = packages.get(name);
-      if (!pkg) return undefined;
-      const subpath =
-        specifier === name ? "." : `.${specifier.slice(name.length)}`;
-      const exports = pkg.manifest.exports;
-      const exported =
-        exports?.[subpath] ?? (subpath === "." ? exports : undefined);
-      // W02: vendored pi packages use wildcard export patterns
-      // (`"./utils/*": { "import": "./dist/utils/*.js" }`) — expand the
-      // pattern when the exact subpath has no entry, so a source-graph
-      // dependency on pi-durable/chord (whose sources import pi-ai
-      // `utils/*` subpaths) resolves through the same export map the
-      // package itself defines.
-      const resolvedExport = exported ?? matchWildcardExport(exports, subpath);
-      const target =
-        (typeof resolvedExport === "string"
-          ? resolvedExport
-          : (resolvedExport?.types ?? resolvedExport?.import ?? resolvedExport?.default)) ??
-        (subpath === "." ? pkg.manifest.types : undefined);
-      if (typeof target !== "string" || !target.startsWith("./"))
-        throw new Error(`Unmapped workspace export: ${specifier}`);
-      const source = target
-        .replace(/^\.\/dist\//, "./src/")
-        .replace(/\.d\.ts$/, ".ts")
-        .replace(/\.js$/, ".ts");
-      const directory = path.join(root, pkg.directory);
-      const resolved = path.resolve(directory, source);
-      if (
-        path.relative(directory, resolved).startsWith("..") ||
-        !existsSync(resolved)
-      )
-        throw new Error(`Missing workspace source: ${specifier}`);
-      return { path: resolved };
+      const entries = packages.get(name);
+      if (!entries) return undefined;
+      const file = resolveExportSpecifier(root, entries, specifier);
+      if (!file) throw new Error(`Unmapped workspace export: ${specifier}`);
+      return { path: path.join(root, file) };
     });
   },
 };

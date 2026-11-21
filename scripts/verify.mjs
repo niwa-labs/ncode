@@ -60,6 +60,7 @@ const steps = [
   // The standalone compile above starts from the distribution's entry points.
   { name: "typecheck:packages", script: "typecheck:packages", fullOnly: true },
   { name: "build", script: "build", windows: true },
+  { name: "test:port-deps", script: "test:port-deps" },
   { name: "check:standalone", script: "check:standalone", windows: true },
   { name: "test:artifact", script: "test:artifact", windows: true },
   { name: "test:capabilities", script: "test:capabilities" },
