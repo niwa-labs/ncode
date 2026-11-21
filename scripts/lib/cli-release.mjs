@@ -11,9 +11,13 @@ export function versionFromTag(tag) {
   return tag.slice(1);
 }
 
+export function isUpstreamCliSource(manifest) {
+  return manifest.name === 'minimax-code';
+}
+
 export function assertUpstreamCliPublication(root) {
   const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-  if (manifest.name !== 'minimax-code') {
+  if (!isUpstreamCliSource(manifest)) {
     throw new Error('CLI publication is reserved for upstream MiniMax Code.');
   }
 }

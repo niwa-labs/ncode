@@ -18,10 +18,11 @@ import { shouldCopyTuiRuntimeResource } from "./lib/tui-package-privacy.mjs";
 import { TUI_DISABLED_BUILTIN_SKILL_NAMES } from "./lib/builtin-skills.mjs";
 import { copyMcodeToolsArtifact } from './lib/mcode-tools-artifact.mjs';
 import { readExtraction } from "./lib/release-metadata.mjs";
-import { cliBuildVersion, cliExternalModules } from './lib/cli-release.mjs';
+import { cliBuildVersion, cliExternalModules, isUpstreamCliSource } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const metadata = readExtraction(root);
+const sourceManifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 const packages = new Map(
   metadata.packageRoots.map((directory) => {
     const manifest = JSON.parse(
@@ -160,6 +161,7 @@ const result = await build({
     __CLI_VERSION__: JSON.stringify(version),
     __CLI_CHANNEL__: '"source"',
     __IS_NPM_BUILD__: "true",
+    __NIWA_LABS_SOURCE_BUILD__: JSON.stringify(!isUpstreamCliSource(sourceManifest)),
     __BUILD_PROFILE__: '"tui"',
     __TUI_BUILD_ENV__: '"prod"',
     __TUI_BUILD_VARIANT__: '"standard"',

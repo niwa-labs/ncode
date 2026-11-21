@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { c as createTar } from 'tar';
-import { cliBuildVersion, cliExternalModules } from './lib/cli-release.mjs';
+import { cliBuildVersion, cliExternalModules, isUpstreamCliSource } from './lib/cli-release.mjs';
 import { readExtraction, dependencyLicensesPath } from './lib/release-metadata.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -54,7 +54,7 @@ function copyLicenses(stage) {
 
 export function releaseManifest(importers, version) {
   const source = json(path.join(root, 'package.json'));
-  const upstream = source.name === 'minimax-code';
+  const upstream = isUpstreamCliSource(source);
   const repository = source.repository ?? (upstream
     ? { type: 'git', url: 'https://github.com/MiniMax-AI/minimax-code.git' }
     : undefined);

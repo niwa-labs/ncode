@@ -10,6 +10,7 @@ import {
   bindMcodeNpmCommandToRuntime,
   createMcodeNpmRuntimeEnvironment,
   detectMcodeInstallSource,
+  isNiwaLabsSourceBuild,
   resolveMcodeNpmDistribution,
   resolveMcodeNpmDistTag,
   resolveMcodeNpmPrefixInstall,
@@ -72,6 +73,7 @@ interface McodePackageManagerVersionPlan {
 }
 
 export type McodeUpdatePlan =
+  | { readonly kind: 'source-build' }
   | (McodeManagedUpdatePlan & { readonly kind: 'current' })
   | (McodeManagedUpdatePlan & { readonly kind: 'ahead' })
   | (McodeManagedUpdatePlan & { readonly kind: 'available' })
@@ -242,6 +244,7 @@ export class McodeUpdateApplication {
   }
 
   async inspect(): Promise<McodeUpdatePlan> {
+    if (isNiwaLabsSourceBuild()) return { kind: 'source-build' };
     const source = await this.dependencies.detectInstallSource();
     if (source === 'managed-installer') {
       const result = await this.dependencies.createManagedService().check();
@@ -326,7 +329,8 @@ export class McodeUpdateApplication {
     plan: McodeUpdatePlan,
     options: McodeUpdateApplyOptions = {},
   ): Promise<McodeUpdateOutcome> {
-    if (plan.kind === 'manual' || plan.kind === 'current' || plan.kind === 'ahead') {
+    if (isNiwaLabsSourceBuild() || plan.kind === 'source-build' || plan.kind === 'manual' ||
+        plan.kind === 'current' || plan.kind === 'ahead') {
       throw new Error(`MCode update plan ${plan.kind} cannot be applied automatically.`);
     }
     if (plan.kind === 'available') {

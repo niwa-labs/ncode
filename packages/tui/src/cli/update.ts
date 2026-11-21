@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline/promises';
 import { stripVTControlCharacters } from 'node:util';
 import { McodeUpdateApplication, type McodeUpdatePlan } from '../update/application.js';
 import {
+  MCODE_SOURCE_UPDATE_MESSAGE,
   mcodePrefixActivationScheduledMessage,
   mcodePrefixJournalScheduleFailedMessage,
 } from '../update/messages.js';
@@ -50,6 +51,10 @@ export async function runMcodeUpdate(
         plan.source === 'managed-installer' ? plan.channel : `@${plan.packageTag}`
       } ${plan.latestVersion}; no update was applied.\n`,
     );
+    return;
+  }
+  if (plan.kind === 'source-build') {
+    write(`${MCODE_SOURCE_UPDATE_MESSAGE}\n`);
     return;
   }
   if (plan.kind === 'manual') {

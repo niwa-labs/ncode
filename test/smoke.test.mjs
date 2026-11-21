@@ -59,6 +59,7 @@ test("CLI version and command help work outside the source directory", (t) => {
     [["--version"], version],
     [["--help"], "terminal coding agent"],
     [["exec", "--help"], "prompt"],
+    [["update"], "Update MCode by rebuilding a newer Niwa Labs source checkout."],
   ]) {
     const result = spawnSync(process.execPath, [cli, ...args], {
       ...options,

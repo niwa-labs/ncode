@@ -6,6 +6,7 @@ import type {
 import { disposeComponents, type Component } from '../../rendering/component.js';
 import { TuiUpdatePanel } from '../../features/update/panel.js';
 import type { TuiInteractionSurface } from '../../shell/interaction-surface.js';
+import { MCODE_SOURCE_UPDATE_MESSAGE } from '../../../update/messages.js';
 import { McodeUpdateAdmissionError } from '../../../update/progress.js';
 import { formatTuiActionFailure } from '../../../user-facing-failure.js';
 
@@ -117,6 +118,10 @@ export class TuiUpdateFlow {
           plan.source === 'managed-installer' ? plan.channel : `@${plan.packageTag}`
         } ${plan.latestVersion}.`,
       );
+      return;
+    }
+    if (plan.kind === 'source-build') {
+      this.options.append(MCODE_SOURCE_UPDATE_MESSAGE);
       return;
     }
     if (plan.kind === 'manual') {

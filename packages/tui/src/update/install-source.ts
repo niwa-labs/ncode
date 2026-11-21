@@ -20,6 +20,11 @@ type TuiBuildEnvironment = 'test' | 'staging' | 'prod';
 
 declare const __TUI_BUILD_ENV__: TuiBuildEnvironment | undefined;
 declare const __TUI_NPM_DIST_TAG__: McodeNpmDistTag | undefined;
+declare const __NIWA_LABS_SOURCE_BUILD__: boolean | undefined;
+
+export function isNiwaLabsSourceBuild(): boolean {
+  return typeof __NIWA_LABS_SOURCE_BUILD__ !== 'undefined' && __NIWA_LABS_SOURCE_BUILD__;
+}
 
 export type McodePackageManagerInstallSource =
   'npm-global' | 'npm-prefix' | 'pnpm-global' | 'yarn-global' | 'bun-global';

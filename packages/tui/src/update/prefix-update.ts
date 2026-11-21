@@ -11,7 +11,11 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import spawn from 'cross-spawn';
-import { resolveMcodeNpmPrefixInstall, type McodeNpmPackageName } from './install-source.js';
+import {
+  isNiwaLabsSourceBuild,
+  resolveMcodeNpmPrefixInstall,
+  type McodeNpmPackageName,
+} from './install-source.js';
 
 const PENDING_UPDATE_FILE = '.mcode-update-pending.json';
 const ACTIVE_PROCESS_DIRECTORY = '.mcode-active';
@@ -296,6 +300,7 @@ export async function schedulePendingMcodePrefixUpdate(
   restartArgs: readonly string[] = [],
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<boolean> {
+  if (isNiwaLabsSourceBuild()) return false;
   const prefix = resolvePrefixFromEntryFile(entryFile);
   if (!prefix) return false;
   const pendingFile = path.join(prefix, PENDING_UPDATE_FILE);
