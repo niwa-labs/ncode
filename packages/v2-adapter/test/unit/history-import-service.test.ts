@@ -78,8 +78,8 @@ async function writeSession(sourceRoot: string, sessionId: string, lines: readon
 }
 
 /** Raw (id, kind) pairs of the durable log, in order. */
-function logKinds(durableRoot: string): { id: string; kind: string }[] {
-  const backend = SqliteZstdBackend.open(join(durableRoot, 'durable-history'));
+function logKinds(durableRoot: string, sessionId: string): { id: string; kind: string }[] {
+  const backend = SqliteZstdBackend.open(join(durableRoot, 'durable-history', 'sessions', sessionId), { readonly: true });
   try {
     return backend
       .readDelta(0, 256 * 1024 * 1024)
@@ -146,7 +146,7 @@ describe('history import service (R6)', () => {
       expect(result.status).toBe('imported');
       expect(progress.length).toBeGreaterThanOrEqual(2);
       // Durable protocol: begin → chunks → commit, all under the explicit root.
-      const kinds = logKinds(paths.durableRoot).map((entry) => entry.kind);
+      const kinds = logKinds(paths.durableRoot, 'session-run').map((entry) => entry.kind);
       expect(kinds[0]).toBe(SEED_BEGIN_KIND);
       expect(kinds.at(-1)).toBe(SEED_COMMIT_KIND);
       expect(kinds.filter((kind) => kind === SEED_CHUNK_KIND).length).toBeGreaterThanOrEqual(2);
@@ -180,7 +180,7 @@ describe('history import service (R6)', () => {
         durableRoot: paths.durableRoot,
         chunkTargetBytes: 1024,
       });
-      const headsAfterFirst = logKinds(paths.durableRoot).length;
+      const headsAfterFirst = logKinds(paths.durableRoot, 'session-twice').length;
 
       const second = await runHistoryImport({
         sourceDir: source,
@@ -188,7 +188,7 @@ describe('history import service (R6)', () => {
         chunkTargetBytes: 1024,
       });
       expect(second.status).toBe('already-imported');
-      expect(logKinds(paths.durableRoot).length).toBe(headsAfterFirst);
+      expect(logKinds(paths.durableRoot, 'session-twice').length).toBe(headsAfterFirst);
       expect(second.receipt.revision).toBe(first.receipt.revision);
     } finally {
       await paths.dispose();
@@ -209,7 +209,7 @@ describe('history import service (R6)', () => {
         durableRoot: reference.durableRoot,
         chunkTargetBytes: 1024,
       });
-      const referenceIds = logKinds(reference.durableRoot).map((entry) => entry.id);
+      const referenceIds = logKinds(reference.durableRoot, 'session-resume').map((entry) => entry.id);
 
       // Crash: the import dies after two committed chunks.
       await expect(
@@ -220,7 +220,7 @@ describe('history import service (R6)', () => {
           failAfterChunks: 2,
         }),
       ).rejects.toThrow(/simulated crash/);
-      const kindsAfterCrash = logKinds(paths.durableRoot).map((entry) => entry.kind);
+      const kindsAfterCrash = logKinds(paths.durableRoot, 'session-resume').map((entry) => entry.kind);
       expect(kindsAfterCrash).toContain(SEED_BEGIN_KIND);
       expect(kindsAfterCrash).not.toContain(SEED_COMMIT_KIND);
       // The receipt cursor names the last confirmed chunk.
@@ -246,11 +246,11 @@ describe('history import service (R6)', () => {
       });
       expect(resumed.status).toBe('imported');
       expect(resumed.receipt.revision).toBe(referenceRun.receipt.revision);
-      expect(logKinds(paths.durableRoot).map((entry) => entry.id)).toEqual(referenceIds);
+      expect(logKinds(paths.durableRoot, 'session-resume').map((entry) => entry.id)).toEqual(referenceIds);
 
       // The resulting receipt cursor is rebuilt from the log: the real chunk
       // count of the committed import, not the corrupted 99/0 it started from.
-      const finalChunkCount = logKinds(paths.durableRoot).filter(
+      const finalChunkCount = logKinds(paths.durableRoot, 'session-resume').filter(
         (entry) => entry.kind === SEED_CHUNK_KIND,
       ).length;
       expect(finalChunkCount).toBeGreaterThan(2);
@@ -335,13 +335,13 @@ describe('history import service (R6)', () => {
       const cas = await openCas(paths.durableRoot);
       // The image is the last source record, so byte-sized chunking places it
       // in a later chunk — scan every seed chunk for the externalized ref.
-      const chunkEntries = logKinds(paths.durableRoot).filter(
+      const chunkEntries = logKinds(paths.durableRoot, 'session-tamper').filter(
         (entry) => entry.kind === SEED_CHUNK_KIND,
       );
       expect(chunkEntries.length).toBeGreaterThan(1);
       const blob = ((): string => {
         for (const chunkEntry of chunkEntries) {
-          const payload = readChunkPayload(paths.durableRoot, chunkEntry.id);
+          const payload = readChunkPayload(paths.durableRoot, 'session-tamper', chunkEntry.id);
           for (const envelope of payload.envelopes) {
             const content = (envelope as { message?: { content?: unknown } }).message?.content;
             if (!Array.isArray(content)) continue;
@@ -380,7 +380,7 @@ describe('history import service (R6)', () => {
       const receipt = (await readReceipt(receiptPath(paths.durableRoot, 'session-broken')))!;
       expect(receipt.state).toBe('failed');
       // Nothing partial was published.
-      expect(logKinds(paths.durableRoot).map((entry) => entry.kind)).not.toContain(SEED_COMMIT_KIND);
+      expect(logKinds(paths.durableRoot, 'session-broken').map((entry) => entry.kind)).not.toContain(SEED_COMMIT_KIND);
     } finally {
       await paths.dispose();
     }
@@ -388,8 +388,8 @@ describe('history import service (R6)', () => {
 });
 
 /** Reads one chunk entry's payload back from the durable log by entry id. */
-function readChunkPayload(durableRoot: string, entryId: string): { envelopes: unknown[] } {
-  const backend = SqliteZstdBackend.open(join(durableRoot, 'durable-history'));
+function readChunkPayload(durableRoot: string, sessionId: string, entryId: string): { envelopes: unknown[] } {
+  const backend = SqliteZstdBackend.open(join(durableRoot, 'durable-history', 'sessions', sessionId), { readonly: true });
   try {
     const entry = backend
       .readDelta(0, 256 * 1024 * 1024)

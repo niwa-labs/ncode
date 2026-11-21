@@ -11393,7 +11393,7 @@ describe("createTuiApp", () => {
     );
     expect(app.transcript.get("permission:permission-render")).toMatchObject({
       status: "resolved",
-      detail: "Allowed for this conversation · bash",
+      detail: "Allowed once · bash",
     });
     expect(terminal.writes.join("")).not.toContain("\x1b[2J");
     expect(terminal.writes.join("")).not.toContain("\x1b[3J");

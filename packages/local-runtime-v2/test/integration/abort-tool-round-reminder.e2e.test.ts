@@ -275,7 +275,7 @@ function readTurnIngress(hostDataDir: string, sessionId: string): IngressRow[] {
 
 /** Every canonical envelope the durable log holds for the session (all entry kinds). */
 function readDurableEnvelopes(hostDataDir: string, sessionId: string): Record<string, unknown>[] {
-  const backend = SqliteZstdBackend.open(join(hostDataDir, 'durable-history'));
+  const backend = SqliteZstdBackend.open(join(hostDataDir, 'durable-history', 'sessions', sessionId), { readonly: true });
   try {
     const envelopes: Record<string, unknown>[] = [];
     let cursor = 0;

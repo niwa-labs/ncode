@@ -48,11 +48,11 @@ interface PiBreakdownRow {
 // The pinned pi usage-totals (vendored dist, NOT our code) — same oracle as
 // usage-pi-axes.test.ts.
 const PI_CORE = fileURLToPath(
-	new URL('../../../../third_party/pi-mono/packages/coding-agent/dist/core', import.meta.url),
+	new URL('../../../../third_party/pi-mono/packages/coding-agent/src/core', import.meta.url),
 );
 
 async function loadPi(): Promise<(entries: PiEntry[]) => PiBreakdownRow[]> {
-	const usageTotals = (await import(`${PI_CORE}/usage-totals.js`)) as {
+	const usageTotals = (await import(`${PI_CORE}/usage-totals.ts`)) as {
 		getUsageCostBreakdown: (entries: PiEntry[]) => PiBreakdownRow[];
 	};
 	return usageTotals.getUsageCostBreakdown;
