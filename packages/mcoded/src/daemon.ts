@@ -129,6 +129,8 @@ export interface DaemonHubOptions {
 	 * frames answer METHOD_NOT_ALLOWED.
 	 */
 	readonly bridge?: McodedHubOptions['bridge'];
+	/** Reload the shared profile when a window reports an auth change. */
+	readonly onAuthSyncRequested?: McodedHubOptions['onAuthSyncRequested'];
 	/** Live GlobalEvent source for the v2 `subscribe` surface (W3). */
 	readonly globalEvents?: McodedHubOptions['globalEvents'];
 	/** The daemon's prompt mode (`PROMPT_MODE_MISMATCH` handshake check). */
@@ -530,6 +532,7 @@ export class McodedDaemon {
 			? { idleRestartPollMs: this.hubOptions.idleRestartPollMs }
 			: {}),
 		...(this.hubOptions?.bridge ? { bridge: this.hubOptions.bridge } : {}),
+			...(this.hubOptions?.onAuthSyncRequested ? { onAuthSyncRequested: this.hubOptions.onAuthSyncRequested } : {}),
 			...(this.hubOptions?.globalEvents ? { globalEvents: this.hubOptions.globalEvents } : {}),
 			...(this.hubOptions?.promptMode ? { promptMode: this.hubOptions.promptMode } : {}),
 			...(this.hubOptions?.detachedPermission

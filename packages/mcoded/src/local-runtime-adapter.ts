@@ -202,8 +202,8 @@ export interface LocalRuntimeAdapterAuthSession {
 		rejectedAccessToken?: string,
 		loginEpoch?: string,
 	) => Promise<void>;
-	/** Read (and refresh when stale) the profile lease now; `undefined` = signed out. */
-	lease(): Promise<LocalRuntimeAuthContext | undefined>;
+	/** Background reads tolerate outages. Explicit synchronization must distinguish them from logout. */
+	lease(options?: { confirmSignedOut: boolean }): Promise<LocalRuntimeAuthContext | undefined>;
 	/** Drop the background refresh timer. */
 	dispose(): void;
 }
@@ -327,6 +327,14 @@ export class LocalRuntimeV2Adapter implements RuntimeAdapter {
 	/** The Session every submission lands in; set after the first admission. */
 	get currentSessionId(): string | undefined {
 		return this.sessionId;
+	}
+
+	/** Re-read this daemon's profile before applying the host's login/logout lifecycle. */
+	async synchronizeAuthContext(): Promise<void> {
+		const host = this.host;
+		if (!host || !this.authSession) throw new Error('Daemon profile authorization is unavailable');
+		const context = await this.authSession.lease({ confirmSignedOut: true });
+		await host.notifyAuthContextChanged?.(context ? 'authenticated' : 'logged_out');
 	}
 
 	/** Whether the runtime host has been started. */
@@ -1077,7 +1085,7 @@ export function createProfileAuthSession(
 		accessToken: lease.accessToken,
 		...(lease.loginEpoch ? { loginEpoch: lease.loginEpoch } : {}),
 	});
-	const lease = async (): Promise<LocalRuntimeAuthContext | undefined> => {
+	const readLease = async (confirmSignedOut: boolean): Promise<LocalRuntimeAuthContext | undefined> => {
 		try {
 			const refreshed = await core.getAccessToken({
 				requiredScopes: [...MCODE_OAUTH_SCOPES],
@@ -1101,8 +1109,26 @@ export function createProfileAuthSession(
 			// store without a daemon restart.
 			log.warn('auth-lease-unavailable', { profile: logProfile, err: error });
 			scheduleRetry();
+			if (confirmSignedOut) {
+				// Only a committed logout may end plugin sessions. A failed refresh or
+				// a damaged store must never be reported to the host as a logout.
+				const status = requiresInteractiveLogin(error) ? (await core.getStatus()).status : undefined;
+				if (status !== 'anonymous' && status !== 'logout_pending') {
+					throw new Error('Unable to synchronize daemon profile authorization');
+				}
+				cachedLease = undefined;
+			}
 			return undefined;
 		}
+	};
+
+	// A timer or 401 recovery may already be reading the store when a window
+	// requests a sync. Start each read after its predecessor updates the cache.
+	let pendingRead = Promise.resolve();
+	const lease: LocalRuntimeAdapterAuthSession['lease'] = (options) => {
+		const result = pendingRead.then(() => readLease(options?.confirmSignedOut === true));
+		pendingRead = result.then(() => undefined, () => undefined);
+		return result;
 	};
 
 	return {

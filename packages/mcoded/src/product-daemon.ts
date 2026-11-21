@@ -713,6 +713,7 @@ export async function startProductDaemon(
 			},
 			hub: {
 				bridge: new CliBridge({ cliService: () => runtimeAdapter.cliService }),
+				onAuthSyncRequested: () => runtimeAdapter.synchronizeAuthContext(),
 				// W4 (§4.5/D5): the runtime's GlobalEvent bus feeds the v2 subscribe
 				// surface — `permission.ask` push, session events, catalog updates.
 				// Lazy: the CliService exists only after `adapter.start()` below.

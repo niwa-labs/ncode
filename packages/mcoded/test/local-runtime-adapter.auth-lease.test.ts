@@ -20,7 +20,7 @@
  * the boundary's zero-delay reschedule into a loop that cannot exist with a
  * real, advancing clock.
  */
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,8 +45,12 @@ import {
 
 import {
 	createProfileAuthSession,
+	createProfileOAuthCore,
 	type LocalRuntimeAdapterAuthSession,
 } from '../src/local-runtime-adapter.js';
+import { startProductDaemon } from '../src/product-daemon.js';
+import type { CreatedLocalRuntimeHost } from '@mavis/local-runtime-v2/process-local';
+import { createRemoteRuntimeHost } from '../../tui/src/runtime/remote-host.js';
 
 /** Offline endpoints: https scheme is required; loopback port 1 always refuses. */
 const OFFLINE_ENDPOINTS = {
@@ -293,3 +297,50 @@ describe('createProfileAuthSession refresh chain', () => {
 		});
 	});
 });
+
+// Keep real timers for the real socket and profile store. Inspect the lease at
+// the moment the runtime host receives each lifecycle event.
+it('synchronizes a running product daemon on login and logout', async () => {
+	const homeDir = await realpath(await mkdtemp(join(tmpdir(), 'mcoded-auth-sync-')));
+	const env = { HOME: homeDir, ...OFFLINE_ENDPOINTS };
+	const notifications: Array<[string, string | undefined]> = [];
+	let daemon: Awaited<ReturnType<typeof startProductDaemon>> | undefined;
+	let window: Awaited<ReturnType<typeof createRemoteRuntimeHost>> | undefined;
+	try {
+		daemon = await startProductDaemon({
+			env,
+			homeDir,
+			argv: ['--profile', 'default'],
+			prepareMcodeTools: null,
+			createHost: async (options) => ({
+				dataDir: options.dataDir,
+				cliService: { isGoalEnabled: () => false, watchEvents: () => [] },
+				ready: Promise.resolve(),
+				apiHost: { ensureBuiltinAgents: async () => {}, close: async () => {} },
+				metricsClient: { close: async () => {} },
+				notifyAuthContextChanged: (state: string) => {
+					notifications.push([state, options.authContextGetter?.()?.accessToken]);
+				},
+			}) as unknown as CreatedLocalRuntimeHost,
+		});
+		window = await createRemoteRuntimeHost({ dataDir: '', profile: 'default', homeDir, environment: env });
+		await window.ready;
+		await seedSignedInCredential(homeDir, { accessToken: 'offline-1', generation: 1 });
+		await window.notifyAuthContextChanged('authenticated');
+		expect(notifications).toEqual([['authenticated', 'offline-1']]);
+
+		await corruptCredentialStore(homeDir);
+		await expect(window.notifyAuthContextChanged('authenticated')).rejects.toThrow('Unable to synchronize');
+		expect(notifications).toHaveLength(1);
+
+		await seedSignedInCredential(homeDir, { accessToken: 'offline-2', generation: 2 });
+		const core = createProfileOAuthCore({ dataDir: daemon.dataDir, env });
+		await core!.logout({ revoke: false });
+		await window.notifyAuthContextChanged('logged_out');
+		expect(notifications[1]).toEqual(['logged_out', undefined]);
+	} finally {
+		await window?.apiHost.close();
+		await daemon?.stop();
+		await rm(homeDir, { recursive: true, force: true });
+	}
+}, 30_000);
