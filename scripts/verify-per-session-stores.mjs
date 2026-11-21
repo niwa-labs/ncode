@@ -65,7 +65,13 @@ function runChild(args) {
   return new Promise((resolve) => {
     const child = spawn(
       'node',
-      ['--import', join(srcRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'), '-e', WRITE_CODE, '--', ...args],
+      [
+        '--conditions=development',
+        '--conditions=source',
+        '--import',
+        join(srcRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs'),
+        '-e', WRITE_CODE, '--', ...args,
+      ],
       { cwd: packageDir, stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let out = '';

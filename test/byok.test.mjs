@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import {
@@ -17,6 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
@@ -1080,3 +1081,104 @@ function cancellationTest(cancellation) {
     );
   };
 }
+
+test("The default daemon resumes a saved BYOK session after restart", { timeout: 90000 }, async (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "mcode-byok-restart-"));
+  const dataDir = path.join(directory, "data");
+  const home = path.join(directory, "home");
+  const workspace = path.join(directory, "workspace");
+  mkdirSync(home);
+  mkdirSync(workspace);
+  const model = "restart-model";
+  const reply = "RESTART_FIXTURE_OK";
+  const streamedMessages = [];
+  const server = createServer(async (request, response) => {
+    if (request.url === "/v1/responses/input_tokens") {
+      response.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({ object: "response.input_tokens", input_tokens: 10 }),
+      );
+      return;
+    }
+    if (request.url !== "/v1/chat/completions") {
+      response.writeHead(404).end();
+      return;
+    }
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = JSON.parse(raw);
+    const common = { id: "restart-fixture", model, created: 1 };
+    const usage = { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 };
+    if (!body.stream) {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+        ...common, object: "chat.completion", usage,
+        choices: [{ index: 0, message: { role: "assistant", content: reply }, finish_reason: "stop" }],
+      }));
+      return;
+    }
+    streamedMessages.push(body.messages);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    for (const chunk of [
+      { choices: [{ index: 0, delta: { role: "assistant", content: reply }, finish_reason: null }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage },
+    ]) {
+      response.write(`data: ${JSON.stringify({ ...common, object: "chat.completion.chunk", ...chunk })}\n\n`);
+    }
+    response.end("data: [DONE]\n\n");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const networkAudit = path.join(directory, "network-audit.log");
+  const env = withoutProxyEnvironment({
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    MINIMAX_DATA_DIR: dataDir,
+    MAVIS_DATA_DIR: dataDir,
+    MCODE_PROVIDER_API_KEY: "fixture-only-key",
+    MCODE_TEST_ALLOWED_ORIGIN: origin,
+    MCODE_TEST_ALLOW_UNIX_SOCKETS: "1",
+    MCODE_TEST_MANAGED_OFFLINE: "1",
+    MCODE_TEST_NETWORK_AUDIT: networkAudit,
+    NODE_OPTIONS: `--import=${new URL("./network-deny.mjs", import.meta.url).href}`,
+  });
+  delete env.MCODE_SERVER_MODE;
+  delete env.MCODE_HISTORY_PROVIDER;
+  const exec = promisify(execFile);
+  const run = async (...args) => (await exec(process.execPath, [cli, ...args], {
+    cwd: workspace, env, timeout: 30000,
+  })).stdout;
+  t.after(async () => {
+    try {
+      await run("daemon", "stop");
+      assert.equal(existsSync(networkAudit), false, "Unexpected external request");
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  await run(
+    "provider", "add", "--name", "RestartFixture", "--base-url", origin + "/v1",
+    "--api-format", "openai-completions", "--model", model,
+    "--api-key-env", "MCODE_PROVIDER_API_KEY", "--use",
+  );
+  const first = "Remember the COLD_RESTART marker.";
+  const second = "Repeat the marker from the previous turn.";
+  assert.match(await run("exec", first, "--timeout", "20s", "--max-steps", "1"), /RESTART_FIXTURE_OK/);
+  const status = JSON.parse(await run("daemon", "status", "--json"));
+  assert.equal(status.running, true, "Expected the default daemon route");
+  await run("daemon", "stop");
+  assert.equal(JSON.parse(await run("daemon", "status", "--json")).running, false);
+
+  const requestCountBeforeRestart = streamedMessages.length;
+  assert.match(await run("exec", second, "--continue", "--timeout", "20s", "--max-steps", "1"), /RESTART_FIXTURE_OK/);
+  assert.ok(
+    streamedMessages.slice(requestCountBeforeRestart).some((messages) => {
+      const transcript = JSON.stringify(messages);
+      return transcript.includes(first) && transcript.includes(second);
+    }),
+    "The restarted daemon must send both turns to the provider",
+  );
+  assert.equal(readdirSync(path.join(dataDir, "durable-history", "sessions")).length, 1);
+});

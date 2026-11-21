@@ -100,11 +100,9 @@ export interface ProductTurnDriverHostOptions<
   readonly sessions: { readonly get: (sessionId: string) => Promise<SessionRecord | undefined> };
   /** Optional Agent snapshot source (richer model identity). */
   readonly agents?: AgentExecutionSource<TAgent>;
-  /**
-   * The durable canonical history (read-only active inspection plus the
-   * append seam for driver recovery writes).
-   */
+  /** The durable history, including the writer initialization needed before binding. */
   readonly canonicalHistory: {
+    readonly initialize: (sessionId: string) => Promise<void>;
     readonly inspectActive: (sessionId: string) => Promise<{ readonly messages: readonly unknown[] }>;
     readonly append: (change: {
       readonly sessionId: string;
@@ -154,7 +152,12 @@ export function withProductTurnDriver<
     driver,
     store,
     executor: stepExecutor,
-    run: (input) => runDriverBackedTurn(driver, stepExecutor, input),
+    run: async (input) => {
+      // An existing session can reach this host on a fresh daemon before
+      // any history operation has claimed its per-session store.
+      await options.canonicalHistory.initialize(input.lease.sessionId);
+      return runDriverBackedTurn(driver, stepExecutor, input);
+    },
     compact: (input) => options.host.compact(input),
   };
 }
