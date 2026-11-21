@@ -67,6 +67,53 @@ describe("session stream backpressure", () => {
     service.dispose();
   });
 
+  it("does not replay retained assistant deltas after restoring their durable message", async () => {
+    const completed = { msg_id: "answer", role: "assistant", msg_content: "complete answer" };
+    const service = new SessionStreamService({
+      messages: { listAfter: async () => ({ status: "ok", messages: [completed] }) },
+      ring: { maxBytes: 2_000 },
+    });
+    const reader = service.reserve("session");
+    function writeChunk(messageId: string, index: number, content: Record<string, string>) {
+      return service.write({
+        sessionId: "session",
+        turnId: "turn",
+        identity: `${messageId}:${index}`,
+        kind: "runtime-event",
+        data: JSON.stringify({
+          type: 3,
+          agent_message_chunk: { msg_id: messageId, chunk_index: index, ...content },
+        }),
+      }).frame;
+    }
+    writeChunk("answer", 0, { thinking_content: "earlier reasoning ".repeat(150) });
+    writeChunk("answer", 1, { thinking_content: "retained reasoning" });
+    const covered = writeChunk("answer", 2, { msg_content: "retained answer" });
+    const nextStep = writeChunk("next", 0, { msg_content: "live follow-up" });
+    expect((await reader.source.next()).value.kind).toBe("resync-required");
+
+    const recovered = await consume(service.resume({
+      sessionId: "session",
+      afterMsgId: "user",
+      waitForTerminal: false,
+    }));
+    expect(recovered).toEqual([
+      expect.objectContaining({
+        kind: "durable-message",
+        data: completed,
+        cursor: covered.cursor,
+      }),
+      nextStep,
+    ]);
+    expect(await consume(service.resume({
+      sessionId: "session",
+      afterCursor: covered.cursor,
+      waitForTerminal: false,
+    }))).toEqual([nextStep]);
+    reader.close();
+    service.dispose();
+  });
+
   it("wakes a pending reader on retention overflow without throwing", async () => {
     const { service, write } = fixture(1);
     const reserved = service.reserve("session");

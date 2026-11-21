@@ -528,7 +528,7 @@ function stitchDurableReplay(input: StitchDurableReplayInput): SessionFrame[] {
   );
   const replayCursor = lastBoundary < 0 ? undefined : captured[lastBoundary]?.cursor;
   const messages = foldCatchupMessages(catchup, durable);
-  const durableFrames = messages.map((message, index) =>
+  const frames = messages.map((message, index) =>
     durableMessageFrame(
       sessionId,
       message,
@@ -536,7 +536,25 @@ function stitchDurableReplay(input: StitchDurableReplayInput): SessionFrame[] {
       index === messages.length - 1 ? replayCursor : undefined,
     ),
   );
-  return [...durableFrames, ...toFrames(captured.slice(lastBoundary + 1))];
+  const restoredIds = new Set(messages.map(({ msg_id }) => msg_id));
+  // A restored message already includes its text, thinking, and tool calls.
+  // Replaying that message's retained chunks would append them again.
+  for (const { cursor, value: { frame } } of captured.slice(lastBoundary + 1)) {
+    const chunk =
+      frame.kind === 'runtime-event'
+        ? parseRecord(parseRecord(frame.data)?.agent_message_chunk)
+        : undefined;
+    if (typeof chunk?.msg_id !== 'string' || !restoredIds.has(chunk.msg_id)) {
+      frames.push({ ...frame, cursor });
+      continue;
+    }
+    // A reconnect after the preceding delivery must skip these covered cursors.
+    const previous = frames.at(-1);
+    if (previous && previous.kind !== 'turn-terminal') {
+      frames[frames.length - 1] = { ...previous, cursor };
+    }
+  }
+  return frames;
 }
 
 function foldCatchupMessages(
