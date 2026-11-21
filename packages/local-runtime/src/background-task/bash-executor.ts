@@ -17,9 +17,7 @@ export const DEFAULT_LOCAL_BACKGROUND_BASH_EXECUTOR: LocalBackgroundBashExecutor
   async execute() {
     throw Object.assign(
       new Error(
-        'SANDBOX_UNAVAILABLE: background bash requires the runtime to provide an ' +
-          'executor (see createDeferredLocalSandboxBashOperationsFactory). A standalone V1 ' +
-          'runtime has no background bash.',
+        'SANDBOX_UNAVAILABLE: background Bash requires a sandbox executor from the session runtime.',
       ),
       { code: 'SANDBOX_UNAVAILABLE' },
     );
