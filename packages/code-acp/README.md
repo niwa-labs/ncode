@@ -1,6 +1,13 @@
-# @minimax-ai/code-acp
+# MCode ACP
 
-ACP launcher for [MiniMax Code](https://agent.minimax.io). It runs the `mcode`
+Build the Niwa Labs fork using the [source instructions](../../README.md#quick-start).
+Then run `pnpm mcode acp` in the checkout. An editor can start the same server by
+running `node` with the absolute path to the checkout's `dist/cli.js` and the
+`acp` argument.
+
+## Upstream npm launcher
+
+`@minimax-ai/code-acp` is the launcher published by [MiniMax](https://agent.minimax.io). It runs the `mcode`
 binary from `@minimax-ai/code`, forwarding all arguments, stdio, signals and the
 exit code:
 
@@ -13,6 +20,5 @@ Why: `@minimax-ai/code` ships two bins (`mcode`, `mcode-tools`), so
 bin, which is what the [ACP registry](https://github.com/agentclientprotocol/registry)
 npx distribution needs.
 
-**Release rule:** publish this package at the same version as `@minimax-ai/code`,
-with `dependencies["@minimax-ai/code"]` pinned to that exact version. The ACP
-registry auto-update follows this package's version.
+MiniMax publishes the launcher at the same version as its CLI and pins the CLI
+dependency to that version. The ACP registry follows the upstream launcher.

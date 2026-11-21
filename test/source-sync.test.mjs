@@ -492,6 +492,8 @@ test('npm release manifests require native SQLite and pin installed external dep
   assert.equal(manifest.dependencies['@vscode/ripgrep'], '1.2.3');
   assert.equal(manifest.optionalDependencies['@mariozechner/clipboard'], '1.2.3');
   assert.equal(manifest.scripts, undefined);
+  assert.match(manifest.description, /Niwa Labs/);
+  assert.equal(manifest.repository, undefined);
   const conflicting = path.join(f.source, 'node_modules/better-sqlite3');
   mkdirSync(conflicting, { recursive: true });
   writeFileSync(path.join(conflicting, 'package.json'), JSON.stringify({ name: 'better-sqlite3', version: '9.9.9' }));

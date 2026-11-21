@@ -53,6 +53,11 @@ function copyLicenses(stage) {
 }
 
 export function releaseManifest(importers, version) {
+  const source = json(path.join(root, 'package.json'));
+  const upstream = source.name === 'minimax-code';
+  const repository = source.repository ?? (upstream
+    ? { type: 'git', url: 'https://github.com/MiniMax-AI/minimax-code.git' }
+    : undefined);
   const dependencies = {}, optionalDependencies = {};
   for (const name of cliExternalModules) {
     const versions = new Set(importers.map(importer => resolvePackage(name, importer)).filter(Boolean)
@@ -63,10 +68,12 @@ export function releaseManifest(importers, version) {
   }
   return {
     name: '@minimax-ai/code', version, private: true, type: 'module', license: 'MIT',
-    description: 'MiniMax Code CLI built from the tagged public source.',
+    description: upstream
+      ? 'MiniMax Code CLI built from the tagged public source.'
+      : 'MCode CLI built from the Niwa Labs source fork.',
     bin: { mcode: 'cli.js' },
-    engines: json(path.join(root, 'package.json')).engines,
-    repository: { type: 'git', url: 'https://github.com/MiniMax-AI/minimax-code.git' },
+    engines: source.engines,
+    ...(repository === undefined ? {} : { repository }),
     dependencies, optionalDependencies,
   };
 }
@@ -86,8 +93,9 @@ export async function packageCliRelease({ tag, out }) {
     writeFileSync(path.join(stage, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     copyLicenses(stage);
     writeFileSync(path.join(stage, 'release.json'), JSON.stringify({ version, tag, revision, buildNode: process.version }, null, 2) + '\n');
-    writeFileSync(path.join(stage, 'README.md'), `# MiniMax Code ${version}
+    writeFileSync(path.join(stage, 'README.md'), `# MCode ${version}
 
+${manifest.description}
 Built locally from source commit ${revision}.
 Install this tar.gz with npm. Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
