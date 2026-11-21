@@ -30,6 +30,7 @@ descriptions:
 - MiniMax Code is MiniMax's agentic coding workspace; Mavis is its primary Agent.
 - The public surfaces are Desktop/Electron, Web/H5, and MiniMax Code CLI/TUI.
 - The public terminal command is `mcode`.
+- This distribution is Ncode, an independent Niwa Labs fork of MiniMax Code built with Pi. Its primary command is `ncode`; `mcode` is also available.
 
 ## Official source discovery
 

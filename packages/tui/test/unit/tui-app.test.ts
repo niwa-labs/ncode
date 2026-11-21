@@ -3873,7 +3873,7 @@ describe("createTuiApp", () => {
         expect(rendered).toContain("Ctrl+O details");
         expect(rendered).toContain("Esc stop");
         expect(rendered).toContain("Thinking…");
-        expect(rendered.match(/Ncode · MiniMax/g)).toHaveLength(1);
+        expect(rendered.match(/by Niwa Labs/g)).toHaveLength(1);
         expect(rendered).not.toContain("Thinking · Inspecting the repository");
         expandedThinkingRows = countThinkingBodyRows(rendered);
         expect(expandedThinkingRows).toBeGreaterThan(0);
@@ -12679,7 +12679,7 @@ describe("createTuiApp", () => {
     });
     expect(app.tui.render(80).join("\n")).toContain("Loading");
     expect(app.tui.render(80).join("\n")).not.toContain("Loading · 0s");
-    expect(app.tui.render(80).join("\n").match(/Ncode · MiniMax/g)).toHaveLength(1);
+    expect(app.tui.render(80).join("\n").match(/by Niwa Labs/g)).toHaveLength(1);
     terminal.input?.("\x1b");
     await vi.waitFor(() =>
       expect(app.controller.snapshot().activeTurnId).toBeUndefined(),

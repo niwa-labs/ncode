@@ -77,7 +77,7 @@ export function releaseManifest(importers, version) {
     name: identity.packageName, version, private: true, type: 'module', license: 'MIT',
     description: upstream
       ? 'MiniMax Code CLI built from the tagged public source.'
-      : 'Ncode by Niwa Labs for MiniMax.',
+      : source.description,
     bin: { [identity.command]: 'cli.js', mcode: 'cli.js' },
     engines: source.engines,
     ...(repository === undefined ? {} : { repository }),

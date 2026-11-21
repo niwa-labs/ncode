@@ -595,7 +595,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         : {}),
       agentInfo: {
         name: 'minimax-code',
-        title: 'Ncode · MiniMax',
+        title: 'Ncode by Niwa Labs · MiniMax Code fork',
         version: options.version,
       },
       _meta: {

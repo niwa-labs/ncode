@@ -1,6 +1,6 @@
 # Ncode · Niwa Labs
 
-Ncode 是 Niwa Labs 维护的 MiniMax Code 分支，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
+Ncode 是 Niwa Labs 独立维护的 MiniMax Code（MCode）分支，使用 Pi 构建，支持终端、无界面运行和 ACP，并提供常驻守护进程、持久化会话历史与上下文，以及账号配置档。
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·

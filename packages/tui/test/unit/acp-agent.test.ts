@@ -1205,7 +1205,7 @@ describe('MiniMax Code ACP agent', () => {
             args: ['login'],
           },
         ],
-        agentInfo: { name: 'minimax-code', title: 'Ncode · MiniMax', version: '1.2.3' },
+        agentInfo: { name: 'minimax-code', title: 'Ncode by Niwa Labs · MiniMax Code fork', version: '1.2.3' },
         _meta: {
           'minimax-code/extensions': {
             version: 1,

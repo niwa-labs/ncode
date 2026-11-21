@@ -1,6 +1,6 @@
 # Ncode · Niwa Labs
 
-Ncode is a Niwa Labs fork of MiniMax Code for terminal, headless and ACP sessions. It adds a resident daemon, durable session history and context, and account profiles.
+Ncode is an independent fork of MiniMax Code (MCode) maintained by Niwa Labs. It uses Pi for terminal, headless and ACP sessions. It adds a resident daemon, durable session history and context, and account profiles.
 
 <p align="center">
   <a href="#quick-start">Get started</a> ·

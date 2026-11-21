@@ -98,7 +98,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
   const program = applyInteractiveCliContract(
     new Command()
       .name('ncode')
-      .description('Ncode — terminal coding agent for MiniMax')
+      .description('Ncode — terminal coding agent for MiniMax\nAn independent Niwa Labs fork of MiniMax Code (MCode), built with Pi.')
       .version(options.version)
       .enablePositionalOptions(),
     { allowStartupEnvironmentSelection: options.allowStartupEnvironmentSelection },

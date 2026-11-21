@@ -113,7 +113,7 @@ function renderWideWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderWelcomeHeader(state, width, staticBanner),
+    ...renderWelcomeHeader(state, width, staticBanner),
     ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameRow(renderSectionTitle(MINIMAX_CODE_WELCOME_DESIGN.sectionTitles.tips), width),
     ...tips.map((text) =>
@@ -142,7 +142,7 @@ function renderStackedWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderWelcomeHeader(state, width, staticBanner),
+    ...renderWelcomeHeader(state, width, staticBanner),
     ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameDivider(width),
     renderFrameRow(renderSectionTitle(MINIMAX_CODE_WELCOME_DESIGN.sectionTitles.tips), width),
@@ -173,7 +173,7 @@ function renderCompactWelcome(
   return [
     ...renderTuiWelcomeHero(width),
     '',
-    renderWelcomeHeader(state, width, staticBanner),
+    ...renderWelcomeHeader(state, width, staticBanner),
     ...(staticBanner ? [] : renderWelcomeAccountNoticeRows(state, width)),
     renderFrameRow(renderSectionTitle('Tips'), width),
     ...tips.map((text) =>
@@ -185,15 +185,25 @@ function renderCompactWelcome(
   ];
 }
 
-function renderWelcomeHeader(state: TuiShellState, width: number, staticBanner: boolean): string {
-  const title = width >= 30 ? 'Ncode · MiniMax' : 'Ncode';
-  const brand = chalk.bold.hex(colors.brand)(title);
+function renderWelcomeHeader(state: TuiShellState, width: number, staticBanner: boolean): string[] {
+  const product = chalk.bold.hex(colors.brand)('Ncode');
+  const publisher = chalk.hex(colors.orbit)('by Niwa Labs');
   const version = chalk.hex(colors.muted)(`v${state.version}${buildChannelSuffix()}`);
-  return renderFrameHeader(
-    `${brand} ${version}`,
+  const title = width >= 30 ? `${product} ${publisher}` : product;
+  const header = renderFrameHeader(
+    `${title} ${version}`,
     staticBanner ? '' : renderActivity(state),
     width,
   );
+  const origin = width >= 44 ? 'Independent fork of MiniMax Code (MCode)' : 'MiniMax Code fork';
+  const engine = 'Built with Pi';
+  const credits = `${origin} · ${engine}`;
+  const lines = credits.length <= width - 4 ? [credits] : [origin, engine];
+  return [
+    header,
+    ...(width < 30 ? [renderFrameRow(publisher, width)] : []),
+    ...lines.map((line) => renderFrameRow(chalk.hex(colors.text)(line), width)),
+  ];
 }
 
 function resolveWelcomeItems(

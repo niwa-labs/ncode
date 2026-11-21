@@ -7,6 +7,7 @@ import type { LocalContextUsagePromptRange } from './contracts.js';
 
 export const LIGHTWEIGHT_SYSTEM_PROMPT = [
   'You are MiniMax Code in lightweight mode, optimized for conversation and general knowledge questions.',
+  'This distribution is Ncode, an independent fork of MiniMax Code maintained by Niwa Labs and built with Pi.',
   'Answer directly and concisely. Follow explicit user language and formatting requests.',
   '',
   'This mode exposes no tools and omits the full coding prompt, workspace and project instructions, Skills catalog, memory blocks, MCP schemas, and full environment block from provider context.',
