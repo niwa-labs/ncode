@@ -13,6 +13,7 @@
 	"types": "./dist/index.d.ts",
 	"exports": {
 		".": {
+			"source": "./src/index.ts",
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
@@ -20,10 +21,12 @@
 			"import": "./dist/bundle/rpc-entry.js"
 		},
 		"./tools": {
+			"source": "./src/core/tools/index.ts",
 			"types": "./dist/core/tools/index.d.ts",
 			"import": "./dist/core/tools/index.js"
 		},
 		"./auth-storage": {
+			"source": "./src/core/auth-storage.ts",
 			"types": "./dist/core/auth-storage.d.ts",
 			"import": "./dist/core/auth-storage.js"
 		}

@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.standalone.json",
+  "include": [
+    "packages/*/src",
+    "packages/agent-modules/*/src",
+    "third_party/pi-mono/packages/coding-agent/src/utils/*.d.ts"
+  ],
+  "exclude": [
+    "packages/**/*.test.ts",
+    "packages/**/node_modules",
+    "packages/**/dist"
+  ]
+}

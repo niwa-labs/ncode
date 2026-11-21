@@ -91,11 +91,10 @@ function createPtcCells(state: TuiToolGalleryState) {
   const offset = CASES.length + 1;
   return [
     createTranscriptCell({
-      id: `gallery:${state}:run_code`,
+      id: `tool:${turnId}:${programId}`,
       kind: 'tool',
       status: state,
       title: 'run_code',
-      toolCallId: programId,
       content: JSON.stringify(PTC_PROGRAM),
       detail:
         state === 'running'
@@ -111,11 +110,10 @@ function createPtcCells(state: TuiToolGalleryState) {
     ...PTC_CHILDREN.map((child, index) => {
       const status = PTC_CHILD_STATUSES[state][index] ?? 'succeeded';
       return createTranscriptCell({
-        id: `gallery:${state}:run_code:${child.id}`,
+        id: `tool:${turnId}:${programId}:${child.id}`,
         kind: 'tool',
         status,
         title: child.name,
-        toolCallId: `${programId}:${child.id}`,
         parentToolCallId: programId,
         content: child.content,
         detail: status === 'running' ? '' : child.detail,

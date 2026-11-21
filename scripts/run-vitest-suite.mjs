@@ -16,6 +16,8 @@ const cli = path.resolve(path.dirname(manifestPath), require(manifestPath).bin.v
 // https://github.com/libuv/libuv/issues/5010. Keep real filesystem watching in
 // the tests, but create their temporary fixtures beneath the canonical path.
 const environment = { ...process.env };
+// Child Node processes do not inherit the Vitest resolver aliases.
+environment.NODE_OPTIONS = `${environment.NODE_OPTIONS ?? ""} --conditions=source`.trim();
 // Product copy follows the host locale, but tests assert a deliberate default
 // language and cover localized rendering through explicit locale inputs. Pin
 // every locale source before Vitest starts so both workers and subprocesses are

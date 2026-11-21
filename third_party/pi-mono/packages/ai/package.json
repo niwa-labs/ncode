@@ -15,6 +15,7 @@
 	],
 	"exports": {
 		".": {
+			"source": "./src/index.ts",
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
@@ -24,6 +25,7 @@
 			"import": "./dist/models.js"
 		},
 		"./compat": {
+			"source": "./src/compat.ts",
 			"types": "./dist/compat.d.ts",
 			"import": "./dist/compat.js"
 		},
@@ -33,30 +35,37 @@
 			"import": "./dist/providers/*.js"
 		},
 		"./api/*": {
+			"source": "./src/api/*.ts",
 			"types": "./dist/api/*.d.ts",
 			"import": "./dist/api/*.js"
 		},
 		"./utils/*": {
+			"source": "./src/utils/*.ts",
 			"types": "./dist/utils/*.d.ts",
 			"import": "./dist/utils/*.js"
 		},
 		"./oauth": {
+			"source": "./src/oauth.ts",
 			"types": "./dist/oauth.d.ts",
 			"import": "./dist/oauth.js"
 		},
 		"./bedrock-provider": {
+			"source": "./src/bedrock-provider.ts",
 			"types": "./dist/bedrock-provider.d.ts",
 			"import": "./dist/bedrock-provider.js"
 		},
 		"./bun-oauth": {
+			"source": "./src/bun-oauth.ts",
 			"types": "./dist/bun-oauth.d.ts",
 			"import": "./dist/bun-oauth.js"
 		},
 		"./lazy-bedrock-provider": {
+			"source": "./src/lazy-bedrock-provider.ts",
 			"types": "./dist/lazy-bedrock-provider.d.ts",
 			"import": "./dist/lazy-bedrock-provider.js"
 		},
 		"./lazy-oauth": {
+			"source": "./src/lazy-oauth.ts",
 			"types": "./dist/lazy-oauth.d.ts",
 			"import": "./dist/lazy-oauth.js"
 		}

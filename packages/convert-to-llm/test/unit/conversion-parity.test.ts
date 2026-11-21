@@ -39,12 +39,12 @@ import type { DurableEntry } from '../../src/types.js';
 
 // The pinned pi converter, imported from the vendored dist (built from the
 // pinned tree by W01 — NOT our code).
-const PI_CORE = fileURLToPath(new URL('../../../../third_party/pi-mono/packages/coding-agent/dist/core', import.meta.url));
+const PI_CORE = fileURLToPath(new URL('../../../../third_party/pi-mono/packages/coding-agent/src/core', import.meta.url));
 
 type PiMessage = { role: string; content: unknown; timestamp?: number };
 
 async function loadPi(): Promise<(messages: unknown[]) => PiMessage[]> {
-	const messages = (await import(`${PI_CORE}/messages.js`)) as { convertToLlm: (messages: unknown[]) => PiMessage[] };
+	const messages = (await import(`${PI_CORE}/messages.ts`)) as { convertToLlm: (messages: unknown[]) => PiMessage[] };
 	return messages.convertToLlm;
 }
 
@@ -171,7 +171,7 @@ describe('V-C10: pi conversion tags — our stage vs the pinned convertToLlm', (
 	});
 
 	it('malformed tag payloads convert to nothing on our side; pi never lets them reach conversion', async () => {
-		const sessionManager = (await import(`${PI_CORE}/session-manager.js`)) as {
+		const sessionManager = (await import(`${PI_CORE}/session-manager.ts`)) as {
 			sessionEntryToContextMessages: (entry: unknown) => unknown[];
 		};
 		// OUR policy: a tag message whose template inputs are missing fails the

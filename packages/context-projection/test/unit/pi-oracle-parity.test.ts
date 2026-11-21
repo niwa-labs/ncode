@@ -2,7 +2,7 @@
 //
 // The oracle is NOT our code: `buildSessionProjection` /
 // `buildContextEntries` come from the vendored coding-agent of the pinned
-// tree (pin 48c8f32; the dist was built by W01 from that same tree), and
+// tree (pin 48c8f32; the oracle reads the pinned source), and
 // `getUsageCostBreakdown` from its usage-totals module. Every prefix (head)
 // of every generated log is projected by BOTH sides after a declared data
 // mapping, and the results must agree on:
@@ -49,20 +49,19 @@ interface PiProjection {
 	messages: unknown[];
 }
 
-// The pinned pi projector, imported from the vendored dist (built from the
-// pinned tree by W01 — see third_party/pi-mono; NOT our code).
+// The pinned pi projector, imported from the pinned vendored source tree.
 const PI_CORE = fileURLToPath(
-	new URL('../../../../third_party/pi-mono/packages/coding-agent/dist/core', import.meta.url),
+	new URL('../../../../third_party/pi-mono/packages/coding-agent/src/core', import.meta.url),
 );
 
 async function loadPi(): Promise<{
 	buildSessionProjection: (entries: PiEntry[], leafId?: string | null) => PiProjection;
 	getUsageCostBreakdown: (entries: PiEntry[]) => { key: string; cost: number; tokens: number }[];
 }> {
-	const sessionManager = (await import(`${PI_CORE}/session-manager.js`)) as {
+	const sessionManager = (await import(`${PI_CORE}/session-manager.ts`)) as {
 		buildSessionProjection: (entries: PiEntry[], leafId?: string | null) => PiProjection;
 	};
-	const usageTotals = (await import(`${PI_CORE}/usage-totals.js`)) as {
+	const usageTotals = (await import(`${PI_CORE}/usage-totals.ts`)) as {
 		getUsageCostBreakdown: (entries: PiEntry[]) => { key: string; cost: number; tokens: number }[];
 	};
 	return { buildSessionProjection: sessionManager.buildSessionProjection, getUsageCostBreakdown: usageTotals.getUsageCostBreakdown };

@@ -23,7 +23,7 @@
 // writer yet — DEFERRED: cache_warm → W06 (CacheWarmer does not exist yet),
 // tool/branch → W06/W07 (turn-loop/branch-summary product seams); the
 // mapping lives in state/w05.md, section "V-U02 writer deferral". This suite
-// pins, against the pinned pi dist (NOT our code):
+// pins, against the pinned Pi source (NOT our code):
 //
 //   1. all four shapes produce the SAME rendered billing: per-`provider/model`
 //      rows equal pi's rows for (a)+(b), and the "Tools/summaries" row equals
@@ -50,14 +50,13 @@ interface PiBreakdownRow {
 	tokens: number;
 }
 
-// The pinned pi usage-totals, imported from the vendored dist (built from
-// the pinned tree by W01 — third_party/pi-mono; NOT our code).
+// The pinned pi usage-totals, imported from the pinned vendored source tree.
 const PI_CORE = fileURLToPath(
-	new URL('../../../../third_party/pi-mono/packages/coding-agent/dist/core', import.meta.url),
+	new URL('../../../../third_party/pi-mono/packages/coding-agent/src/core', import.meta.url),
 );
 
 async function loadPi(): Promise<(entries: PiEntry[]) => PiBreakdownRow[]> {
-	const usageTotals = (await import(`${PI_CORE}/usage-totals.js`)) as {
+	const usageTotals = (await import(`${PI_CORE}/usage-totals.ts`)) as {
 		getUsageCostBreakdown: (entries: PiEntry[]) => PiBreakdownRow[];
 	};
 	return usageTotals.getUsageCostBreakdown;

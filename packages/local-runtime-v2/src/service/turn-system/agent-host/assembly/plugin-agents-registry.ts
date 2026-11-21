@@ -1,5 +1,4 @@
 import type { PluginAgentRuntimeDefinition, PluginAgentsRegistry } from '@mavis/agent-tools/desktop';
-import type { AgentHostTurnPluginAgent } from './turn-capability-lifecycle.js';
 
 /**
  * Immutable per-turn lookup of plugin-declared subagents — the counterpart of
@@ -9,14 +8,13 @@ import type { AgentHostTurnPluginAgent } from './turn-capability-lifecycle.js';
  * declares it.
  */
 export function createPluginAgentsRegistry(capabilities: {
-  readonly agents?: readonly AgentHostTurnPluginAgent[];
+  readonly agents?: readonly PluginAgentRuntimeDefinition[];
 }): PluginAgentsRegistry {
   const byScopedName = new Map<string, PluginAgentRuntimeDefinition>();
   const byBareName = new Map<string, PluginAgentRuntimeDefinition[]>();
-  for (const capability of capabilities.agents ?? []) {
-    const definition: PluginAgentRuntimeDefinition = capability;
-    byScopedName.set(normalizeKey(capability.name), definition);
-    const bare = normalizeKey(capability.agentName);
+  for (const definition of capabilities.agents ?? []) {
+    byScopedName.set(normalizeKey(definition.name), definition);
+    const bare = normalizeKey(definition.agentName);
     const bucket = byBareName.get(bare);
     if (bucket) bucket.push(definition);
     else byBareName.set(bare, [definition]);

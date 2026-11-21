@@ -357,6 +357,7 @@ async function openDriverFixture(sessionId: string): Promise<DriverFixtureCompos
     host: partA.host,
     sessions: { get: async (id) => (id === sessionId ? fixtureSession(id) : undefined) },
     canonicalHistory: {
+      initialize: async () => undefined,
       inspectActive: async () => ({
         messages: [{ role: 'user', content: 'fixture input', timestamp: 1 }],
       }),
@@ -468,6 +469,7 @@ describe('W10 part B: durable turn-driver in the product turn path', () => {
       host: failingHost,
       sessions: { get: async (id) => fixtureSession(id) },
       canonicalHistory: {
+        initialize: async () => undefined,
         inspectActive: async () => ({ messages: [{ role: 'user', content: 'x', timestamp: 1 }] }),
         append: async (change) => change,
       },

@@ -56,9 +56,8 @@ const steps = [
   // Compiler inputs are identical across the matrix. One Linux job runs this;
   // all platforms still build and validate native artifacts on their own platform.
   { name: "typecheck", script: "typecheck", fullOnly: true },
-  // The standalone compile above covers only its include graph — packages with
-  // compile-time ties to upstream types (e.g. mcoded's `satisfies (keyof
-  // CliService)[]` allowlist) must fail `pnpm verify` here, not at runtime.
+  // Check all first-party TypeScript sources with the shared workspace aliases.
+  // The standalone compile above starts from the distribution's entry points.
   { name: "typecheck:packages", script: "typecheck:packages", fullOnly: true },
   { name: "build", script: "build", windows: true },
   { name: "check:standalone", script: "check:standalone", windows: true },

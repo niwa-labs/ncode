@@ -4,8 +4,8 @@
 // The oracle is NOT our code: `findCutPoint`, `estimateTokens`,
 // `estimateContextTokens`, `estimateProjectedContextTokens`, `shouldCompact`,
 // `prepareCompaction` and `serializeConversation`/`computeFileLists`/
-// `formatFileOperations` come from the vendored coding-agent dist of the
-// pinned tree (pin 48c8f32; the dist was built by W01 from that same tree),
+// `formatFileOperations` come from the vendored coding-agent source of the
+// pinned tree (pin 48c8f32; the oracle reads the pinned source),
 // and `buildSessionProjection` from its session-manager.
 //
 // Declared data mapping (the T-stage mapping of the port plan):
@@ -72,7 +72,7 @@ import type { LogEntry } from '../../src/index.js';
 type PiEntry = Record<string, unknown>;
 
 const PI_CORE = fileURLToPath(
-	new URL('../../../../third_party/pi-mono/packages/coding-agent/dist/core', import.meta.url),
+	new URL('../../../../third_party/pi-mono/packages/coding-agent/src/core', import.meta.url),
 );
 
 interface PiCompaction {
@@ -122,13 +122,13 @@ async function loadPi(): Promise<
 		};
 	}
 > {
-	const compaction = (await import(`${PI_CORE}/compaction/compaction.js`)) as PiCompaction;
-	const utils = (await import(`${PI_CORE}/compaction/utils.js`)) as {
+	const compaction = (await import(`${PI_CORE}/compaction/compaction.ts`)) as PiCompaction;
+	const utils = (await import(`${PI_CORE}/compaction/utils.ts`)) as {
 		serializeConversation: (messages: Record<string, unknown>[]) => string;
 		computeFileLists: (fileOps: { read: Set<string>; written: Set<string>; edited: Set<string> }) => { readFiles: string[]; modifiedFiles: string[] };
 		formatFileOperations: (readFiles: string[], modifiedFiles: string[]) => string;
 	};
-	const sessionManager = (await import(`${PI_CORE}/session-manager.js`)) as {
+	const sessionManager = (await import(`${PI_CORE}/session-manager.ts`)) as {
 		buildSessionProjection: PiCompaction & {
 			buildSessionProjection: (entries: PiEntry[]) => { entries: { sourceEntry: PiEntry; messages: Record<string, unknown>[] }[] };
 		};
