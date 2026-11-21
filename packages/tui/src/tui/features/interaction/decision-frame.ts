@@ -71,3 +71,11 @@ export function renderQuestionnaireFrame(
     tone,
   );
 }
+
+export function fitWithRightMeta(content: string, meta: string, width: number): string {
+  if (!meta) return truncateToWidth(content, width, '');
+  const gap = width - visibleWidth(content) - visibleWidth(meta);
+  if (gap >= 2) return `${content}${' '.repeat(gap)}${meta}`;
+  const contentWidth = Math.max(0, width - visibleWidth(meta) - 2);
+  return `${truncateToWidth(content, contentWidth, '')}  ${meta}`;
+}

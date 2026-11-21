@@ -6,9 +6,13 @@ import {
 } from '../../../application/permission-mode.js';
 import { getKeybindings, matchesKey } from '../../engine/public.js';
 import type { Component } from '../../rendering/component.js';
-import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
+import { truncateToWidth } from '../../rendering/text.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../../theme/runtime.js';
-import { questionnaireFrameContentWidth, renderQuestionnaireFrame } from './decision-frame.js';
+import {
+  fitWithRightMeta,
+  questionnaireFrameContentWidth,
+  renderQuestionnaireFrame,
+} from './decision-frame.js';
 
 type VisiblePermissionMode = (typeof MINIMAX_CODE_PERMISSION_MODES)[number];
 
@@ -129,12 +133,4 @@ function renderMode(
     ];
   }
   return [fitWithRightMeta(`${heading}  ${description}`, status, options.width)];
-}
-
-function fitWithRightMeta(content: string, meta: string, width: number): string {
-  if (!meta) return truncateToWidth(content, width, '');
-  const gap = width - visibleWidth(content) - visibleWidth(meta);
-  if (gap >= 2) return `${content}${' '.repeat(gap)}${meta}`;
-  const contentWidth = Math.max(0, width - visibleWidth(meta) - 2);
-  return `${truncateToWidth(content, contentWidth, '')}  ${meta}`;
 }

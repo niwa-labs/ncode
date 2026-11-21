@@ -1,8 +1,9 @@
 import { getKeybindings, type TuiMode } from '../../engine/public.js';
 import type { Component } from '../../rendering/component.js';
-import { truncateToWidth, visibleWidth } from '../../rendering/text.js';
+import { truncateToWidth } from '../../rendering/text.js';
 import { tuiChalk as chalk, tuiColors as colors } from '../../theme/runtime.js';
 import {
+  fitWithRightMeta,
   questionnaireFrameContentWidth,
   renderQuestionnaireFrame,
 } from '../interaction/decision-frame.js';
@@ -318,12 +319,4 @@ function renderSwitch(
 
 function formatTuiMode(mode: TuiMode): string {
   return mode === 'regular' ? 'Regular' : 'Fullscreen';
-}
-
-function fitWithRightMeta(content: string, meta: string, width: number): string {
-  if (!meta) return truncateToWidth(content, width, '');
-  const gap = width - visibleWidth(content) - visibleWidth(meta);
-  if (gap >= 2) return `${content}${' '.repeat(gap)}${meta}`;
-  const contentWidth = Math.max(0, width - visibleWidth(meta) - 2);
-  return `${truncateToWidth(content, contentWidth, '')}  ${meta}`;
 }
