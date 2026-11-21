@@ -2,6 +2,10 @@
 
 The current capability target is **TUI 0.7.2**; see [version and evidence baseline](open-source-status.md#version-and-evidence-baseline) for the separate workspace and embedded-tool versions. “Restored” below describes implementation and assembly, not acceptance of every account or online service.
 
+## Daily MiniMax check-in
+
+Open the interactive terminal with a signed-in MiniMax account and Ncode checks whether you can claim today's credits. It remembers a confirmed check-in for the current profile and local date. A successful manual `/checkin` counts too. If the check fails, the next terminal launch can try again. Starting `ncode acp` or `ncode exec` skips this startup check.
+
 ## Output speed
 
 The activity line and completed-turn summary show provider output tokens divided by

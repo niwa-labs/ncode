@@ -2,7 +2,15 @@
 
 Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MCode）和 Pi 构建。你可以使用 MiniMax 模型，也可以连接自己的模型服务。
 
-**每日自动签到。** 登录 MiniMax 后，在终端打开 `ncode` 就会自动领取当天可领的积分。签到确认后，当天再次打开同一配置档会跳过签到。ACP 和无界面模式也会跳过自动签到。
+## Ncode 在 MCode 基础上增加了什么
+
+- **每日自动签到。** 登录 MiniMax 后，在终端打开 `ncode` 就能领取当天可领的积分。签到确认后，当天再打开同一配置档会跳过签到。ACP 和无界面模式也会跳过自动签到。
+- **关闭终端后任务仍可继续。** 终端、`ncode exec` 和 ACP 共用本地守护进程。回到同一工作区，使用相同的配置档运行 `ncode --continue` 即可继续对话。
+- **子代理可以在后台工作。** 主代理等待子代理时，你可以发来新指令。主代理可以接着处理，子代理则在后台完成任务。守护进程重启后，Ncode 会检查哪些已完成的任务还需要通知主代理。
+- **长会话的历史和上下文。** 每个会话都有独立的压缩 SQLite 历史库。下次调用模型时，Ncode 可以将已保存的摘要与最近的消息合并，并复用已准备好的上下文。
+- **在命令行切换账号。** 用 `ncode --profile work` 单独保存工作账号的登录信息、会话和设置。运行 `ncode profile list` 即可查看已有的配置档。
+
+[会话与恢复机制](docs/architecture.md) · [账号配置档](docs/installation.md#profiles)
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·
@@ -18,8 +26,6 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 </p>
 
 ![Ncode 终端欢迎界面，显示本地服务在线，当前尚未登录，工作区为 pocket-pet](docs/assets/ncode-terminal.png)
-
-在终端发起任务，运行中可将后续指令加入队列，之后用 `ncode --continue` 继续对话。终端、`ncode exec` 和 ACP 客户端共用当前配置档的本地守护进程，每个会话都有独立的持久化历史。[了解会话与恢复机制](docs/architecture.md)
 
 ## 快速开始
 

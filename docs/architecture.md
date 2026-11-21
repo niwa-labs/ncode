@@ -21,6 +21,8 @@ For an in-process session, set `MCODE_SERVER_MODE=off`. On the welcome screen, *
 
 The runtime starts a turn and Pi runs the model and tool loop. The host checks tool permissions and sends approval requests back to the client. If the agent is busy, you can steer the current turn or queue a message for the next one. Ncode records when it accepts your input and when that input reaches the model context. [Turn system](../packages/local-runtime-v2/src/service/turn-system) · [Input delivery](../packages/input-delivery)
 
+When the parent agent is waiting for a subagent, a new instruction can release that wait. The child keeps running in the background, and the parent can answer you right away. When the child finishes, its result goes back to the parent session. [Subagent recovery scenarios](../packages/local-runtime-v2/test/integration/reactive-task-batch-recovery.e2e.test.ts)
+
 ## How does a long conversation fit?
 
 Each session has its own SQLite history store with Zstd compression. For each model call, the runtime selects the messages it needs from that history. It can reuse previously converted messages and use placeholders for images outside the media budget. As the conversation grows, compaction saves a summary alongside the history. Later requests can use the summary and recent messages together. [Session storage](../packages/local-runtime-v2/src/service/session-system/messages/history/durable-session-stores.ts) · [Model context](../packages/local-runtime-v2/src/service/turn-system/compaction/context-wire.ts)

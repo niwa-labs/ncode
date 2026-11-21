@@ -2,7 +2,15 @@
 
 Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of MiniMax Code (MCode) on Pi. Use MiniMax models or connect your own provider.
 
-**Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax and it claims the day’s credits if they’re available. Once today’s check-in is confirmed, the same profile skips it on later launches. ACP and headless runs skip auto check-in.
+## What Ncode adds to MCode
+
+- **Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax to claim the day’s available credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it too.
+- **Work can outlive the terminal.** The TUI, `ncode exec` and ACP share a local daemon. Close the terminal while a task runs, then return to the same workspace and profile with `ncode --continue`.
+- **Background subagents.** Send a new instruction while the agent is waiting on a subagent. The parent can act on it while the child finishes in the background. After a daemon restart, Ncode checks for completed tasks that still need to notify the parent.
+- **History and context for long sessions.** Each session has its own compressed SQLite history. For the next model call, Ncode can combine a saved summary with recent messages and reuse context it has already prepared.
+- **Account switching from the CLI.** Use `ncode --profile work` for a separate login, session history and settings. Run `ncode profile list` to see your profiles.
+
+[How sessions and recovery work](docs/architecture.md) · [Run two accounts](#run-two-accounts)
 
 <p align="center">
   <a href="#quick-start">Get started</a> ·
@@ -18,8 +26,6 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 </p>
 
 ![Ncode terminal showing the local server online and the sign-in prompt in the pocket-pet workspace](docs/assets/ncode-terminal.png)
-
-Start a task in the terminal, queue a follow-up while the agent works, and reopen the conversation with `ncode --continue`. The terminal, `ncode exec` and ACP clients share a local daemon for the selected profile. Each session has its own durable history. [How sessions and recovery work](docs/architecture.md)
 
 ## Quick start
 
