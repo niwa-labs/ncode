@@ -124,6 +124,8 @@ export function defaultWorkerExecArgv(): string[] {
       index += 1;
       continue;
     }
+    // Node rejects this process-only V8 flag when passed explicitly to a worker.
+    if (flag === '--expose-gc') continue;
     if (flag.startsWith('--conditions=') || flag.startsWith('-C=')) continue;
     filtered.push(flag);
   }

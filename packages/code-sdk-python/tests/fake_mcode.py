@@ -80,18 +80,6 @@ if scenario == "crash":
     print("boom: internal failure", file=sys.stderr)
     sys.exit(70)
 
-emit("exec.started")
-emit("session.resumed" if "--session=" in " ".join(args) else "session.started")
-emit("turn.started")
-msg = {"id": "m1", "type": "agent_message"}
-emit("item.started", item={**msg, "contentDelta": "Hel"})
-emit("item.updated", item={**msg, "contentDelta": "lo"})
-tool = {"id": "t1", "type": "tool_call", "toolCall": {"id": "t1", "name": "bash", "status": 1}}
-emit("item.updated", item=tool)
-emit("item.updated", item=tool)  # duplicate snapshot: dropped by the SDK
-emit("item.completed", item={**tool, "toolCall": {"id": "t1", "name": "bash", "status": 2}})
-emit("future.event", payload=True)
-
 if scenario == "slow":
     # Like the CLI: SIGINT and SIGTERM each have a one-shot cancel handler; a repeated signal hits
     # the default action and kills the process before exec.completed.
@@ -105,6 +93,20 @@ if scenario == "slow":
 
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
+
+emit("exec.started")
+emit("session.resumed" if "--session=" in " ".join(args) else "session.started")
+emit("turn.started")
+msg = {"id": "m1", "type": "agent_message"}
+emit("item.started", item={**msg, "contentDelta": "Hel"})
+emit("item.updated", item={**msg, "contentDelta": "lo"})
+tool = {"id": "t1", "type": "tool_call", "toolCall": {"id": "t1", "name": "bash", "status": 1}}
+emit("item.updated", item=tool)
+emit("item.updated", item=tool)  # duplicate snapshot: dropped by the SDK
+emit("item.completed", item={**tool, "toolCall": {"id": "t1", "name": "bash", "status": 2}})
+emit("future.event", payload=True)
+
+if scenario == "slow":
     for _ in range(200):
         if cancelled:
             break

@@ -36,7 +36,8 @@ const proxy = Bun.serve({ port: 0, hostname: '127.0.0.1', async fetch(request) {
   });
 } });
 writeFileSync(join(data, 'config.yaml'), [
-  'logLevel: info', 'custom_provider:', '  llm-mock:', '    name: llm-mock',
+  'logLevel: info', 'sessionTitle: { enabled: false }', 'promptSuggestion: { enabled: false }',
+  'custom_provider:', '  llm-mock:', '    name: llm-mock',
   '    kind: custom', '    enabled: true', '    api: openai-completions',
   '    options:', '      apiKey: mock-key', `      baseURL: http://127.0.0.1:${proxy.port}/v1`,
   '      authMode: api-key', '    models:', '      llm-mock:', '        reasoning: true',
@@ -57,7 +58,9 @@ try { code = await runPerf(cfg, {
     '--import', pathToFileURL(join(input.control, 'test/network-deny.mjs')).href,
     join(input.build, 'dist/cli.js'), 'exec', '--permission', 'off', '--cwd', workspace,
     '--model', 'custom_provider:llm-mock/llm-mock', cfg.prompt],
+  // Compare the agent loop in-process; validate its canonical JSONL transcript below.
   harnessEnv: () => ({ MINIMAX_DATA_DIR: data, PI_TELEMETRY: '0',
+    MCODE_SERVER_MODE: 'off', MCODE_HISTORY_PROVIDER: 'jsonl',
     MCODE_TEST_ALLOWED_ORIGIN: `http://127.0.0.1:${proxy.port}`,
     MCODE_TEST_NETWORK_AUDIT: join(input.directory, 'network.log'), MCODE_TEST_MANAGED_OFFLINE: '1',
   }),

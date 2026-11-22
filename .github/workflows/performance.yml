@@ -112,11 +112,6 @@ jobs:
     name: bench thresholds
     runs-on: macos-15
     timeout-minutes: 30
-    env:
-      # The benches load the packages' TypeScript sources (dist/ is not built
-      # here); without the `development` condition `exports` resolve `import`
-      # → dist and every bench dies with ERR_MODULE_NOT_FOUND.
-      NODE_OPTIONS: --conditions=development
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -131,19 +126,26 @@ jobs:
           package-manager-cache: false
       - name: Install dependencies (better-sqlite3 for the worker bench)
         run: pnpm install --frozen-lockfile
+      - name: Build logging for raw Node worker threads
+        run: pnpm --filter @mavis/logging build
       - name: Build the fixture corpus (synthetic, ~5 MB messages + ~100 MB images)
         run: |
           node scripts/bench/build-fixtures.mjs messages --out "$RUNNER_TEMP/bench-fixtures"
           node scripts/bench/build-fixtures.mjs images --out "$RUNNER_TEMP/bench-fixtures"
       - name: Gate the messages corpus against the acceptance thresholds
+        env: &bench-runtime
+          TSX_TSCONFIG_PATH: ${{ github.workspace }}/tsconfig.standalone.json
+          NODE_OPTIONS: --conditions=source --import=tsx
         run: |
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/messages-*.jsonl)" \
             node scripts/bench/run-all.mjs --check scripts/bench/thresholds.json
       - name: Gate the images corpus against the acceptance thresholds
+        env: *bench-runtime
         run: |
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/images-*.jsonl)" \
             node scripts/bench/run-all.mjs --check scripts/bench/thresholds.images.json
       - name: Gate the runtime composition request path (bench-prepare, big-window profile)
+        env: *bench-runtime
         run: |
           # The round-2 judge finding: run-all.mjs drives bench-prep.mjs only —
           # the one bench that measures the DECLARED runtime composition
@@ -164,6 +166,7 @@ jobs:
           grep -E '^(circuit|prep|payload|head|rss|mock|gate)' "$RUNNER_TEMP/bench-fixtures/prepare-bigwin.txt" \
             | sed 's/^/| `/; s/=/` | /; s/$/ |/' >> "$GITHUB_STEP_SUMMARY"
       - name: Gate the images corpus at the architectural residency scale (~10 MB resident payload)
+        env: *bench-runtime
         run: |
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/images-*.jsonl)" \
             MMU_RESIDENT_BYTES=9437184 ITERS=100 \
@@ -211,10 +214,12 @@ jobs:
           [ "$(awk "BEGIN{print ($warmP95 <= 8)}")" = "1" ] || { echo "residency scale: prep.warmP95Ms=$warmP95 > 8 (the normalized warm budget)"; exit 1; }
           [ "$(awk "BEGIN{print ($coldP95 <= 50)}")" = "1" ] || { echo "residency scale: prep.p95Ms=$coldP95 > 50 (the Ф2 cold prep budget, final-architecture.md:404)"; exit 1; }
       - name: Corpus equivalence gate (Ф2 — compiler bytes = full replay + stringify, 100% of heads)
+        env: *bench-runtime
         run: |
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/messages-*.jsonl)" \
             node scripts/bench/equivalence-corpus.mjs
       - name: Corpus equivalence gate (Ф2 full-shape — context_edit, split-turn, interrupted tools)
+        env: *bench-runtime
         run: |
           node scripts/bench/build-fixtures.mjs hybrid --out "$RUNNER_TEMP/bench-fixtures"
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/hybrid-*.jsonl)" \
@@ -225,6 +230,7 @@ jobs:
       # indexed lazy open: capsule meta row + range read, ≤1 s / RSS ≤500 МБ.
       # The build takes several minutes — never on by default.
       - name: Gate the 10 GB lazy open on the real backend path (opt-in)
+        env: *bench-runtime
         if: ${{ contains(github.event.pull_request.labels.*.name, 'perf:giant') || (github.event_name == 'workflow_dispatch' && inputs.giant == true) }}
         timeout-minutes: 45
         run: |
