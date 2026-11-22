@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: Report a vulnerability privately
     url: https://docs.github.com/en/code-security/security-advisories/working-with-repository-security-advisories/privately-reporting-a-security-vulnerability
-    about: Use private vulnerability reporting on this repository when enabled.
+    about: Follow the instructions to report a vulnerability privately on this Ncode repository.

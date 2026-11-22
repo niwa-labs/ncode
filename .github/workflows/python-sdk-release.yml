@@ -1,39 +1,28 @@
-name: Python SDK release
+name: Python SDK package verification
 on:
-  push:
-    tags: ['code-sdk-python-v*']
   pull_request:
     paths:
       - '.github/workflows/python-sdk-release.yml'
-      - 'packages/code-sdk-python/scripts/**'
-      - 'packages/code-sdk-python/pyproject.toml'
-      - 'packages/code-sdk-python/CHANGELOG.md'
+      - 'packages/code-sdk-python/**'
+      - 'scripts/lib/public-text-policy.mjs'
+      - '.github/actions/setup-gitleaks/**'
+      - '.gitleaks.toml'
   workflow_dispatch:
-    inputs:
-      repository:
-        description: 'none builds and checks only; testpypi also uploads to TestPyPI'
-        required: false
-        default: none
-        type: choice
-        options: [none, testpypi]
 permissions:
   contents: read
 concurrency:
-  group: python-sdk-release-${{ github.ref }}
+  group: python-sdk-package-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    outputs:
-      version: ${{ steps.metadata.outputs.version }}
     defaults:
       run:
         working-directory: packages/code-sdk-python
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -42,19 +31,8 @@ jobs:
         id: metadata
         shell: bash
         run: |
-          args=()
-          if [ "$EVENT_NAME" = push ]; then
-            git merge-base --is-ancestor HEAD origin/main
-            args+=(--tag "$TAG" --index pypi)
-          elif [ "$TARGET" = testpypi ]; then
-            args+=(--index testpypi)
-          fi
-          version="$(uv run --no-project python scripts/release_check.py metadata "${args[@]}")"
+          version="$(uv run --no-project python scripts/release_check.py metadata)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG: ${{ github.ref_name }}
-          TARGET: ${{ inputs.repository || 'none' }}
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -100,40 +78,3 @@ jobs:
           path: ${{ runner.temp }}/dist/
           retention-days: 14
           if-no-files-found: error
-  publish-pypi:
-    needs: build
-    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: pypi
-      url: https://pypi.org/project/minimax-code-sdk/${{ needs.build.outputs.version }}/
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: python-sdk-dist
-          path: ${{ runner.temp }}/dist
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
-        with:
-          packages-dir: ${{ runner.temp }}/dist
-  publish-testpypi:
-    needs: build
-    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/project/minimax-code-sdk/${{ needs.build.outputs.version }}/
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: python-sdk-dist
-          path: ${{ runner.temp }}/dist
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
-        with:
-          packages-dir: ${{ runner.temp }}/dist
-          repository-url: https://test.pypi.org/legacy/

@@ -1,6 +1,6 @@
 # Contributing
 
-This repository contains the standalone MiniMax Code TUI, headless CLI, and ACP source. Start with the [architecture](docs/architecture.md), [capability coverage](docs/tui-capabilities.md), and [installation guide](docs/installation.md).
+This repository contains the Ncode terminal, headless CLI, daemon and ACP adapter. Start with the [architecture](docs/architecture.md), [capability coverage](docs/tui-capabilities.md), and [installation guide](docs/installation.md).
 
 Repository collaborators should submit pull requests from feature branches; do not push directly to the default branch. Describe user-visible changes, checks you ran, live-service or platform validation you did not run, and documentation impact. Preserve real author identities and existing copyright notices.
 
@@ -49,7 +49,7 @@ Existing README files, `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE.md`, Ma
 
 `Node compatibility` runs weekly and on demand against macOS and Linux with Node 22.19.0, 24.2.0, 25 and 26. Windows remains excluded from this matrix; the PR Windows contract is a focused Node 24 check, not a substitute for the full compatibility matrix. It does not run automatically on PRs. Dispatch it on the selected branch for changes to supported Node versions, native dependencies or compatibility-sensitive verification tooling, and before a source release. This covers the minimum versions of the two supported ranges and the additional supported majors. Deferring those versions from ordinary PR checks can delay regression discovery; a known failure in a supported version still needs resolution before release. Dependabot proposes weekly Actions and npm updates, grouping Actions and development-tool minor/patch updates. External Actions use reviewed full commit SHAs, while local actions and reusable workflows come from the same checked-out revision.
 
-Source candidates are requested independently through the `Source candidate` workflow; ordinary PRs and main pushes do not produce them. Its Linux/macOS archive validation is described in [Releasing](docs/releasing.md). `CLI release` builds and verifies an npm-installable archive. MiniMax maintains the release and registry channels upstream. Its `package` verification profile tests installation of an existing archive; it does not replace full source verification. npm registry and official installer publication remain separate release processes.
+The `Source candidate` workflow builds a source archive on request. `Ncode package verification` builds an npm-installable archive and checks installation on Linux and macOS. The `package` verification profile installs an existing archive. See [Releasing](docs/releasing.md) for publication of the verified Ncode package.
 
 Source export reports separate archive creation, extraction, inventory validation, hashing, and cleanup timings in `export.json`. Windows uses native `tar` after complete archive preflight; other systems use the Node extractor. The preflight rejects traversal, links, duplicate entries and Git metadata before writing files. A machine without native `tar` falls back to Node. Set `MCODE_SOURCE_EXTRACTOR=node` or `native` when comparing extractors locally.
 

@@ -1,6 +1,5 @@
 import { build } from "esbuild";
 import {
-  readFileSync,
   mkdirSync,
   rmSync,
   cpSync,
@@ -18,12 +17,10 @@ import { TUI_DISABLED_BUILTIN_SKILL_NAMES } from "./lib/builtin-skills.mjs";
 import { copyMcodeToolsArtifact } from './lib/mcode-tools-artifact.mjs';
 import { workspacePackageExports, resolveExportSpecifier } from "./lib/package-exports.mjs";
 import { readExtraction } from "./lib/release-metadata.mjs";
-import { cliBuildVersion, cliExternalModules, cliReleaseIdentity, isUpstreamCliSource } from './lib/cli-release.mjs';
+import { cliBuildVersion, cliExternalModules, ncodeReleaseIdentity } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const metadata = readExtraction(root);
-const sourceManifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-const cliIdentity = cliReleaseIdentity(sourceManifest);
 const packages = workspacePackageExports(root, metadata.packageRoots);
 const location = createTuiBundleModuleLocationConfig();
 const outdir = path.join(root, "dist");
@@ -88,7 +85,7 @@ const result = await build({
     __CLI_VERSION__: JSON.stringify(version),
     __CLI_CHANNEL__: '"source"',
     __IS_NPM_BUILD__: "true",
-    __NIWA_LABS_SOURCE_BUILD__: JSON.stringify(!isUpstreamCliSource(sourceManifest)),
+    __NIWA_LABS_SOURCE_BUILD__: "true",
     __BUILD_PROFILE__: '"tui"',
     __TUI_BUILD_ENV__: '"prod"',
     __TUI_BUILD_VARIANT__: '"standard"',
@@ -123,15 +120,15 @@ writeFileSync(
   JSON.stringify(result.metafile, null, 2) + "\n",
 );
 console.log(
-  `Built ${cliIdentity.title} ${version} from ${Object.keys(result.metafile.inputs).length} source files.`,
+  `Built ${ncodeReleaseIdentity.title} ${version} from ${Object.keys(result.metafile.inputs).length} source files.`,
 );
 
 writeFileSync(
   path.join(outdir, "package.json"),
   JSON.stringify(
     {
-      name: cliIdentity.packageName, version, type: "module", private: true,
-      bin: { [cliIdentity.command]: "cli.js" },
+      name: ncodeReleaseIdentity.packageName, version, type: "module", private: true,
+      bin: { [ncodeReleaseIdentity.command]: "cli.js" },
       ...(process.env.MCODE_RELEASE_TAG ? {
         gitHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
       } : {}),

@@ -1,4 +1,4 @@
-name: CLI release
+name: Ncode package verification
 on:
   push:
     tags: ['v*']
@@ -7,7 +7,6 @@ on:
       - '.github/workflows/cli-release.yml'
       - 'scripts/build.mjs'
       - 'scripts/*cli-release.mjs'
-      - 'scripts/release-cli.mjs'
       - 'scripts/lib/cli-release.mjs'
       - 'scripts/verify.mjs'
       - 'test/smoke.test.mjs'
@@ -18,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional tag matching the source version (dry run; does not publish)'
+        description: 'Optional tag matching the source version for package verification'
         required: false
         type: string
 permissions:
@@ -29,9 +28,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     outputs:
-      version: ${{ steps.release.outputs.version }}
       matrix: ${{ steps.release.outputs.matrix }}
       tag: ${{ steps.release.outputs.tag }}
       archive: ${{ steps.release.outputs.archive }}
@@ -50,14 +48,13 @@ jobs:
         shell: bash
         run: |
           node --input-type=module <<'JS'
-          import { appendFileSync, readFileSync } from "node:fs";
+          import { appendFileSync } from "node:fs";
           import { cliBuildVersion, cliReleaseArchiveName, cliReleaseTargets } from "./scripts/lib/cli-release.mjs";
-          const source = JSON.parse(readFileSync("package.json", "utf8"));
           const tag = process.env.REQUESTED_TAG || `v${cliBuildVersion(process.cwd())}`;
           const version = cliBuildVersion(process.cwd(), tag);
-          const archive = cliReleaseArchiveName(source, version);
+          const archive = cliReleaseArchiveName(version);
           const matrix = JSON.stringify({ include: cliReleaseTargets });
-          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\ntag=${tag}\narchive=${archive}\nmatrix=${matrix}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\narchive=${archive}\nmatrix=${matrix}\n`);
           appendFileSync(process.env.GITHUB_ENV, `MCODE_RELEASE_TAG=${tag}\n`);
           JS
           if [ "$EVENT_NAME" = push ]; then
@@ -75,7 +72,7 @@ jobs:
           MCODE_VERIFY_REPORT_DIR: ${{ runner.temp }}/build-report
       - name: Scan distribution
         run: gitleaks dir dist --redact --config .gitleaks.toml
-      - name: Package the tagged CLI
+      - name: Build the Ncode archive
         shell: bash
         run: node scripts/package-cli-release.mjs "$MCODE_RELEASE_TAG" "$RUNNER_TEMP/package"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -123,77 +120,3 @@ jobs:
           name: cli-install-${{ matrix.os }}-${{ matrix.node }}
           path: ${{ runner.temp }}/install-report/
           retention-days: 14
-  publish:
-    needs: [build, install]
-    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push'
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      MCODE_RELEASE_TAG: ${{ needs.build.outputs.tag }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: cli-package
-          path: ${{ runner.temp }}/package
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: cli-install-*
-          path: ${{ runner.temp }}/reports
-      - name: Publish only the authenticated, validated archive
-        run: node scripts/publish-cli-release.mjs
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          MCODE_RELEASE_DIRECTORY: ${{ runner.temp }}/package
-          MCODE_RELEASE_REPORTS: ${{ runner.temp }}/reports
-  # Publishes the single-bin ACP launcher (@minimax-ai/code-acp) in lockstep
-  # with @minimax-ai/code, which the ACP registry runs via `npx ... acp`.
-  # Opt-in: set repo variable MCODE_ACP_PUBLISH=true and secret NPM_TOKEN.
-  publish-acp:
-    needs: [build, publish]
-    if: github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'
-    permissions:
-      contents: read
-      id-token: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      VERSION: ${{ needs.build.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-          package-manager-cache: false
-      - name: Wait for @minimax-ai/code at this version on npm
-        shell: bash
-        run: |
-          for _ in $(seq 1 80); do
-            npm view "@minimax-ai/code@$VERSION" version >/dev/null 2>&1 && exit 0
-            sleep 20
-          done
-          echo "@minimax-ai/code@$VERSION not on npm after waiting" >&2; exit 1
-      - name: Stamp and publish @minimax-ai/code-acp
-        working-directory: packages/code-acp
-        shell: bash
-        run: |
-          if npm view "@minimax-ai/code-acp@$VERSION" version >/dev/null 2>&1; then
-            echo "already published"; exit 0
-          fi
-          npm pkg set version="$VERSION" "dependencies.@minimax-ai/code=$VERSION"
-          tag=latest; [[ "$VERSION" == *-* ]] && tag=next
-          npm publish --access public --provenance --tag "$tag"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

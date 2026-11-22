@@ -145,8 +145,8 @@ End-to-end tests against a real CLI and model are opt-in:
 
 Release notes are in
 [CHANGELOG.md](https://github.com/MiniMax-AI/minimax-code/blob/main/packages/code-sdk-python/CHANGELOG.md);
-maintainers publish with
-[RELEASING.md](https://github.com/MiniMax-AI/minimax-code/blob/main/packages/code-sdk-python/RELEASING.md).
+Ncode package checks are described in
+[RELEASING.md](https://github.com/niwa-labs/ncode/blob/main/packages/code-sdk-python/RELEASING.md).
 
 ## License
 

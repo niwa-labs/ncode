@@ -11,32 +11,21 @@ export function versionFromTag(tag) {
   return tag.slice(1);
 }
 
-export function isUpstreamCliSource(manifest) {
-  return manifest.name === 'minimax-code';
-}
+export const ncodeReleaseIdentity = Object.freeze({
+  packageName: '@niwa-labs/ncode',
+  command: 'ncode',
+  title: 'Ncode',
+});
 
-export function cliReleaseIdentity(manifest) {
-  return isUpstreamCliSource(manifest)
-    ? { packageName: '@minimax-ai/code', command: 'mcode', archiveBase: 'minimax-code', title: 'MiniMax Code' }
-    : { packageName: manifest.name, command: 'ncode', archiveBase: 'ncode', title: 'Ncode' };
-}
-
-export function cliReleaseArchiveName(manifest, version) {
-  return `${cliReleaseIdentity(manifest).archiveBase}-${version}.tar.gz`;
-}
-
-export function assertUpstreamCliPublication(root) {
-  const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-  if (!isUpstreamCliSource(manifest)) {
-    throw new Error('CLI publication is reserved for upstream MiniMax Code.');
-  }
+export function cliReleaseArchiveName(version) {
+  return `${ncodeReleaseIdentity.command}-${version}.tar.gz`;
 }
 
 export function cliBuildVersion(root, tag = process.env.MCODE_RELEASE_TAG) {
   const version = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')).version;
   const tuiVersion = JSON.parse(readFileSync(path.join(root, 'packages/tui/package.json'), 'utf8')).version;
   if (version !== tuiVersion) throw new Error('Root and TUI package versions must match.');
-  if (tag != null && versionFromTag(tag) !== version) throw new Error('Release tag must match root and TUI package versions. Run the release command before tagging.');
+  if (tag != null && versionFromTag(tag) !== version) throw new Error('Release tag must match root and TUI package versions. Update the source package versions before tagging.');
   return version;
 }
 

@@ -1,6 +1,6 @@
 """Release checks for minimax-code-sdk. Never builds or publishes; see RELEASING.md.
 
-    python scripts/release_check.py metadata [--tag TAG] [--index pypi|testpypi]
+    python scripts/release_check.py metadata [--tag TAG]
     python scripts/release_check.py dist DIST_DIR --version X.Y.Z [--extract DIR]
 
 ``metadata`` prints the checked version on stdout. Diagnostics go to stderr.
@@ -13,18 +13,14 @@ import hashlib
 import re
 import sys
 import tarfile
-import urllib.error
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-PROJECT = "minimax-code-sdk"
 DIST_NAME = "minimax_code_sdk"
 IMPORT_NAME = "minimax_code"
 TAG_PREFIX = "code-sdk-python-v"
 ROOT = Path(__file__).resolve().parent.parent
-INDEXES = {"pypi": "https://pypi.org", "testpypi": "https://test.pypi.org"}
 
 # Stable X.Y.Z or a PEP 440 pre-release X.Y.Z{a|b|rc}N, in canonical form.
 _VERSION = re.compile(
@@ -96,19 +92,6 @@ def check_metadata(root: Path = ROOT, tag: str | None = None) -> str:
         raise ReleaseCheckError("\n".join(problems))
     assert version is not None
     return version
-
-
-def is_published(index: str, version: str, timeout: float = 30) -> bool:
-    url = f"{INDEXES[index]}/pypi/{PROJECT}/{version}/json"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout):
-            return True
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return False
-        raise ReleaseCheckError(f"Could not query {url}: HTTP {error.code}") from error
-    except urllib.error.URLError as error:
-        raise ReleaseCheckError(f"Could not query {url}: {error.reason}") from error
 
 
 def _safe_member(name: str) -> bool:
@@ -185,7 +168,6 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     meta = sub.add_parser("metadata", help="check versions, changelog and tag")
     meta.add_argument("--tag", help=f"release tag, {TAG_PREFIX}<version>")
-    meta.add_argument("--index", choices=sorted(INDEXES), help="fail if already published there")
     dist = sub.add_parser("dist", help="check the built wheel and sdist")
     dist.add_argument("dist_dir", type=Path)
     dist.add_argument("--version", required=True)
@@ -194,10 +176,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "metadata":
             version = check_metadata(tag=args.tag)
-            if args.index and is_published(args.index, version):
-                raise ReleaseCheckError(
-                    f"{PROJECT} {version} already exists on {args.index}; versions are immutable."
-                )
             print(version)
         else:
             for name, digest in check_dist(args.dist_dir, args.version, args.extract).items():

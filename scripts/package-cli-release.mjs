@@ -10,8 +10,7 @@ import {
   cliBuildVersion,
   cliExternalModules,
   cliReleaseArchiveName,
-  cliReleaseIdentity,
-  isUpstreamCliSource,
+  ncodeReleaseIdentity,
 } from './lib/cli-release.mjs';
 import { readExtraction, dependencyLicensesPath } from './lib/release-metadata.mjs';
 
@@ -60,11 +59,6 @@ function copyLicenses(stage) {
 
 export function releaseManifest(importers, version) {
   const source = json(path.join(root, 'package.json'));
-  const upstream = isUpstreamCliSource(source);
-  const identity = cliReleaseIdentity(source);
-  const repository = source.repository ?? (upstream
-    ? { type: 'git', url: 'https://github.com/MiniMax-AI/minimax-code.git' }
-    : undefined);
   const dependencies = {}, optionalDependencies = {};
   for (const name of cliExternalModules) {
     const versions = new Set(importers.map(importer => resolvePackage(name, importer)).filter(Boolean)
@@ -74,28 +68,24 @@ export function releaseManifest(importers, version) {
     target[name] = [...versions][0];
   }
   return {
-    name: identity.packageName, version, type: 'module', license: 'MIT',
-    ...(identity.packageName === '@niwa-labs/ncode' ? { publishConfig: { access: 'public' } } : { private: true }),
-    description: upstream
-      ? 'MiniMax Code CLI built from the tagged public source.'
-      : source.description,
-    bin: { [identity.command]: 'cli.js' },
+    name: ncodeReleaseIdentity.packageName, version, type: 'module', license: 'MIT',
+    publishConfig: { access: 'public' },
+    description: source.description,
+    bin: { [ncodeReleaseIdentity.command]: 'cli.js' },
     engines: source.engines,
-    ...(repository === undefined ? {} : { repository }),
+    repository: source.repository,
     dependencies, optionalDependencies,
   };
 }
 
 export async function packageCliRelease({ tag, out }) {
   const version = cliBuildVersion(root, tag);
-  const source = json(path.join(root, 'package.json'));
-  const identity = cliReleaseIdentity(source);
   const dist = path.join(root, 'dist');
   if (json(path.join(dist, 'package.json')).version !== version) throw new Error('Build version does not match the release tag. Build with MCODE_RELEASE_TAG first.');
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   if (execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: root, encoding: 'utf8' }).trim()) throw new Error('Packaging requires a clean committed working tree.');
   if (json(path.join(dist, 'package.json')).gitHead !== revision) throw new Error('Build revision does not match HEAD. Rebuild with MCODE_RELEASE_TAG.');
-  const temporary = mkdtempSync(path.join(tmpdir(), 'mcode-release-'));
+  const temporary = mkdtempSync(path.join(tmpdir(), 'ncode-release-'));
   try {
     const stage = path.join(temporary, 'package');
     cpSync(dist, stage, { recursive: true, filter: file => path.basename(file) !== 'metafile.json' });
@@ -103,17 +93,17 @@ export async function packageCliRelease({ tag, out }) {
     writeFileSync(path.join(stage, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     copyLicenses(stage);
     writeFileSync(path.join(stage, 'release.json'), JSON.stringify({ version, tag, revision, buildNode: process.version }, null, 2) + '\n');
-    writeFileSync(path.join(stage, 'README.md'), `# ${identity.title} ${version}
+    writeFileSync(path.join(stage, 'README.md'), `# ${ncodeReleaseIdentity.title} ${version}
 
 ${manifest.description}
 Built locally from source commit ${revision}.
-${identity.packageName === '@niwa-labs/ncode' ? 'Install with `npm install --global @niwa-labs/ncode`.' : 'Install this tar.gz with npm.'} Node.js must satisfy the package engines requirement.
+Install with \`npm install --global ${ncodeReleaseIdentity.packageName}\`. Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
-Run \`${identity.command}\` after installation.
-${identity.packageName === '@niwa-labs/ncode' ? 'Read about [terminal sessions, ACP history and profiles](https://github.com/niwa-labs/ncode#what-ncode-adds-to-mcode).' : 'Use a separate npm prefix and profile to keep local testing isolated.'}
+Run \`${ncodeReleaseIdentity.command}\` after installation.
+Read about [terminal sessions, ACP history and profiles](https://github.com/niwa-labs/ncode#what-ncode-adds-to-mcode).
 `);
     mkdirSync(out, { recursive: true });
-    const archive = path.join(out, cliReleaseArchiveName(source, version));
+    const archive = path.join(out, cliReleaseArchiveName(version));
     if (existsSync(archive) || existsSync(`${archive}.sha256`)) throw new Error(`Output already exists: ${archive}`);
     await createTar({ file: archive, gzip: true, cwd: temporary, portable: true }, ['package']);
     writeFileSync(`${archive}.sha256`, `${digest(readFileSync(archive))}  ${path.basename(archive)}\n`, { flag: 'wx' });

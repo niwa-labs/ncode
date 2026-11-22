@@ -2,12 +2,12 @@
 
 Describe the user-visible problem and resulting behavior. Link a public issue when applicable.
 
-- PR labels: change type (`bug`, `enhancement`, `documentation` or `dependencies`) and affected product (`cli`, `tui` together with `cli`, or `desktop`) where applicable; see the [label guide](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/maintainers.md#pull-request-labels).
+- PR labels: change type (`bug`, `enhancement`, `documentation` or `dependencies`) and affected interface (`cli`, with `tui` for interactive terminal changes) where applicable; see the [label guide](https://github.com/niwa-labs/ncode/blob/main/docs/maintainers.md#pull-request-labels).
 
 ## Validation
 
 - Checks run and results (include the revision/profile where relevant):
-- Performance: basic / `perf:full` (see [requirements](https://github.com/MiniMax-AI/minimax-code/blob/main/CONTRIBUTING.md#performance-checks)); for full coverage, link a passing run for the latest PR head and intended base:
+- Performance: basic / `perf:full` (see [requirements](https://github.com/niwa-labs/ncode/blob/main/CONTRIBUTING.md#performance-checks)); for full coverage, link a passing run for the latest PR head and intended base:
 - NOT RUN, platform limitations and live-service boundaries:
 
 ## Publication and contribution checks

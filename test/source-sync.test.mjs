@@ -17,8 +17,6 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { cliBuildVersion, cliExternalModules, cliReleaseTargets, versionFromTag } from '../scripts/lib/cli-release.mjs';
 import { releaseManifest } from '../scripts/package-cli-release.mjs';
-import { validateReleaseReports } from '../scripts/publish-cli-release.mjs';
-import { compareVersions, releaseCli } from '../scripts/release-cli.mjs';
 import { compareRuns, exitCodeForStatus, renderReport, spread, validateRun, validateRequest, validateToolOutput, median, selectScenarios } from '../scripts/perf/report.mjs';
 import { copyMcodeToolsArtifact, downloadMcodeToolsArtifact, MCODE_TOOLS_ARTIFACT } from '../scripts/lib/mcode-tools-artifact.mjs';
 import { checkWindowsSourceLocation, runWindowsSourceLocationCheck } from '../scripts/check-windows-source-location.mjs';
@@ -411,72 +409,6 @@ test('release tags are canonical and must match both source versions without ove
   assert.throws(() => cliBuildVersion(f.root, null), /Root and TUI/);
 });
 
-function cliReleaseFixture(t) {
-  const home = mkdtempSync(path.join(tmpdir(), 'cli-release-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
-  const root = path.join(home, 'checkout'), remote = path.join(home, 'remote.git');
-  execFileSync('git', ['init', '--bare', remote], { stdio: 'ignore' });
-  execFileSync('git', ['init', '--initial-branch=main', root], { stdio: 'ignore' });
-  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  git('config', 'user.name', 'Release Fixture'); git('config', 'user.email', 'release@example.invalid');
-  git('config', 'core.hooksPath', path.join(home, 'no-hooks'));
-  mkdirSync(path.join(root, 'packages/tui'), { recursive: true });
-  for (const name of ['package.json', 'packages/tui/package.json']) writeFileSync(path.join(root, name), JSON.stringify({ name: 'minimax-code', version: '1.2.3', private: true }, null, 2) + '\n');
-  git('add', '.'); git('commit', '-m', 'Fixture baseline'); git('remote', 'add', 'origin', remote); git('push', '-u', 'origin', 'main');
-  return { root, remote, git, base: git('rev-parse', 'HEAD') };
-}
-
-test('release command bumps source before tagging, pushes a release branch and opens its version PR', t => {
-  const f = cliReleaseFixture(t);
-  const prs = [];
-  const plan = releaseCli({ root: f.root, version: '1.2.4', dryRun: true });
-  assert.equal(plan.tag, 'v1.2.4');
-  assert.equal(f.git('status', '--porcelain'), '');
-  assert.equal(f.git('rev-parse', 'HEAD'), f.base);
-  const result = releaseCli({ root: f.root, version: '1.2.4', openPullRequest: request => prs.push(request) });
-  assert.equal(f.git('branch', '--show-current'), 'release/v1.2.4');
-  assert.equal(f.git('cat-file', '-t', 'v1.2.4'), 'tag');
-  assert.equal(f.git('rev-parse', 'v1.2.4^{commit}'), result.revision);
-  assert.equal(f.git('rev-parse', 'origin/main'), f.base);
-  assert.equal(f.git('rev-parse', 'origin/release/v1.2.4'), result.revision);
-  for (const name of ['package.json', 'packages/tui/package.json'])
-    assert.equal(JSON.parse(f.git('show', `v1.2.4:${name}`)).version, '1.2.4');
-  assert.equal(prs.length, 1);
-  assert.equal(prs[0].branch, 'release/v1.2.4');
-  assert.equal(f.git('ls-remote', 'origin', 'refs/heads/main').split('\t')[0], f.base);
-  assert.ok(f.git('ls-remote', 'origin', 'refs/tags/v1.2.4'));
-});
-
-test('release command rejects dirty trees, version regressions, stale bases and existing remote tags', t => {
-  const f = cliReleaseFixture(t);
-  const release = version => releaseCli({ root: f.root, version, dryRun: true });
-  for (const version of ['1.2.3', '1.2.2', '1.2.3-rc.1']) assert.throws(() => release(version), /must be newer/);
-  writeFileSync(path.join(f.root, 'untracked'), 'unfinished');
-  assert.throws(() => release('1.2.4'), /clean working tree/);
-  f.git('add', 'untracked'); f.git('commit', '-m', 'Unreviewed change');
-  assert.throws(() => release('1.2.4'), /latest origin\/main/);
-  f.git('switch', '--detach', f.base);
-  f.git('tag', 'v1.2.4'); f.git('push', 'origin', 'refs/tags/v1.2.4'); f.git('tag', '-d', 'v1.2.4');
-  assert.throws(() => release('1.2.4'), /already exists on origin/);
-  assert.equal(f.git('rev-parse', 'HEAD'), f.base);
-  assert.equal(f.git('status', '--porcelain'), '');
-  for (const [a, b] of [['1.2.4', '1.2.3'], ['1.2.4', '1.2.4-rc.1'], ['1.2.4-rc.10', '1.2.4-rc.2'], ['1.2.4-beta', '1.2.4-1']]) {
-    assert.equal(compareVersions(a, b), 1); assert.equal(compareVersions(b, a), -1);
-  }
-});
-
-test('rejected tag pushes cannot leave a partial remote release branch or open a version PR', { skip: process.platform === 'win32' }, t => {
-  const f = cliReleaseFixture(t);
-  execFileSync('git', ['--git-dir', f.remote, 'config', 'core.hooksPath', path.join(f.remote, 'hooks')]);
-  writeFileSync(path.join(f.remote, 'hooks/update'), '#!/bin/sh\ncase "$1" in refs/tags/*) exit 1 ;; esac\nexit 0\n', { mode: 0o755 });
-  let opened = false;
-  assert.throws(() => releaseCli({ root: f.root, version: '1.2.4', openPullRequest: () => { opened = true; } }));
-  assert.equal(opened, false);
-  assert.equal(f.git('ls-remote', 'origin', 'refs/tags/v1.2.4', 'refs/heads/release/v1.2.4'), '');
-  assert.equal(f.git('rev-parse', 'origin/main'), f.base);
-  assert.equal(f.git('rev-parse', 'v1.2.4^{commit}'), f.git('rev-parse', 'HEAD'));
-});
-
 test('npm release manifests require native SQLite and pin installed external dependencies', t => {
   const f = fixture(t);
   for (const name of cliExternalModules) {
@@ -502,117 +434,99 @@ test('npm release manifests require native SQLite and pin installed external dep
   assert.throws(() => releaseManifest([f.root, f.source], '0.4.13'), /Expected one installed version/);
 });
 
-test('CLI publication requires every supported installation receipt for the exact archive and revision', t => {
-  const f = fixture(t);
-  const archive = path.join(f.root, 'minimax-code-0.4.13.tar.gz');
-  writeFileSync(archive, 'synthetic archive');
-  const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
-  writeFileSync(`${archive}.sha256`, `${sha256}  ${path.basename(archive)}\n`);
-  const revision = 'a'.repeat(40);
-  const reports = path.join(f.root, 'reports');
-  for (const target of cliReleaseTargets) {
-    const directory = path.join(reports, `cli-install-${target.os}-${target.node}`);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(path.join(directory, 'package-install.json'), JSON.stringify({
-      status: 'PASS', version: '0.4.13', revision, sha256,
-      platform: target.os.startsWith('ubuntu') ? 'linux' : 'darwin', node: `v${target.node}`,
-    }));
-    writeFileSync(path.join(directory, 'verification.json'), JSON.stringify({
-      status: 'PASS', profile: 'package', revision, gates: [{ name: 'test:release-package', status: 'PASS' }],
-    }));
-  }
-  const options = { archive, reports, version: '0.4.13', revision };
-  assert.equal(validateReleaseReports(options), sha256);
-  assert.throws(() => validateReleaseReports({ ...options, version: '0.4.14' }));
-  assert.throws(() => validateReleaseReports({ ...options, revision: 'b'.repeat(40) }));
-  const target = cliReleaseTargets.at(-1);
-  const receipt = path.join(reports, `cli-install-${target.os}-${target.node}`, 'package-install.json');
-  const original = readFileSync(receipt, 'utf8');
-  for (const override of [{ sha256: '0'.repeat(64) }, { status: 'FAIL' }, { node: 'v20.0.0' }]) {
-    writeFileSync(receipt, JSON.stringify({ ...JSON.parse(original), ...override }));
-    assert.throws(() => validateReleaseReports(options));
-  }
-  rmSync(receipt);
-  assert.throws(() => validateReleaseReports(options));
-  writeFileSync(receipt, original);
-  writeFileSync(archive, 'changed archive');
-  assert.throws(() => validateReleaseReports(options));
-});
-
-test('source fork CLI publication commands fail before accessing Git or GitHub', () => {
-  const root = fileURLToPath(new URL('../', import.meta.url));
-  for (const args of [
-    ['scripts/release-cli.mjs', '--version', '100.0.0'],
-    ['scripts/publish-cli-release.mjs'],
-  ]) {
-    const result = spawnSync(process.execPath, args, { cwd: root, encoding: 'utf8' });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /CLI publication is reserved for upstream MiniMax Code/);
-  }
-});
-
-test('CLI release publishes only upstream tag pushes after verification and installation', () => {
+test('Ncode package verification builds and installs the same archive with read-only permissions', t => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/cli-release.yml', import.meta.url), 'utf8'));
+  assert.equal(workflow.name, 'Ncode package verification');
   assert.deepEqual(workflow.on.push, { tags: ['v*'] });
   assert.equal(workflow.on.workflow_dispatch.inputs.tag.required, false);
-  assert.equal(workflow.permissions.contents, 'read');
-  assert.equal(workflow.concurrency['cancel-in-progress'], false);
-  assert.ok(workflow.jobs.build.steps.some(step => step.run === 'pnpm verify'));
-  assert.ok(workflow.jobs.build.steps.some(step => step.run?.includes('cliBuildVersion(process.cwd(), tag)')));
-  assert.deepEqual(workflow.jobs.publish.needs, ['build', 'install']);
-  assert.equal(workflow.jobs.publish.if, "github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push'");
-  assert.equal(workflow.jobs['publish-acp'].if, "github.repository == 'MiniMax-AI/minimax-code' && github.event_name == 'push' && vars.MCODE_ACP_PUBLISH == 'true'");
-  assert.equal(workflow.jobs.publish.permissions.contents, 'write');
-  assert.equal(workflow.jobs.install.strategy.matrix, '${{ fromJSON(needs.build.outputs.matrix) }}');
-  const install = workflow.jobs.install.steps.find(step => step.run === 'pnpm verify --profile package');
-  assert.equal(workflow.jobs.build.outputs.archive, '${{ steps.release.outputs.archive }}');
-  assert.ok(workflow.jobs.build.steps.some(step => step.run?.includes('cliReleaseArchiveName(source, version)')));
-  assert.equal(install.env.MCODE_RELEASE_ARCHIVE, '${{ runner.temp }}/package/${{ needs.build.outputs.archive }}');
-  for (const job of Object.values(workflow.jobs)) {
-    for (const step of job.steps) {
-      if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[a-f0-9]{40}$/);
-      if (step.uses?.startsWith('actions/checkout@')) assert.equal(step.with['persist-credentials'], false);
-      if (step.run) assert.doesNotMatch(step.run, /\$\{\{.*(?:inputs|github\.(?:ref|event))/);
-    }
-  }
-});
-
-test('Python SDK release publishes only tag pushes through Trusted Publishing after checks', () => {
-  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/python-sdk-release.yml', import.meta.url), 'utf8'));
-  assert.deepEqual(workflow.on.push, { tags: ['code-sdk-python-v*'] });
-  assert.ok(!Object.hasOwn(workflow.on, 'pull_request_target'));
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.repository.options, ['none', 'testpypi']);
-  assert.equal(workflow.on.workflow_dispatch.inputs.repository.default, 'none');
+  assert.equal(workflow.on.pull_request_target, undefined);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(Object.keys(workflow.jobs), ['build', 'install']);
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
-  const build = workflow.jobs.build;
-  assert.equal(build.permissions, undefined);
-  const metadata = build.steps.find(step => step.id === 'metadata');
-  assert.match(metadata.run, /git merge-base --is-ancestor HEAD origin\/main/);
-  assert.match(metadata.run, /--tag "\$TAG" --index pypi/);
-  for (const command of ['uv sync --locked', 'uv run mypy', 'uv run pytest -W error'])
-    assert.ok(build.steps.some(step => step.run === command), command);
-  assert.ok(build.steps.some(step => step.run?.includes('release_check.py dist')));
-  assert.ok(build.steps.some(step => step.run?.includes('public-text-policy.mjs')));
-  assert.ok(build.steps.some(step => step.run?.includes('gitleaks dir')));
-  const publishers = { 'publish-pypi': ["github.event_name == 'push'", 'pypi'], 'publish-testpypi': ["github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi'", 'testpypi'] };
-  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['build', ...Object.keys(publishers)].sort());
-  for (const [name, [condition, environment]] of Object.entries(publishers)) {
-    const job = workflow.jobs[name];
-    assert.equal(job.needs, 'build');
-    assert.equal(job.if, `github.repository == 'MiniMax-AI/minimax-code' && ${condition}`);
-    assert.equal(job.environment.name, environment);
-    assert.deepEqual(job.permissions, { 'id-token': 'write' });
-    assert.ok(job.steps.every(step => !step.run), 'publish jobs run no repository code');
-    assert.ok(job.steps.some(step => step.uses?.startsWith('pypa/gh-action-pypi-publish@')));
-  }
+
+  const { build, install } = workflow.jobs;
+  assert.equal(build.steps.find(step => step.run === 'pnpm verify')?.env.MCODE_VERIFY_REPORT_DIR, '${{ runner.temp }}/build-report');
+  assert.ok(build.steps.some(step => step.run?.includes('gitleaks dir dist')));
+  assert.ok(build.steps.some(step => step.run?.includes('node scripts/package-cli-release.mjs')));
+  assert.equal(install.needs, 'build');
+  assert.deepEqual(install.strategy, { 'fail-fast': false, matrix: '${{ fromJSON(needs.build.outputs.matrix) }}' });
+  assert.equal(install.env.MCODE_RELEASE_TAG, '${{ needs.build.outputs.tag }}');
+  const packageCheck = install.steps.find(step => step.run === 'pnpm verify --profile package');
+  assert.equal(packageCheck?.env.MCODE_RELEASE_ARCHIVE, '${{ runner.temp }}/package/${{ needs.build.outputs.archive }}');
+  assert.equal(build.outputs.archive, '${{ steps.release.outputs.archive }}');
+  const upload = build.steps.find(step => step.with?.name === 'cli-package');
+  const download = install.steps.find(step => step.with?.name === 'cli-package');
+  assert.match(upload?.uses, /^actions\/upload-artifact@/);
+  assert.match(download?.uses, /^actions\/download-artifact@/);
+
+  const metadata = build.steps.find(step => step.id === 'release');
+  assert.match(metadata?.run, /refs\/tags\/\$REQUESTED_TAG\^\{commit\}/);
+  const script = metadata.run.match(/<<'JS'\r?\n([\s\S]*?)\r?\nJS\r?\n/)?.[1];
+  assert.ok(script);
+  const f = fixture(t);
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const version = cliBuildVersion(root, null);
+  const outputPath = path.join(f.root, 'workflow-output');
+  const envPath = path.join(f.root, 'workflow-env');
+  const env = { ...process.env, GITHUB_OUTPUT: outputPath, GITHUB_ENV: envPath };
+  delete env.MCODE_RELEASE_TAG;
+  const runMetadata = tag => spawnSync(process.execPath, ['--input-type=module'], {
+    cwd: root, input: script, encoding: 'utf8', env: { ...env, REQUESTED_TAG: tag },
+  });
+  const result = runMetadata('');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(outputPath, 'utf8'),
+    `tag=v${version}\narchive=ncode-${version}.tar.gz\nmatrix=${JSON.stringify({ include: cliReleaseTargets })}\n`);
+  assert.equal(readFileSync(envPath, 'utf8'), `MCODE_RELEASE_TAG=v${version}\n`);
+  const mismatch = runMetadata('v999999.0.0');
+  assert.equal(mismatch.status, 1);
+  assert.match(mismatch.stderr, /Release tag must match/);
+
   for (const job of Object.values(workflow.jobs)) {
+    assert.equal(job.permissions, undefined);
+    assert.equal(job.environment, undefined);
     for (const step of job.steps) {
       if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[a-f0-9]{40}$/);
       if (step.uses?.startsWith('actions/checkout@')) assert.equal(step.with['persist-credentials'], false);
       if (step.run) assert.doesNotMatch(step.run, /\$\{\{/);
     }
   }
+  assert.doesNotMatch(JSON.stringify(workflow), /npm publish|gh release|MiniMax-AI\/minimax-code|secrets\.|id-token/);
+});
+
+test('Python SDK package verification builds and smokes the wheel without a publishing job', () => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/python-sdk-release.yml', import.meta.url), 'utf8'));
+  assert.equal(workflow.name, 'Python SDK package verification');
+  assert.deepEqual(Object.keys(workflow.on), ['pull_request', 'workflow_dispatch']);
+  assert.equal(workflow.on.workflow_dispatch, null);
+  assert.ok(workflow.on.pull_request.paths.includes('packages/code-sdk-python/**'));
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(Object.keys(workflow.jobs), ['build']);
+  assert.equal(workflow.concurrency['cancel-in-progress'], false);
+
+  const build = workflow.jobs.build;
+  assert.equal(build.permissions, undefined);
+  assert.equal(build.environment, undefined);
+  const metadata = build.steps.find(step => step.id === 'metadata');
+  assert.match(metadata?.run, /uv run --no-project python scripts\/release_check.py metadata\)/);
+  for (const command of ['uv sync --locked', 'uv run ruff check .', 'uv run ruff format --check .', 'uv run mypy', 'uv run pytest -W error']) {
+    assert.ok(build.steps.some(step => step.run === command), command);
+  }
+  for (const check of ['uv build', 'twine check --strict', 'release_check.py dist', 'public-text-policy.mjs', 'gitleaks dir']) {
+    assert.ok(build.steps.some(step => step.run?.includes(check)), check);
+  }
+  const smoke = build.steps.find(step => step.run?.includes('uv pip install'));
+  assert.match(smoke?.run, /dist\/\*\.whl/);
+  assert.match(smoke?.run, /minimax_code\.__version__/);
+  assert.equal(smoke?.env.VERSION, '${{ steps.metadata.outputs.version }}');
+  assert.ok(build.steps.some(step => step.uses?.startsWith('actions/upload-artifact@') && step.with?.name === 'python-sdk-dist'));
+
+  for (const step of build.steps) {
+    if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[a-f0-9]{40}$/);
+    if (step.uses?.startsWith('actions/checkout@')) assert.equal(step.with['persist-credentials'], false);
+    if (step.run) assert.doesNotMatch(step.run, /\$\{\{/);
+  }
+  assert.doesNotMatch(JSON.stringify(workflow), /testpypi|pypi-publish|twine upload|secrets\.|id-token/);
 });
 import { runInNewContext } from 'node:vm';
 
@@ -1105,22 +1019,22 @@ test('suite runner pins its locale, preserves gate arguments and canonicalizes W
   }
 });
 
-test('public support forms preserve destination URLs and separate Desktop from CLI reports', () => {
+test('Ncode support forms list the supported CLI interfaces', () => {
   const forms = ['01-bug-report.yml', '02-feature-request.yml', '03-question.yml', 'docs.yml'];
   for (const name of forms) {
     const form = parseYaml(readFileSync(new URL(`../.github/ISSUE_TEMPLATE/${name}`, import.meta.url), 'utf8'));
     const product = form.body.find(field => field.id === 'product');
     assert.equal(product.validations.required, name !== '03-question.yml');
     assert.equal(product.attributes.label, 'Product or interface');
-    assert.ok(product.attributes.options.includes('CLI - interactive TUI'));
-    assert.ok(product.attributes.options.includes('Desktop app'));
-    assert.ok(product.attributes.options.includes('CLI - ACP'));
-    assert.ok(product.attributes.options.includes('CLI - headless'));
+    assert.deepEqual(product.attributes.options, [
+      'CLI - interactive TUI', 'CLI - headless', 'CLI - ACP', 'Source build or repository tooling',
+    ]);
     const ids = form.body.filter(field => field.id).map(field => field.id);
     assert.equal(new Set(ids).size, ids.length);
   }
   const bug = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/01-bug-report.yml', import.meta.url), 'utf8'));
-  assert.notEqual(bug.body.find(field => field.id === 'upload-id').validations?.required, true);
+  assert.match(bug.body.find(field => field.id === 'version').attributes.description, /ncode --version/);
+  assert.equal(bug.body.some(field => field.id === 'upload-id'), false);
   for (const retired of ['bug.yml', 'feature.yml'])
     assert.equal(existsSync(new URL(`../.github/ISSUE_TEMPLATE/${retired}`, import.meta.url)), false);
   assert.equal(classifyChanges(['README_ZH.md', 'README.md']).docsOnly, true);
@@ -1132,46 +1046,68 @@ test('issue product labels follow current form answers without replacing unrelat
   assert.deepEqual(workflow.permissions, { issues: 'write' });
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
   const job = workflow.jobs['label-product'];
-  assert.equal(job.if, "${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}");
+  assert.equal(job.if, "${{ !github.event.issue.pull_request }}");
   assert.equal(job.steps.length, 1); // No checkout or execution of issue-supplied code.
   const run = job.steps[0].run;
   assert.doesNotMatch(run, /\$\{\{/);
   const script = run.match(/^node <<'EOF'\r?\n([\s\S]*?)\r?\nEOF\s*$/)?.[1];
   assert.ok(script);
-  async function replay(body, labels, failureStatus) {
+  async function replay(body, labels, { action = 'edited', state = 'open', failureStatus, missing = [], raced = [] } = {}) {
     const writes = [];
-    const issuePath = '/repos/MiniMax-AI/minimax-code/issues/7';
+    const repository = 'fixture/ncode';
+    const repositoryUrl = `https://api.github.invalid/repos/${repository}`;
+    const issueUrl = `${repositoryUrl}/issues/7`;
+    const missingLabels = new Set(missing);
     await runInNewContext(script, {
       require: name => {
         assert.equal(name, 'node:fs');
-        return { readFileSync: () => JSON.stringify({ issue: { number: 7, body: '### Product or interface\n\nDesktop app', labels: [] } }) };
+        return { readFileSync: () => JSON.stringify({ action, issue: { number: 7, body: '### Product or interface\n\nCLI - headless', labels: [] } }) };
       },
-      process: { env: { GITHUB_EVENT_PATH: 'fixture.json', GITHUB_REPOSITORY: 'MiniMax-AI/minimax-code', GITHUB_API_URL: 'https://api.github.invalid', GH_TOKEN: 'synthetic' } },
+      process: { env: { GITHUB_EVENT_PATH: 'fixture.json', GITHUB_REPOSITORY: repository, GITHUB_API_URL: 'https://api.github.invalid', GH_TOKEN: 'synthetic' } },
       fetch: async (url, options) => {
         assert.equal(options.headers.Authorization, 'Bearer synthetic');
+        assert.ok(url.startsWith(`${repositoryUrl}/`));
         if (options.method === 'GET') {
-          assert.equal(url, `https://api.github.invalid${issuePath}`);
-          return { ok: !failureStatus, status: failureStatus || 200, json: async () => ({ body, labels: labels.map(name => ({ name })) }) };
+          if (url === issueUrl) {
+            return { ok: !failureStatus, status: failureStatus || 200, json: async () => ({ body, state, labels: labels.map(name => ({ name })) }) };
+          }
+          assert.ok(url.startsWith(`${repositoryUrl}/labels/`));
+          const found = !missingLabels.has(url.split('/').at(-1));
+          return { ok: found, status: found ? 200 : 404 };
         }
-        writes.push({ method: options.method, path: url.replace(`https://api.github.invalid${issuePath}`, ''), body: options.body && JSON.parse(options.body) });
+        const payload = options.body && JSON.parse(options.body);
+        writes.push({ method: options.method, path: url.slice(repositoryUrl.length), body: payload });
+        if (url === `${repositoryUrl}/labels`) {
+          assert.equal(options.method, 'POST');
+          assert.ok(missingLabels.delete(payload.name));
+          return raced.includes(payload.name) ? { ok: false, status: 422 } : { ok: true, status: 201 };
+        }
         return { ok: true, status: 204 };
       },
     });
     return writes;
   }
   const answer = product => `### Product or interface\n\n${product}\n\n### Question\n\nSynthetic question`;
-  const add = name => ({ method: 'POST', path: '/labels', body: { labels: [name] } });
-  const remove = name => ({ method: 'DELETE', path: `/labels/${name}`, body: undefined });
-  assert.deepEqual(await replay(answer('CLI - interactive TUI'), ['bug', 'desktop']), [add('tui'), remove('desktop')]);
-  assert.deepEqual(await replay(answer('Desktop app').replace(/\n/g, '\r\n'), ['question']), [add('desktop')]);
-  assert.deepEqual(await replay(answer('Desktop app'), ['desktop', 'bug']), []);
+  const add = (...labels) => ({ method: 'POST', path: '/issues/7/labels', body: { labels } });
+  const remove = name => ({ method: 'DELETE', path: `/issues/7/labels/${name}`, body: undefined });
+  const provision = (name, color, description) => ({ method: 'POST', path: '/labels', body: { name, color, description } });
+  const tui = answer('CLI - interactive TUI');
+  assert.deepEqual(await replay(tui.replace(/\n/g, '\r\n'), ['bug', 'custom']), [add('tui')]);
+  assert.deepEqual(await replay(tui, ['tui', 'bug']), []);
+  assert.deepEqual(await replay(tui, ['bug'], { action: 'opened', missing: ['needs-triage', 'tui'], raced: ['tui'] }), [
+    provision('needs-triage', 'ededed', 'Awaiting maintainer assessment'),
+    provision('tui', 'bfdadc', 'Interactive terminal interface'),
+    add('needs-triage', 'tui'),
+  ]);
+  assert.deepEqual(await replay(null, ['question'], { action: 'opened' }), [add('needs-triage')]);
+  assert.deepEqual(await replay(null, ['question'], { action: 'opened', state: 'closed' }), []);
   for (const product of ['CLI - headless', 'CLI - ACP', 'Source build or repository tooling']) {
     assert.deepEqual(await replay(answer(product), ['tui', 'bug']), [remove('tui')]);
   }
-  for (const body of [null, 'Desktop app', answer('_No response_'), answer('$(touch must-not-execute)')]) {
-    assert.deepEqual(await replay(body, ['desktop', 'bug']), []);
+  for (const body of [null, 'CLI - interactive TUI', answer('_No response_'), answer('$(touch must-not-execute)')]) {
+    assert.deepEqual(await replay(body, ['tui', 'bug']), []);
   }
-  await assert.rejects(replay(answer('Desktop app'), [], 403), /GitHub GET failed: 403/);
+  await assert.rejects(replay(tui, [], { failureStatus: 403 }), /GitHub GET failed: 403/);
 });
 
 test('issue forms label reports for triage and direct vulnerability reports to private intake', () => {
@@ -1186,46 +1122,11 @@ test('issue forms label reports for triage and direct vulnerability reports to p
   assert.equal(config.blank_issues_enabled, false);
   const security = config.contact_links.find(link => link.name === 'Report a vulnerability privately');
   assert.match(security?.url, /^https:\/\/docs\.github\.com\//);
-  assert.match(security.about, /on this repository/);
+  assert.match(security.about, /on this Ncode repository/);
   assert.ok(config.contact_links.every(link => !link.url.includes('MiniMax-AI/minimax-code')));
   const question = parseYaml(readFileSync(new URL('../.github/ISSUE_TEMPLATE/03-question.yml', import.meta.url), 'utf8'));
   assert.equal(question.body.find(field => field.id === 'platform').validations.required, false);
   assert.equal(question.body.find(field => field.id === 'question').validations.required, true);
-});
-
-test('issue notification is restricted to public destination events and builds payloads offline', t => {
-  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/sync-issue-to-feishu.yml', import.meta.url), 'utf8'));
-  assert.deepEqual(workflow.on, { issues: { types: ['opened'] } });
-  assert.deepEqual(workflow.permissions, { contents: 'read', issues: 'read' });
-  const job = workflow.jobs['notify-feishu'];
-  assert.equal(job.if, "${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}");
-  const generate = job.steps.find(step => step.name === 'Build Feishu payload').run;
-  // Execute only the payload builder, never the delivery step or its secrets.
-  assert.doesNotMatch(generate, /\$\{\{\s*github\.event/);
-  const script = generate.match(/^node <<'EOF'\r?\n([\s\S]*?)\r?\nEOF\s*$/)?.[1];
-  assert.ok(script);
-  const directory = mkdtempSync(path.join(tmpdir(), 'support-payload-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const marker = path.join(directory, 'must-not-execute');
-  const event = {
-    repository: { full_name: 'MiniMax-AI/minimax-code', html_url: 'https://github.com/MiniMax-AI/minimax-code' },
-    issue: { number: 7, title: 'Synthetic issue', body: `$(touch ${marker}) <at id=all>test</at>`, labels: [{ name: 'bug' }], created_at: '2026-09-18T00:00:00Z', html_url: 'https://github.com/MiniMax-AI/minimax-code/issues/7', user: { login: 'fixture' } },
-  };
-  const eventPath = path.join(directory, 'event.json');
-  writeFileSync(eventPath, JSON.stringify(event));
-  const result = spawnSync(process.execPath, ['--input-type=commonjs'], {
-    input: script, cwd: directory, encoding: 'utf8', timeout: 10000,
-    env: { ...process.env, GITHUB_EVENT_PATH: eventPath, FEISHU_BOT_SECRET: '', FEISHU_BOT_WEBHOOK: '' },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(existsSync(marker), false);
-  const payload = JSON.parse(readFileSync(path.join(directory, 'feishu-payload.json'), 'utf8'));
-  assert.equal(payload.card.header.template, 'red');
-  assert.equal(payload.card.card_link.url, event.issue.html_url);
-  assert.equal(payload.card.header.title.content, 'GitHub Issue #7: Synthetic issue');
-  assert.doesNotMatch(JSON.stringify(payload), /<at /);
-  assert.match(JSON.stringify(payload), /‹at id=all›/);
-  assert.equal(payload.sign, undefined);
 });
 
 test('source imports preserve vendored Office schema bytes through Git staging', t => {

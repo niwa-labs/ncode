@@ -6,18 +6,17 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliReleaseIdentity, versionFromTag } from './lib/cli-release.mjs';
+import { ncodeReleaseIdentity, versionFromTag } from './lib/cli-release.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const version = versionFromTag(process.env.MCODE_RELEASE_TAG);
-const identity = cliReleaseIdentity(JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')));
 if (!process.env.MCODE_RELEASE_ARCHIVE) throw new Error('MCODE_RELEASE_ARCHIVE is required.');
 if (!['linux', 'darwin'].includes(process.platform)) throw new Error('Package validation currently supports Linux and macOS.');
 const archive = path.resolve(process.env.MCODE_RELEASE_ARCHIVE);
 const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
 assert.equal(readFileSync(`${archive}.sha256`, 'utf8'), `${sha256}  ${path.basename(archive)}\n`, 'Release archive checksum mismatch');
 const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-const temporary = mkdtempSync(path.join(tmpdir(), 'mcode-package-install-'));
+const temporary = mkdtempSync(path.join(tmpdir(), 'ncode-package-install-'));
 try {
   // No global install or real user profile is modified. Dependencies and the
   // generated npm launcher must resolve from this fresh installation alone.
@@ -42,16 +41,17 @@ try {
     '--registry=https://registry.npmjs.org/', '--include=optional', '--ignore-scripts=false',
     '--allow-scripts=better-sqlite3', '--no-audit', '--no-fund', archive],
   { cwd: home, env, stdio: 'inherit', timeout: 300000 });
-  const installed = path.join(prefix, 'lib/node_modules', identity.packageName);
+  const installed = path.join(prefix, 'lib/node_modules', ncodeReleaseIdentity.packageName);
   const release = JSON.parse(readFileSync(path.join(installed, 'release.json'), 'utf8'));
   assert.equal(release.version, version);
   assert.equal(release.tag, process.env.MCODE_RELEASE_TAG);
   assert.equal(release.revision, revision);
   const manifest = JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8'));
-  assert.deepEqual(manifest.bin, { [identity.command]: 'cli.js' }, 'Installed CLI must declare one launcher');
+  assert.equal(manifest.name, ncodeReleaseIdentity.packageName);
+  assert.deepEqual(manifest.bin, { [ncodeReleaseIdentity.command]: 'cli.js' }, 'Installed CLI must declare one launcher');
   const launcherDirectory = path.join(prefix, 'bin');
-  assert.deepEqual(readdirSync(launcherDirectory), [identity.command], 'Fresh installation must expose one launcher');
-  const launcher = path.join(launcherDirectory, identity.command);
+  assert.deepEqual(readdirSync(launcherDirectory), [ncodeReleaseIdentity.command], 'Fresh installation must expose one launcher');
+  const launcher = path.join(launcherDirectory, ncodeReleaseIdentity.command);
   const result = execFileSync(launcher, ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
   assert.equal(result.trim(), version);
   const require = createRequire(path.join(installed, 'package.json'));

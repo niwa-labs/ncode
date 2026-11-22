@@ -15,7 +15,7 @@ jobs:
   label-product:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: ${{ github.repository == 'MiniMax-AI/minimax-code' && github.event.repository.private == false && !github.event.issue.pull_request }}
+    if: ${{ !github.event.issue.pull_request }}
     steps:
       - name: Synchronize product labels
         env:
@@ -27,8 +27,10 @@ jobs:
 
           async function main() {
             const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-            const issuePath = `/repos/${process.env.GITHUB_REPOSITORY}/issues/${event.issue.number}`;
-            async function request(path, method = 'GET', body) {
+            const repositoryPath = `/repos/${process.env.GITHUB_REPOSITORY}`;
+            const issuePath = `${repositoryPath}/issues/${event.issue.number}`;
+            const labelPath = `${repositoryPath}/labels`;
+            async function request(path, method = 'GET', body, allowedStatus) {
               const response = await fetch(`${process.env.GITHUB_API_URL}${path}`, {
                 method,
                 headers: {
@@ -38,32 +40,41 @@ jobs:
                 },
                 body: body === undefined ? undefined : JSON.stringify(body),
               });
-              if (!response.ok) throw new Error(`GitHub ${method} failed: ${response.status}`);
-              return response.status === 204 ? undefined : response.json();
+              if (!response.ok && response.status !== allowedStatus) {
+                throw new Error(`GitHub ${method} failed: ${response.status}`);
+              }
+              return response;
+            }
+
+            async function ensureLabel(label) {
+              const path = `${labelPath}/${label.name}`;
+              const existing = await request(path, 'GET', undefined, 404);
+              if (existing.ok) return;
+              const created = await request(labelPath, 'POST', label, 422);
+              // Another issue's run may have created the same repository label.
+              if (!created.ok) await request(path);
             }
 
             // Read current state so queued edits cannot restore an outdated label.
-            const issue = await request(issuePath);
+            const issue = await (await request(issuePath)).json();
             const body = (issue.body || '').replace(/\r\n/g, '\n');
             const product = body.match(/^### Product or interface\n+([^\n]+)\n*(?=### |$)/m)?.[1].trim();
-            const products = new Map([
-              ['Desktop app', 'desktop'],
-              ['CLI - interactive TUI', 'tui'],
-              ['CLI - headless', null],
-              ['CLI - ACP', null],
-              ['Source build or repository tooling', null],
-            ]);
-            // Leave manually triaged issues alone when no valid form answer exists.
-            if (!products.has(product)) return;
-            const desired = products.get(product);
-            const labels = issue.labels.map(label => label.name);
-            if (desired && !labels.includes(desired)) {
-              await request(`${issuePath}/labels`, 'POST', { labels: [desired] });
+            const labels = new Set(issue.labels.map(label => label.name));
+            const missing = [];
+            if (event.action === 'opened' && issue.state === 'open' && !labels.has('needs-triage')) {
+              missing.push({ name: 'needs-triage', color: 'ededed', description: 'Awaiting maintainer assessment' });
             }
-            for (const label of ['desktop', 'tui']) {
-              if (label !== desired && labels.includes(label)) {
-                await request(`${issuePath}/labels/${label}`, 'DELETE');
-              }
+            if (product === 'CLI - interactive TUI' && !labels.has('tui')) {
+              missing.push({ name: 'tui', color: 'bfdadc', description: 'Interactive terminal interface' });
+            }
+            for (const label of missing) await ensureLabel(label);
+            if (missing.length > 0) {
+              await request(`${issuePath}/labels`, 'POST', { labels: missing.map(label => label.name) });
+            }
+            // Leave manual labels alone when no supported form answer exists.
+            const nonTui = ['CLI - headless', 'CLI - ACP', 'Source build or repository tooling'];
+            if (nonTui.includes(product) && labels.has('tui')) {
+              await request(`${issuePath}/labels/tui`, 'DELETE', undefined, 404);
             }
           }
 
