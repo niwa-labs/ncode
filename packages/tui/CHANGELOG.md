@@ -1,5 +1,10 @@
 # Ncode changelog
 
+## 0.1.2 · 2026-11-22
+
+- ACP clients receive the full final answer after thinking or partial text has streamed. Each answer chunk is delivered once.
+- Based on MCode 0.7.2 with Pi 1.6.0.
+
 ## 0.1.1 · 2026-11-22
 
 - Disable built-in tools for ACP or exec with `--no-builtin-tools`. ACP clients can also pass `--session-mcp-only` to limit discovery to servers supplied on session creation or load.

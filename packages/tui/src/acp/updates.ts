@@ -11,7 +11,8 @@ import { isTuiAcpAbsolutePath } from './paths.js';
 export class TuiAcpUpdateProjector {
   private readonly toolIds = new Map<string, string>();
   private readonly completedToolIds = new Set<string>();
-  private readonly streamedMessageIds = new Set<string>();
+  private readonly streamedLengths = new Map<string, { thinking: number; text: number }>();
+  private readonly completedMessageIds = new Set<string>();
   private nextAnonymousToolId = 1;
 
   project(event: TuiStreamEvent): acp.SessionUpdate[] {
@@ -22,7 +23,13 @@ export class TuiAcpUpdateProjector {
     if (event.type !== 'delta') return [];
     const updates: acp.SessionUpdate[] = [];
     if (event.messageId && (event.thinking || event.content)) {
-      this.streamedMessageIds.add(event.messageId);
+      const lengths = this.streamedLengths.get(event.messageId) ?? {
+        thinking: 0,
+        text: 0,
+      };
+      lengths.thinking += event.thinking?.length ?? 0;
+      lengths.text += event.content?.length ?? 0;
+      this.streamedLengths.set(event.messageId, lengths);
     }
     if (event.thinking) {
       updates.push({
@@ -49,24 +56,27 @@ export class TuiAcpUpdateProjector {
     message: Extract<TuiStreamEvent, { type: 'message' }>['message'],
   ): acp.SessionUpdate[] {
     if (message.role !== 'assistant') return [];
-    if (message.id && this.streamedMessageIds.has(message.id)) return [];
-    if (message.id) this.streamedMessageIds.add(message.id);
+    if (message.id && this.completedMessageIds.has(message.id)) return [];
+    const remaining = (message.id && this.streamedLengths.get(message.id)) || {
+      thinking: 0,
+      text: 0,
+    };
+    if (message.id) {
+      this.completedMessageIds.add(message.id);
+      this.streamedLengths.delete(message.id);
+    }
     return buildTuiMessageParts(message).flatMap((part): acp.SessionUpdate[] => {
-      if (part.type === 'thinking') {
+      if (part.type === 'thinking' || part.type === 'text') {
+        // Each stream is append-only. A snapshot can split its prefix across several parts.
+        const skip = Math.min(remaining[part.type], part.content.length);
+        remaining[part.type] -= skip;
+        const text = part.content.slice(skip);
+        if (!text) return [];
         return [
           {
-            sessionUpdate: 'agent_thought_chunk',
+            sessionUpdate: part.type === 'thinking' ? 'agent_thought_chunk' : 'agent_message_chunk',
             ...(message.id ? { messageId: message.id } : {}),
-            content: { type: 'text', text: part.content },
-          },
-        ];
-      }
-      if (part.type === 'text') {
-        return [
-          {
-            sessionUpdate: 'agent_message_chunk',
-            ...(message.id ? { messageId: message.id } : {}),
-            content: { type: 'text', text: part.content },
+            content: { type: 'text', text },
           },
         ];
       }
