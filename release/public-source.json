@@ -4080,6 +4080,7 @@
     "packages/tui/test/unit/model-effort.test.ts",
     "packages/tui/test/unit/network-proxy-socks5.test.ts",
     "packages/tui/test/unit/network-proxy.test.ts",
+    "packages/tui/test/unit/no-builtin-tools-cli.test.ts",
     "packages/tui/test/unit/observability.test.ts",
     "packages/tui/test/unit/plugin-application.test.ts",
     "packages/tui/test/unit/provider-application.test.ts",

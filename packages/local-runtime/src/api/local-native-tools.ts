@@ -344,6 +344,25 @@ export async function buildLocalTurnToolSources(
       cuRuntimeAvailable: false,
     };
   }
+  if (input.noBuiltinTools === true) {
+    // External-tools-only mode keeps the configured MCP servers (session
+    // or data dir) and drops every native source by construction — builtin
+    // tools, the bundled Matrix server, thread-goal tools and the codemode
+    // runtime — so built-ins added by later versions cannot leak through.
+    const allEntries = await input.mcpService.listToolEntriesForTurn({
+      sessionId: input.sessionId,
+      workspaceRoot: input.workspaceRoot,
+      ...(input.authContext ? { authContext: input.authContext } : {}),
+      routingContextGetter: input.routingContextGetter,
+      emitBusEvent: input.emitBusEvent,
+    });
+    return {
+      nativeTools: [],
+      mcpEntries: allEntries.filter((entry) => entry.source === "configured"),
+      threadGoalTools: [],
+      cuRuntimeAvailable: false,
+    };
+  }
   const cuRuntimeAvailable = input.cuModeActive === true;
   const builtinCapabilities =
     input.builtinCapabilities ?? resolveAgentCapabilities();

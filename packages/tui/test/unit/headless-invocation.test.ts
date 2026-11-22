@@ -534,5 +534,25 @@ describe('System prompt overrides', () => {
       ),
     ).rejects.toMatchObject({ kind: 'invocation' });
   });
-});
+  it('maps the negated --no-builtin-tools flag onto the resolved invocation', async () => {
+    const restricted = await resolveTuiExecInvocation(
+      'hello',
+      { builtinTools: false },
+      async () => '',
+    );
+    expect(restricted.noBuiltinTools).toBe(true);
+    // The daemon implication is applied by the exec runner, not here: the
+    // invocation only records what the caller asked for.
+    expect(restricted).not.toHaveProperty('noDaemon');
 
+    const plain = await resolveTuiExecInvocation('hello', {}, async () => '');
+    expect(plain).not.toHaveProperty('noBuiltinTools');
+
+    const review = await resolveTuiExecInvocation(
+      undefined,
+      { review: true, builtinTools: false },
+      async () => '',
+    );
+    expect(review.noBuiltinTools).toBe(true);
+  });
+});

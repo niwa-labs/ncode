@@ -1,6 +1,8 @@
 import { Console } from 'node:console';
 import type { Readable, Writable } from 'node:stream';
 
+import { NO_BUILTIN_TOOLS_ENV } from '@mavis/config';
+
 import { serveTuiAcpStdio } from '../acp/stdio.js';
 import { prepareTuiDataDir } from '../runtime/data-dir.js';
 import type { SystemPromptOverrides } from './system-prompt-options.js';
@@ -41,6 +43,7 @@ export async function runTuiAcpCommand(
   systemPromptOverrides?: SystemPromptOverrides,
   profile?: string,
   noDaemon?: boolean,
+  noBuiltinTools?: boolean,
 ): Promise<void> {
   const processRef = dependencies.processRef ?? process;
   const controller = new AbortController();
@@ -62,6 +65,13 @@ export async function runTuiAcpCommand(
     const createRuntime = dependencies.createRuntime ?? lifecycle.createTuiRuntime;
     shutdownRuntime ??= lifecycle.shutdownTuiRuntime;
     const dataDir = await (dependencies.prepareDataDir ?? prepareTuiDataDir)();
+    if (noBuiltinTools) {
+      // The runtime reads the mode from the environment (NO_BUILTIN_TOOLS_ENV),
+      // so the flag's whole job is to publish it before the runtime exists —
+      // and to host the runtime in this process, because a shared daemon
+      // started without the variable would not honor this request.
+      process.env[NO_BUILTIN_TOOLS_ENV] = '1';
+    }
     runtime = await createRuntime({
       dataDir,
       workspaceDir: (dependencies.workspaceDir ?? (() => process.cwd()))(),
@@ -69,7 +79,7 @@ export async function runTuiAcpCommand(
       surface: 'acp',
       ...(lane ? { lane } : {}),
       ...(profile ? { profile } : {}),
-      ...(noDaemon ? { noDaemon: true } : {}),
+      ...(noDaemon || noBuiltinTools ? { noDaemon: true } : {}),
       ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
     });
     await (dependencies.serve ?? serveTuiAcpStdio)({

@@ -226,6 +226,8 @@ export {
   isAgentBuiltinMcpToolEnabled,
   isAgentBuiltinSkillEnabled,
   isAgentBuiltinToolEnabled,
+  noBuiltinToolsFromEnv,
+  NO_BUILTIN_TOOLS_ENV,
   parseAgentCapabilityConfig,
   parseAgentsConfig,
   resolveAgentCapabilities,

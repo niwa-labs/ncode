@@ -49,6 +49,8 @@ export interface RawTuiExecOptions extends RawSystemPromptOptions {
   profile?: string;
   /** Commander's negated `--no-daemon` flag (absent ⇒ true). */
   daemon?: boolean;
+  /** Commander's negated `--no-builtin-tools` flag (absent ⇒ true). */
+  builtinTools?: boolean;
 }
 
 export interface ResolvedTuiExecInvocation {
@@ -75,6 +77,12 @@ export interface ResolvedTuiExecInvocation {
    * (overrides MCODE_SERVER_MODE) — isolated/wrapper exec runs.
    */
   noDaemon?: boolean;
+  /**
+   * Explicit `--no-builtin-tools`: every built-in tool is disabled and only
+   * MCP servers remain. Implies `noDaemon` — a shared daemon would not see
+   * this process's request.
+   */
+  noBuiltinTools?: boolean;
   systemPromptOverrides?: SystemPromptOverrides;
 }
 
@@ -218,6 +226,7 @@ export async function resolveTuiExecInvocation(
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     ...(diagnosticsDir === undefined ? {} : { diagnosticsDir }),
     ...(options.daemon === false ? { noDaemon: true } : {}),
+    ...(options.builtinTools === false ? { noBuiltinTools: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }
@@ -275,6 +284,7 @@ async function resolveTuiExecReviewInvocation(
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     reviewRequest: { scope: 'local_changes' },
     ...(options.daemon === false ? { noDaemon: true } : {}),
+    ...(options.builtinTools === false ? { noBuiltinTools: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }

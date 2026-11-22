@@ -43,6 +43,22 @@ export const AGENT_BUILTIN_MCP_TOOL_IDS = [
 export type AgentBuiltinMcpToolId = (typeof AGENT_BUILTIN_MCP_TOOL_IDS)[number];
 
 /**
+ * Env var that puts every surface of this process into external-tools-only
+ * mode: the built-in tools, the bundled Matrix MCP server, thread-goal tools
+ * and the codemode runtime are all dropped, and only configured MCP servers
+ * (session-scoped or from the data dir) remain. A harness that drives the
+ * agent over ACP sets this to hand the model exactly the tools it supplies.
+ */
+export const NO_BUILTIN_TOOLS_ENV = 'MCODE_NO_BUILTIN_TOOLS';
+
+/** Whether `env` asks for external-tools-only mode (see {@link NO_BUILTIN_TOOLS_ENV}). */
+export function noBuiltinToolsFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return env[NO_BUILTIN_TOOLS_ENV] === '1';
+}
+
+/**
  * Standalone Builtin Skills that may be selected independently.
  * Skills owned by another capability are derived at runtime so they cannot
  * outlive the Tool or feature that makes their instructions executable.

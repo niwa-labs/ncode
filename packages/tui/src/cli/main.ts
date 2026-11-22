@@ -313,9 +313,18 @@ async function defaultRunAcp(
   systemPromptOverrides?: SystemPromptOverrides,
   profile?: string,
   noDaemon?: boolean,
+  noBuiltinTools?: boolean,
 ): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
-  await runTuiAcpCommand(version, {}, lane, systemPromptOverrides, profile, noDaemon);
+  await runTuiAcpCommand(
+    version,
+    {},
+    lane,
+    systemPromptOverrides,
+    profile,
+    noDaemon,
+    noBuiltinTools,
+  );
 }
 
 async function defaultRunLogin(

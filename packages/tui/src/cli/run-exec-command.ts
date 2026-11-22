@@ -1,3 +1,5 @@
+import { NO_BUILTIN_TOOLS_ENV } from '@mavis/config';
+
 import { loadTuiRuntimeConfig } from '../headless/config.js';
 import { exitCodeForExecError, TuiExecError } from '../headless/exit-policy.js';
 import { formatTuiExecFailure } from '../headless/error-presentation.js';
@@ -66,6 +68,13 @@ export async function runTuiExecCommand(
       ? await loadConfig(invocation.configPath, { dataDir })
       : undefined;
     assertNotCancelled();
+    if (invocation.noBuiltinTools) {
+      // The runtime reads the mode from the environment (NO_BUILTIN_TOOLS_ENV),
+      // so the flag's whole job is to publish it before the runtime exists —
+      // and to host the runtime in this process, because a shared daemon
+      // started without the variable would not honor this request.
+      process.env[NO_BUILTIN_TOOLS_ENV] = '1';
+    }
     const runtime = await createRuntime(
       {
         dataDir,
@@ -81,7 +90,7 @@ export async function runTuiExecCommand(
         ...(invocation.contextMode ? { contextMode: invocation.contextMode } : {}),
         ...(commandOptions.lane ? { lane: commandOptions.lane } : {}),
         ...(commandOptions.profile ? { profile: commandOptions.profile } : {}),
-        ...(invocation.noDaemon ? { noDaemon: true } : {}),
+        ...(invocation.noDaemon || invocation.noBuiltinTools ? { noDaemon: true } : {}),
       },
       explicitConfig
         ? {
