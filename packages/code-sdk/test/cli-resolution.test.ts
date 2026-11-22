@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
-import { formatComponentVersions, MCODE_BASE_VERSION } from '../../tui/src/application/build-marker.js';
 
 import { MCode, MCodeNotFoundError, MCodeVersionError } from '../src/index.js';
 import {
@@ -147,18 +146,12 @@ describe('CLI version check', () => {
 
   it('accepts this repository CLI and the minimum, and rejects the version before it', async () => {
     const cli = resolveCli({ bin: FAKE_MCODE, env: {} });
-    const repoVersion = (
-      JSON.parse(
-        readFileSync(fileURLToPath(new URL('../../tui/package.json', import.meta.url)), 'utf8'),
-      ) as {
-        version: string;
-      }
-    ).version;
+    const forkOutput = 'Ncode 0.1.0\nMCode 0.7.2\nPi 1.6.0';
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: MIN_CLI_VERSION })).resolves.toBe(
       MIN_CLI_VERSION,
     );
-    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: formatComponentVersions(repoVersion) })).resolves.toBe(
-      MCODE_BASE_VERSION,
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: forkOutput })).resolves.toBe(
+      '0.7.2',
     );
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.7.0' })).resolves.toBe('0.7.0');
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.6.2' })).rejects.toBeInstanceOf(
