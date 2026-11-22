@@ -189,7 +189,9 @@ async def check_cli_version(cli: ResolvedCli, env: Mapping[str, str]) -> str:
             stderr=err.decode("utf-8", "replace"),
         )
     text = out.decode("utf-8", "replace")
-    version = parse_version(text)
+    # The minimum tracks the MCode exec contract, including in Ncode builds.
+    baseline = re.search(r"^MCode (\S+)$", text.replace("\r", ""), re.MULTILINE)
+    version = parse_version(baseline.group(1) if baseline else text)
     if version is None:
         raise MCodeVersionError(f"Could not read the mcode version from: {text.strip()!r}.")
     if version < MIN_CLI_VERSION:

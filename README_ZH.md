@@ -11,7 +11,7 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 - **守护进程重启后还能收到子任务结果。** MCode 用 Pi 流式返回回复并执行工具，Ncode 还用 Pi Durable 调度后台任务，并将进度存入 SQLite。即使子代理刚完成任务守护进程就重启，主代理仍能收到已保存的结果。
 - **两个账号可以同时使用。** 在一个终端运行 `ncode --profile work`，在另一个终端运行 `ncode`。各自的登录、会话和设置独立，切换项目无需反复退出账号。
 
-[会话、ACP 历史和上下文](docs/architecture.md) · [账号配置档](docs/installation.md#profiles)
+[会话、ACP 历史和上下文](docs/architecture.md) · [更新日志](packages/tui/CHANGELOG.zh-CN.md) · [账号配置档](docs/installation.md#profiles)
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·
@@ -272,7 +272,7 @@ pnpm ncode
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-本仓库构建 **Niwa Labs Ncode 0.7.2**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
+本仓库构建 **Niwa Labs Ncode 0.1.0**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
 
 ## 文档与贡献
 

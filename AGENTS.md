@@ -50,6 +50,10 @@ Never merge internal Git history or cherry-pick internal commits into this repos
 | Documentation-only classification | `scripts/ci-changes.mjs` | source verification, release audit |
 | Source archive validation/extraction | `scripts/lib/source-archive.mjs` | source export, candidate validation |
 
+## Release notes
+
+Ncode uses its own version sequence. For each CLI release, add matching English and Chinese entries at the top of the TUI changelogs. Describe the shipped behavior in short bullets and identify the MCode baseline and bundled Pi version.
+
 ## Common changes
 
 Adding a workspace package: add it to `pnpm-workspace.yaml` and to `packageRoots` in `release/extraction.json`, then run `pnpm gen:tsconfig` and `node scripts/source-inventory.mjs --write`.

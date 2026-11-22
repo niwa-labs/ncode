@@ -11,7 +11,7 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 - **Background work survives a restart.** MCode uses Pi to stream replies and run tools. Ncode also uses Pi Durable to schedule work and saves its progress in SQLite. If a child finishes just before the daemon restarts, Ncode picks up the saved result and delivers it to the parent.
 - **Keep two accounts open at once.** Run `ncode --profile work` in one terminal and `ncode` in another. Each profile has its own login, sessions and settings, so switching projects doesn’t mean signing out.
 
-[Sessions, ACP history and context](docs/architecture.md) · [Run two accounts](#run-two-accounts)
+[Changelog](packages/tui/CHANGELOG.md) · [Sessions, ACP history and context](docs/architecture.md) · [Run two accounts](#run-two-accounts)
 
 <p align="center">
   <a href="#quick-start">Get started</a> ·
@@ -293,7 +293,7 @@ From the source directory, use `pnpm ncode` in place of `ncode` in the examples 
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-This checkout builds the **Niwa Labs Ncode 0.7.2** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
+This checkout builds the **Niwa Labs Ncode 0.1.0** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
 
 ## Documentation and contributing
 

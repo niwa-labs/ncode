@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
+import { formatComponentVersions, MCODE_BASE_VERSION } from '../../tui/src/application/build-marker.js';
 
 import { MCode, MCodeNotFoundError, MCodeVersionError } from '../src/index.js';
 import {
@@ -156,8 +157,8 @@ describe('CLI version check', () => {
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: MIN_CLI_VERSION })).resolves.toBe(
       MIN_CLI_VERSION,
     );
-    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: repoVersion })).resolves.toBe(
-      repoVersion,
+    await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: formatComponentVersions(repoVersion) })).resolves.toBe(
+      MCODE_BASE_VERSION,
     );
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.7.0' })).resolves.toBe('0.7.0');
     await expect(checkCliVersion(cli, { FAKE_MCODE_VERSION: '0.6.2' })).rejects.toBeInstanceOf(

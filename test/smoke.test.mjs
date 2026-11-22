@@ -56,7 +56,7 @@ function fixture(t, environment = process.env) {
 test("CLI version and command help work outside the source directory", (t) => {
   const options = fixture(t);
   for (const [args, expected] of [
-    [["--version"], version],
+    [["--version"], `Ncode ${version}\nMCode 0.7.2\nPi 1.6.0`],
     [["--help"], "Ncode — terminal coding agent for MiniMax"],
     [["exec", "--help"], "prompt"],
     [["update"], "npm install --global @niwa-labs/ncode"],

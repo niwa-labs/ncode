@@ -5,13 +5,13 @@
  * `packages/tui` and checks that the SDK parses, normalizes and maps them as documented. Excluded
  * from `tsc` because the CLI sources type-check only inside their package.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import { MCODE_BASE_VERSION } from '../../tui/src/application/build-marker.js';
 import { applyExecCliContract } from '../../tui/src/cli/contract.js';
 import { ExecEventProjector } from '../../tui/src/headless/events.js';
 import {
@@ -155,10 +155,7 @@ describe('mcode exec contract', () => {
   });
 
   it('accepts the CLI in this repository under the SDK minimum', () => {
-    const repo = JSON.parse(
-      readFileSync(fileURLToPath(new URL('../../tui/package.json', import.meta.url)), 'utf8'),
-    ) as { version: string };
-    const repoVersion = parseVersion(repo.version);
+    const repoVersion = parseVersion(MCODE_BASE_VERSION);
     const minimum = parseVersion(MIN_CLI_VERSION);
     if (!repoVersion || !minimum) throw new Error('unparseable CLI version');
     expect(satisfiesMinimum(repoVersion, minimum)).toBe(true);

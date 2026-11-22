@@ -53,7 +53,10 @@ try {
   assert.deepEqual(readdirSync(launcherDirectory), [ncodeReleaseIdentity.command], 'Fresh installation must expose one launcher');
   const launcher = path.join(launcherDirectory, ncodeReleaseIdentity.command);
   const result = execFileSync(launcher, ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
-  assert.equal(result.trim(), version);
+  assert.equal(result.trim().split(/\r?\n/, 1)[0], `Ncode ${version}`);
+  for (const name of ['CHANGELOG.md', 'CHANGELOG.zh-CN.md']) {
+    assert.ok(readFileSync(path.join(installed, name), 'utf8').includes(`## ${version} ·`), `Missing ${version} in ${name}`);
+  }
   const require = createRequire(path.join(installed, 'package.json'));
   const Database = require('better-sqlite3');
   const db = new Database(':memory:');

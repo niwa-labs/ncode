@@ -134,6 +134,11 @@ async def test_missing_cli(tmp_path: Path) -> None:
         await bad.start_thread().run("x")
 
 
+async def test_ncode_uses_its_mcode_baseline(fake_env: dict[str, str]) -> None:
+    fake_env["FAKE_MCODE_VERSION"] = "Ncode 0.1.0\nMCode 0.7.2\nPi 1.6.0"
+    await MCode(MCodeOptions(env=fake_env)).start_thread().run("x")
+
+
 async def test_old_cli_is_rejected(fake_env: dict[str, str]) -> None:
     fake_env["FAKE_MCODE_VERSION"] = "0.5.0"
     with pytest.raises(MCodeVersionError, match="older than the minimum"):

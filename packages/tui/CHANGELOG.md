@@ -1,3 +1,14 @@
+# Ncode changelog
+
+## 0.1.0 · 2026-11-22
+
+- Ncode is based on MCode 0.7.2 and runs Pi 1.6.0. `ncode --version` lists all three versions. HTTP requests identify the fork as `ncode/0.1.0`.
+- Open the terminal while signed in to claim the daily MiniMax check-in once per profile. Each profile keeps its own login, settings and sessions.
+- Close the terminal and reconnect to the same turn. You can steer it immediately or queue your next message while a subagent works.
+- ACP clients can page through messages, tool results and summaries, and inspect the active turn and queue without attaching.
+- Long sessions prepare summaries in the background, keep recent input in context and retain the original history for scrolling.
+- Pi Durable stores background work in SQLite and delivers completed results to the parent after a daemon restart.
+
 # MCode TUI Changelog
 
 This changelog covers important changes that directly affect MCode TUI users. It includes:

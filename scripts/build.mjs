@@ -99,7 +99,7 @@ copyLocalRuntimeAssets({
   filter: shouldCopyTuiRuntimeResource,
   excludedBuiltinSkillNames: TUI_DISABLED_BUILTIN_SKILL_NAMES,
 });
-for (const name of ["configs", "native"])
+for (const name of ["configs", "native", "CHANGELOG.md", "CHANGELOG.zh-CN.md"])
   cpSync(path.join(root, "packages/tui", name), path.join(outdir, name), {
     recursive: true,
   });

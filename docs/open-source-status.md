@@ -7,7 +7,8 @@ installers and registry packages.
 
 | Concern | Version or revision |
 | --- | --- |
-| CLI and workspace | 0.7.2 in the root and TUI manifests |
+| Ncode CLI and workspace | 0.1.0 |
+| Upstream MCode | 0.7.2 |
 | Git fork base | `3c21163c85a9684030cb147bfef48c6284fa3c46` |
 | Earlier upstream source extraction | `9b9885e42a3cf1a3df1cfa52a46e4fdb034cfcee` in `release/extraction.json` |
 | Pi, Pi Durable and Chord | Pi v1.6.0 + 43 commits (`780bf31f`), with fork changes noted under `third_party/` |
