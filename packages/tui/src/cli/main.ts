@@ -314,6 +314,7 @@ async function defaultRunAcp(
   profile?: string,
   noDaemon?: boolean,
   noBuiltinTools?: boolean,
+  sessionMcpOnly?: boolean,
 ): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
   await runTuiAcpCommand(
@@ -324,6 +325,7 @@ async function defaultRunAcp(
     profile,
     noDaemon,
     noBuiltinTools,
+    sessionMcpOnly,
   );
 }
 

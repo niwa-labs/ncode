@@ -548,11 +548,14 @@ describe('System prompt overrides', () => {
     const plain = await resolveTuiExecInvocation('hello', {}, async () => '');
     expect(plain).not.toHaveProperty('noBuiltinTools');
 
-    const review = await resolveTuiExecInvocation(
-      undefined,
-      { review: true, builtinTools: false },
-      async () => '',
-    );
-    expect(review.noBuiltinTools).toBe(true);
+    // The review guard only admits built-in inspection tools, so the
+    // combination is rejected instead of producing a review with no tools.
+    await expect(
+      resolveTuiExecInvocation(undefined, { review: true, builtinTools: false }, async () => ''),
+    ).rejects.toMatchObject({
+      kind: 'invocation',
+      message:
+        'exec review needs the built-in inspection tools; --no-builtin-tools is not supported here.',
+    });
   });
 });

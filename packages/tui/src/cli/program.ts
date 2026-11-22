@@ -56,6 +56,7 @@ export interface CreateTuiProgramOptions {
     profile?: string,
     noDaemon?: boolean,
     noBuiltinTools?: boolean,
+    sessionMcpOnly?: boolean,
   ) => Promise<void>;
   runLogin: (
     region?: MavisRegion,
@@ -161,7 +162,11 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       )
       .option(
         '--no-builtin-tools',
-        'disable every built-in tool; only the MCP servers given to the session remain (implies --no-daemon)',
+        'disable every built-in tool; configured MCP servers remain (implies --no-daemon)',
+      )
+      .option(
+        '--session-mcp-only',
+        'connect only the MCP servers the client passes to the session (implies --no-daemon)',
       ),
   )
     .allowExcessArguments(false)
@@ -171,6 +176,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
           profile?: string;
           daemon?: boolean;
           builtinTools?: boolean;
+          sessionMcpOnly?: boolean;
         },
         command: Command,
       ) => {
@@ -181,11 +187,19 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
         const profile = commandOptions.profile;
         const noDaemon = commandOptions.daemon === false;
         const noBuiltinTools = commandOptions.builtinTools === false;
+        const sessionMcpOnly = commandOptions.sessionMcpOnly === true;
         if (systemPromptOverrides)
-          return runAcp(activeLane, systemPromptOverrides, profile, noDaemon, noBuiltinTools);
+          return runAcp(
+            activeLane,
+            systemPromptOverrides,
+            profile,
+            noDaemon,
+            noBuiltinTools,
+            sessionMcpOnly,
+          );
         return activeLane
-          ? runAcp(activeLane, undefined, profile, noDaemon, noBuiltinTools)
-          : runAcp(undefined, undefined, profile, noDaemon, noBuiltinTools);
+          ? runAcp(activeLane, undefined, profile, noDaemon, noBuiltinTools, sessionMcpOnly)
+          : runAcp(undefined, undefined, profile, noDaemon, noBuiltinTools, sessionMcpOnly);
       },
     );
 

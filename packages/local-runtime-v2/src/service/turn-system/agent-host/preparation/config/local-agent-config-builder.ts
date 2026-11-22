@@ -11,7 +11,11 @@ import {
   OUTPUT_REVISION_PROMPT_KEY,
   RETRY_CONTINUATION_PROMPT_KEY,
 } from './prompt-templates.js';
-import { resolveAgentCapabilities, type ResolvedAgentCapabilities } from '@mavis/config';
+import {
+  noBuiltinToolsFromEnv,
+  resolveAgentCapabilities,
+  type ResolvedAgentCapabilities,
+} from '@mavis/config';
 import type { SessionRecord, TaskSessionBinding } from '../../../../session-system/index.js';
 import type {
   AgentExecutionSnapshot,
@@ -355,7 +359,11 @@ export class LocalAgentConfigBuilder {
       ...(binding ? { agentBinding: binding } : {}),
       // K2: the run_code prompt section renders from the SAME gate the tool
       // catalog appends the tool by, so they never disagree within a Turn.
-      ...(isRunCodeEnabled(this.options.config().beta) ? { ptcRequested: true } : {}),
+      // External-tools-only mode suppresses the tool at the catalog, so the
+      // section must not render here either.
+      ...(!noBuiltinToolsFromEnv(process.env) && isRunCodeEnabled(this.options.config().beta)
+        ? { ptcRequested: true }
+        : {}),
     });
     return {
       profile,

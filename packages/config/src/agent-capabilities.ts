@@ -59,6 +59,22 @@ export function noBuiltinToolsFromEnv(
 }
 
 /**
+ * Env var that restricts turn MCP discovery to the servers the session's client
+ * supplied (ACP `session/new` `mcpServers`): data-dir and workspace
+ * declarations are skipped before any connection, so a harness run cannot pick
+ * up servers the reviewed workspace or the user profile declare. Complements
+ * {@link NO_BUILTIN_TOOLS_ENV} for client-restricted harness sessions.
+ */
+export const SESSION_MCP_ONLY_ENV = 'MCODE_SESSION_MCP_ONLY';
+
+/** Whether `env` restricts MCP to session-supplied servers (see {@link SESSION_MCP_ONLY_ENV}). */
+export function sessionMcpOnlyFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return env[SESSION_MCP_ONLY_ENV] === '1';
+}
+
+/**
  * Standalone Builtin Skills that may be selected independently.
  * Skills owned by another capability are derived at runtime so they cannot
  * outlive the Tool or feature that makes their instructions executable.

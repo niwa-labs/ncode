@@ -1282,7 +1282,7 @@ describe('local native turn tools', () => {
     });
     const mcpService = {
       listToolEntriesForTurn: vi.fn(async () => [
-        entry('mcp__niwa__submit_answer', 'configured'),
+        entry('mcp__harness__submit_answer', 'configured'),
         entry('images_understand', 'builtin-matrix'),
         entry('web_search', 'builtin'),
       ]),
@@ -1303,8 +1303,9 @@ describe('local native turn tools', () => {
       expect(sources.nativeTools).toEqual([]);
       expect(sources.threadGoalTools).toEqual([]);
       expect(sources.cuRuntimeAvailable).toBe(false);
+      expect(sources.externalToolsOnly).toBe(true);
       expect(sources.mcpEntries.map((kept) => kept.tool.def.name)).toEqual([
-        'mcp__niwa__submit_answer',
+        'mcp__harness__submit_answer',
       ]);
       expect(runtimeToolsFor).not.toHaveBeenCalled();
 

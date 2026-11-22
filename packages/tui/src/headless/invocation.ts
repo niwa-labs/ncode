@@ -235,6 +235,13 @@ async function resolveTuiExecReviewInvocation(
   options: RawTuiExecOptions,
   signal?: AbortSignal,
 ): Promise<ResolvedTuiExecInvocation> {
+  if (options.builtinTools === false) {
+    // The review guard admits only the built-in inspection tools, so a
+    // restricted review would leave the model with nothing it may call.
+    throw invocationError(
+      'exec review needs the built-in inspection tools; --no-builtin-tools is not supported here.',
+    );
+  }
   const format = readEnum('--output-format', options.outputFormat ?? 'text', [
     'text',
     'json',
@@ -284,7 +291,6 @@ async function resolveTuiExecReviewInvocation(
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     reviewRequest: { scope: 'local_changes' },
     ...(options.daemon === false ? { noDaemon: true } : {}),
-    ...(options.builtinTools === false ? { noBuiltinTools: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }

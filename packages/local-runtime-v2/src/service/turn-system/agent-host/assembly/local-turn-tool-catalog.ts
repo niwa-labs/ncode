@@ -16,7 +16,11 @@ import {
   type McpDisclosureOptions,
   type McpToolEntry,
 } from '@mavis/agent-tools';
-import { AGENT_BUILTIN_MCP_TOOL_IDS, AGENT_BUILTIN_TOOL_IDS } from '@mavis/config';
+import {
+  AGENT_BUILTIN_MCP_TOOL_IDS,
+  AGENT_BUILTIN_TOOL_IDS,
+  sessionMcpOnlyFromEnv,
+} from '@mavis/config';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { Type } from '@sinclair/typebox';
@@ -57,6 +61,8 @@ export interface LocalTurnRawToolSources {
   readonly mcpEntries: readonly McpToolEntry[];
   readonly threadGoalTools: readonly RuntimeTool[];
   readonly cuRuntimeAvailable: boolean;
+  /** External-tools-only mode: native sources are off, configured MCP only. */
+  readonly externalToolsOnly?: boolean;
 }
 
 export interface LocalMcpToolSearchConfig {
@@ -219,8 +225,16 @@ export function buildLocalTurnToolCatalog(
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const inventory = filterLocalTurnCapabilityInventory(input);
   const { nativeTools, mcpEntries, threadGoalTools } = inventory;
+  // External-tools-only mode holds the harness contract at the final catalog
+  // too: no native tool is re-added here. Session-MCP-only mode (the harness
+  // supplied the servers) additionally keeps its MCP entries inline — the
+  // harness names ARE the contract, so tool_search deferral would hide them.
+  const externalOnly = input.sources.externalToolsOnly === true;
+  const harnessScoped = sessionMcpOnlyFromEnv(input.env ?? process.env);
   const model = input.llmModel;
-  const plan = planMcpDisclosure({ entries: mcpEntries, model, options });
+  const plan = harnessScoped
+    ? { deferred: false as const, inlineTools: mcpEntries.map((entry) => entry.tool) }
+    : planMcpDisclosure({ entries: mcpEntries, model, options });
   const tools = plan.deferred
     ? [
         ...nativeTools,
@@ -235,7 +249,9 @@ export function buildLocalTurnToolCatalog(
     : [
         ...nativeTools,
         ...plan.inlineTools,
-        ...(input.hostCapabilityRegistry ? [createMcpInvokeTool(new Map())] : []),
+        ...(input.hostCapabilityRegistry && !externalOnly
+          ? [createMcpInvokeTool(new Map())]
+          : []),
         ...threadGoalTools,
       ];
 
@@ -247,7 +263,9 @@ export function buildLocalTurnToolCatalog(
       supportVideo: input.modelCapabilities?.support_video === true,
     });
   }
-  const desktopCapabilities = inventory.desktopCapabilities;
+  // Plugin runtime tools ride `desktopCapabilities`, not the native list:
+  // in external-tools-only mode they are host-owned built-ins and stay off.
+  const desktopCapabilities = externalOnly ? undefined : inventory.desktopCapabilities;
   const effectivePluginSkills = filterExtensionSkills(
     input.effectivePluginSkills ?? [],
     inventory.selector,
@@ -279,7 +297,7 @@ export function buildLocalTurnToolCatalog(
   // (fresh worker+VM per run); scripts get only the injected tools —
   // no session/store/hidden surfaces, everything routes through ONE invoker.
   const finalTools: RuntimeTool[] = [...merged.tools];
-  if (isRunCodeEnabled(input.beta)) {
+  if (!externalOnly && isRunCodeEnabled(input.beta)) {
     const callable = finalTools.filter((tool) => tool.def.name !== 'run_code');
     const runCode: RuntimeTool = {
       def: {

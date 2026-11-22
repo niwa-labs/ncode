@@ -1,6 +1,7 @@
 import { ProjectMcpRuntime } from '../project-mcp.service.js';
 import { SessionMcpServers } from './session-servers.js';
 import { projectNativeTools, reserveConfiguredServerNames } from './native-tool-projection.js';
+import { sessionMcpOnlyFromEnv } from '@mavis/config';
 import { McpNameRegistry } from '@mavis/mcp';
 import { coerceRuntimeToolInput } from '@mavis/agent-core/tools';
 import type { RuntimeTool, ToolResult } from '@mavis/agent-core/tools';
@@ -77,6 +78,21 @@ interface LocalMcpFile extends Record<string, unknown> {
 interface LocalMcpRawDocument {
   document: Record<string, unknown>;
   servers: Record<string, unknown>;
+}
+
+/**
+ * Session-MCP-only mode restricts turn discovery to the servers the session's
+ * client supplied. Returns `undefined` when the mode is off (no restriction);
+ * an empty set when it is on but no session (or no session servers) named any.
+ */
+function sessionServerScope(
+  sessions: SessionMcpServers,
+  context?: LocalMcpRuntimeContext,
+): ReadonlySet<string> | undefined {
+  if (!sessionMcpOnlyFromEnv(process.env)) return undefined;
+  const sessionId = context?.sessionId;
+  if (!sessionId) return new Set();
+  return new Set(Object.keys(sessions.get(sessionId) ?? {}));
 }
 
 export class LocalMcpService {
@@ -677,9 +693,16 @@ export class LocalMcpService {
     this.assertOpen();
     const file = await this.readEffectiveFile(context);
     const invalidNames = this.reserveRuntimeServerNames(file, context);
+    // Session-MCP-only mode (harness-driven runs): only servers the session's
+    // client supplied may connect. Data-dir and workspace declarations are
+    // dropped BEFORE discovery, so a workspace under review cannot start its
+    // own MCP server; without a session id nothing qualifies.
+    const sessionScoped = sessionServerScope(this.sessionServers, context);
     const discovered = await Promise.all(
       Object.entries(file.mcpServers).map(async ([server, config]) => {
         if (config.enabled === false || invalidNames.has(server) || !hasLocalCallAdapter(config))
+          return [];
+        if (sessionScoped !== undefined && !sessionScoped.has(normalizeServerName(server)))
           return [];
         const isBuiltinMatrix = isBuiltinMatrixConfig(server, config);
         const rawTools =

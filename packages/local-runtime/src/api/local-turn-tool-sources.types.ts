@@ -118,4 +118,10 @@ export interface LocalTurnToolSources {
   readonly mcpEntries: readonly McpToolEntry[];
   readonly threadGoalTools: readonly RuntimeTool[];
   readonly cuRuntimeAvailable: boolean;
+  /**
+   * Set by external-tools-only mode: the sources below were produced under the
+   * `noBuiltinTools` switch, so the final catalog must not re-add native tools
+   * (run_code, plugin runtime tools) or defer the remaining MCP entries.
+   */
+  readonly externalToolsOnly?: boolean;
 }

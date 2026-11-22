@@ -249,12 +249,6 @@ export function applyExecReviewCliContract(command: Command): Command {
     .addOption(new Option('--output-format <format>', 'output format: text, json, or stream-json'))
     .addOption(
       new Option('-o, --output-last-message <path>', 'write the final review result to a file'),
-    )
-    .addOption(
-      new Option(
-        '--no-builtin-tools',
-        'disable every built-in tool; only MCP servers remain (implies --no-daemon)',
-      ),
     );
   return applySystemPromptCliOptions(configured).allowExcessArguments(false).showHelpAfterError();
 }

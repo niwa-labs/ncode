@@ -361,6 +361,7 @@ export async function buildLocalTurnToolSources(
       mcpEntries: allEntries.filter((entry) => entry.source === "configured"),
       threadGoalTools: [],
       cuRuntimeAvailable: false,
+      externalToolsOnly: true,
     };
   }
   const cuRuntimeAvailable = input.cuModeActive === true;
