@@ -14,7 +14,9 @@ import { createBashTool } from "../../../src/core/tools/bash.ts";
  * tool keeps waiting until their output pauses; this test would hang there.
  */
 describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after the shell exited", () => {
-	const bashTool = createBashTool(tmpdir());
+	const bashTool = createBashTool(tmpdir(), {
+		output: { strategy: "head_tail", persistOutput: false },
+	});
 
 	async function runExpectingTimeout(command: string, timeout: number): Promise<string> {
 		const error = await bashTool.execute("test-11613", { command, timeout }).then(
@@ -26,13 +28,21 @@ describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after t
 	}
 
 	it("reports the shell's exit code when background processes kept writing until the timeout", async () => {
+		// Start writing before allowing the shell to exit. A loop with external sleeps can
+		// go quiet past the pipe idle grace period while a busy runner starts the next process.
 		const message = await runExpectingTimeout(
-			"(while true; do echo tick; sleep 0.02; done) & sleep 0.2; echo boom >&2; exit 3",
+			[
+				"trap 'exit 3' USR1",
+				"echo boom >&2",
+				'(echo tick; kill -s USR1 "$$"; while :; do echo tick; done) &',
+				"wait",
+			].join("\n"),
 			1,
 		);
 		expect(message).toContain("boom");
+		expect(message).toContain("tick");
 		expect(message).toMatch(
-			/Command timed out after 1 seconds\. The shell exited with code 3 after 0\.\d seconds, but background processes it started kept writing output until the timeout\.$/,
+			/Command timed out after 1 seconds\. The shell exited with code 3 after \d+(?:\.\d+)? seconds, but background processes it started kept writing output until the timeout\.$/,
 		);
 	});
 
