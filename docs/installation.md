@@ -39,7 +39,7 @@ node /absolute/path/to/your-checkout/dist/cli.js
 ```
 
 On Windows, use `node` with the appropriate local absolute path. Builds from
-this checkout use the `ncode` command and include `mcode` for existing clients.
+this checkout use the `ncode` command.
 
 ## Local daemon
 
@@ -56,7 +56,7 @@ daemon before changing its history backend.
 
 ## Accounts and data
 
-Run `/login` in the TUI or `pnpm mcode login`, choosing the region for your account. Token Plan requires an account and available credits. See the root README for BYOK configuration and testing.
+Run `/login` in the TUI or `pnpm ncode login`, choosing the region for your account. Token Plan requires an account and available credits. See the root README for BYOK configuration and testing.
 
 Source builds and the published npm CLI use the same default user data directory:
 
@@ -73,7 +73,7 @@ Earlier source builds used `~/.minimax-code` for user data. The new default does
 
 To locate data safely:
 
-1. Identify the launcher you actually use with `command -v mcode` (POSIX) or `Get-Command mcode -All` (PowerShell), and run that launcher's `--version`. For a local npm dependency, use `node_modules/.bin/mcode --version`; a global npm listing does not identify it. A source build may report the same version as the npm release.
+1. Identify the launcher you actually use with `command -v ncode` (POSIX) or `Get-Command ncode -All` (PowerShell), and run that launcher's `--version`. For a local npm dependency, use `node_modules/.bin/ncode --version`; a global npm listing does not identify it. A source build may report the same version as the npm release.
 2. Check whether either data-directory override is set in that launcher's environment. Otherwise use the artifact-specific default above. Inspect directory and file names/permissions locally, without printing `config.yaml`, authentication files, or session contents. For builds from this repository, `mcode telemetry status` also reports the selected `configFile` path without printing credentials; npm 0.6.9 does not provide that command.
 3. If both directories exist, their presence alone does not identify the active one. Keep both protected, and include the launcher, version, installation method, and whether overrides are set when requesting help. Redact personal path components; do not attach configuration or authentication files. Changing an override does not migrate existing data, so do not move or delete either directory merely to match these docs.
 
@@ -85,12 +85,12 @@ A named profile selects an entire data directory, and with it a separate account
 
 Two selectors choose a profile, in priority order:
 
-1. `--profile <name>`, accepted on the root command and on every subcommand. Both `--profile work` and `--profile=work` are accepted, so `mcode --profile work exec` and `mcode login --profile work` select the same profile.
+1. `--profile <name>`, accepted on the root command and on every subcommand. Both `--profile work` and `--profile=work` are accepted, so `ncode --profile work exec` and `ncode login --profile work` select the same profile.
 2. `MINIMAX_PROFILE=<name>`, which selects a profile for a whole process tree. The flag wins when both are set.
 
 Like `MINIMAX_DATA_DIR`, `MINIMAX_PROFILE` is stripped from child-process environments at the daemon and agent boundary: each runtime is told its own identity instead of inheriting one. A `mcode` started from a shell inside a profile session therefore starts on the `default` profile rather than silently joining the parent's credentials. Pass `--profile` for such a nested invocation instead of exporting the variable.
 
-A profile owns its whole directory, so two profiles share nothing: OAuth tokens, sessions, `config.yaml` (models and providers), MCP configuration, plugins, skills, and cron or background tasks. Selecting a different profile does not migrate, copy, or merge data; the earlier directory stays exactly where it was. Signing in restarts MCode and keeps the same profile. The `--profile` flag and the `mcode profile` command are available in builds from this repository.
+A profile owns its whole directory, so two profiles share nothing: OAuth tokens, sessions, `config.yaml` (models and providers), MCP configuration, plugins, skills, and cron or background tasks. Selecting a different profile does not migrate, copy, or merge data; the earlier directory stays exactly where it was. Signing in restarts MCode and keeps the same profile. The `--profile` flag and the `ncode profile` command are available in builds from this repository.
 
 One exception applies to a source build run directly with `pnpm` or from the npm package rather than the installed CLI: the first run against a new profile seeds its `config.yaml` from the default profile's file, including any BYOK API key stored there. That is the same behaviour a derived worktree data directory already had. Edit or delete the new profile's `config.yaml` if it should not carry those settings, and check it before using that profile for a different organisation's work. The installed CLI does not do this; it writes its own defaults.
 
@@ -100,20 +100,20 @@ Names are validated, never sanitised, because the name becomes a directory segme
 
 Selection is resolved once per process, in this order: `--profile`, then `MINIMAX_PROFILE`, then git-branch auto-detection in the `mavis` and `agent-archon` source trees. The flag wins over the environment, and when `--profile` is given more than once the last one wins. Anything after `--` is prompt text and is not read as a profile.
 
-Data directories on macOS and Windows are case-insensitive, so `--profile Work` and `--profile work` select the same account. `mcode profile list` shows such a case variant only once.
+Data directories on macOS and Windows are case-insensitive, so `--profile Work` and `--profile work` select the same account. `ncode profile list` shows such a case variant only once.
 
-Manage profiles with `mcode profile`:
+Manage profiles with `ncode profile`:
 
 | Command | Effect |
 | --- | --- |
-| `mcode profile list` | Tab-separated rows of name, sign-in status, and data directory. `*` marks the active profile, `(default)` labels the default one, and status is one of `signed in`, `signed out`, `authorization pending`, or `not created`. |
-| `mcode profile list --json` | The same profiles as an array of `name`, `dataDir`, `exists`, `authenticated`, and `pendingAuthorization`. |
-| `mcode profile current` | Prints `Current profile: <name>` and `Data directory: <path>`. |
-| `mcode profile remove <name> --yes` | Deletes that profile's data directory, and its legacy `~/.mavis-<profile>` compatibility directory when one exists. |
+| `ncode profile list` | Tab-separated rows of name, sign-in status, and data directory. `*` marks the active profile, `(default)` labels the default one, and status is one of `signed in`, `signed out`, `authorization pending`, or `not created`. |
+| `ncode profile list --json` | The same profiles as an array of `name`, `dataDir`, `exists`, `authenticated`, and `pendingAuthorization`. |
+| `ncode profile current` | Prints `Current profile: <name>` and `Data directory: <path>`. |
+| `ncode profile remove <name> --yes` | Deletes that profile's data directory, and its legacy `~/.mavis-<profile>` compatibility directory when one exists. |
 
-`mcode profile remove` refuses the `default` profile and tells you to delete its directory manually if that is what you want, refuses an invalid name, and refuses to run without `--yes`. It also fails when the named profile has no data directory. A profile directory that is a symlink is unlinked rather than followed, so a link is never walked into. These checks live in [`profile-command.ts`](../packages/tui/src/cli/profile-command.ts).
+`ncode profile remove` refuses the `default` profile and tells you to delete its directory manually if that is what you want, refuses an invalid name, and refuses to run without `--yes`. It also fails when the named profile has no data directory. A profile directory that is a symlink is unlinked rather than followed, so a link is never walked into. These checks live in [`profile-command.ts`](../packages/tui/src/cli/profile-command.ts).
 
-None of these commands print credentials: listing reports names, statuses, and paths only. To remove profile data without the command, run `mcode profile current` first to confirm the exact path, then delete only that directory. Do not use wildcard deletion across `~/.minimax*`, and do not delete a profile directory to move it elsewhere; profile data is not migrated between directories.
+None of these commands print credentials: listing reports names, statuses, and paths only. To remove profile data without the command, run `ncode profile current` first to confirm the exact path, then delete only that directory. Do not use wildcard deletion across `~/.minimax*`, and do not delete a profile directory to move it elsewhere; profile data is not migrated between directories.
 
 ## macOS terminal shortcuts: Ghostty Option+M
 
@@ -200,7 +200,7 @@ For the default profile this is `~/.minimax/tui/keybindings.json`; [profiles and
 
 With an idle composer and no open picker or permission prompt, note `/permission status`, press the configured shortcut, and check the status again. The mode should advance without inserting text. Restore your intended permission mode through `/permission` afterward. Confirm that `Shift+Tab` still toggles Plan mode and that pasting `µ` still inserts text.
 
-If it still fails, record `mcode --version`, Ghostty's version, active keyboard layout, which Option key you pressed, the setting above, the effective `/hotkeys` entry, and whether tmux or SSH is involved. Compare with a direct Ghostty session. MCode supports both legacy ESC-prefixed Alt input and extended keyboard reports; a shell's raw-key display alone does not establish what Ghostty sends after the TUI negotiates its keyboard protocol.
+If it still fails, record `ncode --version`, Ghostty's version, active keyboard layout, which Option key you pressed, the setting above, the effective `/hotkeys` entry, and whether tmux or SSH is involved. Compare with a direct Ghostty session. MCode supports both legacy ESC-prefixed Alt input and extended keyboard reports; a shell's raw-key display alone does not establish what Ghostty sends after the TUI negotiates its keyboard protocol.
 
 ## Update or remove
 

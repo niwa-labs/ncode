@@ -489,7 +489,7 @@ test('npm release manifests require native SQLite and pin installed external dep
   assert.equal(manifest.private, undefined);
   assert.deepEqual(manifest.publishConfig, { access: 'public' });
   assert.equal(manifest.name, '@niwa-labs/ncode');
-  assert.deepEqual(manifest.bin, { ncode: 'cli.js', mcode: 'cli.js' });
+  assert.deepEqual(manifest.bin, { ncode: 'cli.js' });
   assert.equal(manifest.dependencies['better-sqlite3'], '1.2.3');
   assert.equal(manifest.dependencies['@vscode/ripgrep'], '1.2.3');
   assert.equal(manifest.optionalDependencies['@mariozechner/clipboard'], '1.2.3');

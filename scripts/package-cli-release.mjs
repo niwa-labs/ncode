@@ -79,7 +79,7 @@ export function releaseManifest(importers, version) {
     description: upstream
       ? 'MiniMax Code CLI built from the tagged public source.'
       : source.description,
-    bin: { [identity.command]: 'cli.js', mcode: 'cli.js' },
+    bin: { [identity.command]: 'cli.js' },
     engines: source.engines,
     ...(repository === undefined ? {} : { repository }),
     dependencies, optionalDependencies,
@@ -109,8 +109,8 @@ ${manifest.description}
 Built locally from source commit ${revision}.
 ${identity.packageName === '@niwa-labs/ncode' ? 'Install with `npm install --global @niwa-labs/ncode`.' : 'Install this tar.gz with npm.'} Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
-Run \`${identity.command}\` after installation. ${isUpstreamCliSource(source) ? '' : 'The mcode command is also available for existing integrations.'}
-Use a separate npm prefix and profile to keep local testing isolated.
+Run \`${identity.command}\` after installation.
+${identity.packageName === '@niwa-labs/ncode' ? 'Read about [terminal sessions, ACP history and profiles](https://github.com/niwa-labs/ncode#what-ncode-adds-to-mcode).' : 'Use a separate npm prefix and profile to keep local testing isolated.'}
 `);
     mkdirSync(out, { recursive: true });
     const archive = path.join(out, cliReleaseArchiveName(source, version));

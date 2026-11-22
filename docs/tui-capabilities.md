@@ -89,7 +89,7 @@ The evidence column summarizes the historical TUI 0.3.11 restoration record from
 | BYOK / custom models | Retained; headless model overrides no longer inherit the default Token Plan login requirement | Local protocol server drives runtime, resume, and file tools; live BYOK session passed; managed models still reject unauthenticated requests |
 | mcode-tools | Public package's unchanged 0.0.4 artifact, launcher, and short-lived token leases restored | Archive SHA-512, CLI SHA-256, real CLI startup, lease and host integration tests; production shared-broker authentication passed |
 | Search and Matrix image / audio / video tools | Matrix MCP and tool assembly restored; search is independent of mcode-tools | MCP configuration and auth-isolation tests; actual search passed; generation requests not run |
-| Official and local plugins; runtime GitHub importer | `/plugins` and `mcode plugin` manage official installations and discovered local packages; arbitrary marketplace registration and GitHub URL import are not exposed in the CLI/TUI. See [plugin management](examples.md#4-manage-plugins) | Plugin application, source-page, and offline local CLI tests; actual official catalog read passed |
+| Official and local plugins; runtime GitHub importer | `/plugins` and `ncode plugin` manage official installations and discovered local packages; arbitrary marketplace registration and GitHub URL import are not exposed in the CLI/TUI. See [plugin management](examples.md#4-manage-plugins) | Plugin application, source-page, and offline local CLI tests; actual official catalog read passed |
 | Managed connectors | Cloud client, permissions, and invocation adapters restored | Connector runtime and cloud transport tests; actual tool discovery passed; business writes not run |
 | Updates | Update entry points, install-source detection, and signature verification restored; public packages use public npm | Update application and service tests; no real installation / upgrade on the development machine |
 | Feedback and diagnostic uploads | Reviewed feedback text and minimized diagnostic summaries | Synthetic fixtures exercise session collection and capture/decode the final ZIP upload; no live uploads or real content |
@@ -238,19 +238,19 @@ The regression tests use temporary synthetic data and intercepted HTTP only. The
 
 ## Launch-scoped system prompt overrides
 
-The interactive TUI, `exec`, `exec review`, and `mcode acp` can replace or extend the main Agent identity prompt:
+The interactive TUI, `exec`, `exec review`, and `ncode acp` can replace or extend the main Agent identity prompt:
 
 ```bash
 # Replace the identity section; runtime rules, project instructions, Environment, Memory, and Skills stay
-mcode --system-prompt-file ./identity.md
+ncode --system-prompt-file ./identity.md
 
 # Append text after the identity section
-mcode exec --append-system-prompt "List the files you will change first." "Complete this task."
+ncode exec --append-system-prompt "List the files you will change first." "Complete this task."
 ```
 
 Use either `--system-prompt` or `--system-prompt-file`, and either `--append-system-prompt` or
 `--append-system-prompt-file`; replace and append can be combined. Each form is one slot, and the
-slot written closest to the subcommand wins: `mcode --system-prompt-file a.md exec --system-prompt "..."`
+slot written closest to the subcommand wins: `ncode --system-prompt-file a.md exec --system-prompt "..."`
 uses the inline text and does not read `a.md`. The flags are also accepted before `exec`, `exec review`,
 or `acp`. Other subcommands, such as `login` or `init`, reject them instead of ignoring them.
 
@@ -367,7 +367,7 @@ Programmatic Tool Calling (PTC, beta) lets the Agent write a `run_code` program 
 combines `read`, `grep`, `bash` and other tool calls and returns only the filtered
 results to the model, which suits bulk file reads and multi-step tasks. It is off by
 default and stored as `beta.ptc` in `config.yaml`; turn it on under Preferences in
-`/settings`, or enable it for one process with `mcode --ptc` or `mcode exec --ptc`.
+`/settings`, or enable it for one process with `ncode --ptc` or `ncode exec --ptc`.
 
 PTC applies to new Sessions and to the next compaction of an existing one, never to a
 running turn. Whether it applies is decided only by the Session's tool-call mode, set
@@ -392,7 +392,7 @@ eligible share of Sessions, or stop generation entirely. Your own choice under
 Preferences in `/settings`, stored as `promptSuggestion.enabled`, always wins.
 
 Suggestions are generated after a turn settles and are not produced in Plan Mode, Goal
-turns, subagent Sessions, `mcode exec`, ACP or the App Server. With BYOK models the
+turns, subagent Sessions, `ncode exec`, ACP or the App Server. With BYOK models the
 suggestion is not sent to content review.
 
 ## Local delete and the trash

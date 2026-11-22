@@ -23,9 +23,15 @@ The runtime starts a turn. Pi's provider adapter streams the reply, and its agen
 
 When the parent agent is waiting for a subagent, a new instruction can release that wait. The child keeps running in the background, and the parent can answer you right away. When the child finishes, its result goes back to the parent session. [Subagent recovery scenarios](../packages/local-runtime-v2/test/integration/reactive-task-batch-recovery.e2e.test.ts)
 
+## What can an ACP editor see?
+
+Start the adapter with `ncode acp`. Its `initialize` response lists supported extensions under `_meta["minimax-code/extensions"].methods`. Standard ACP session loading and resuming still work. An editor that supports Ncode’s `session/history` extension can open a transcript without taking over a running session or sending a prompt. The first page contains the most recent entries. Follow `nextCursor` for older pages. Tool calls and their results have matching IDs, so the editor can show the command beside its output. Compaction summaries are marked as such. [History contract and paging tests](../packages/tui/test/unit/acp-session-history.test.ts)
+
+After reconnecting, a client can call `mcode/session/turn_status` for the active turn, latest recorded activity and queue depth. It can queue a follow-up for a session opened by another client. The `mcode/` prefix is part of the protocol. [ACP extensions](../packages/tui/src/acp/extensions.ts)
+
 ## How does a long conversation fit?
 
-Each session has its own SQLite history store with Zstd compression. For each model call, the runtime selects the messages it needs from that history. It can reuse previously converted messages and use placeholders for images outside the media budget. As the conversation grows, compaction saves a summary alongside the history. Later requests can use the summary and recent messages together. [Session storage](../packages/local-runtime-v2/src/service/session-system/messages/history/durable-session-stores.ts) · [Model context](../packages/local-runtime-v2/src/service/turn-system/compaction/context-wire.ts)
+Each session has its own SQLite history store with Zstd compression. For each model call, the runtime selects the messages it needs from that history. It can reuse previously converted messages and use placeholders for images outside the media budget. In the default durable mode, Ncode starts preparing a summary in the background at 50% of the model window. At the blocking threshold (75% by default, capped to leave the model its reserve), the next call can join that job. Messages that arrived while the summary was being written stay in the recent tail. Earlier turns remain in the transcript. [Session storage](../packages/local-runtime-v2/src/service/session-system/messages/history/durable-session-stores.ts) · [Model context](../packages/local-runtime-v2/src/service/turn-system/compaction/context-wire.ts)
 
 ## What happens when I come back?
 

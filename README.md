@@ -5,12 +5,13 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 ## What Ncode adds to MCode
 
 - **Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax to claim the day’s available credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it too.
-- **Work can outlive the terminal.** The TUI, `ncode exec` and ACP share a local daemon. Close the terminal while a task runs, then return to the same workspace and profile with `ncode --continue`.
-- **Background subagents.** Send a new instruction while the agent is waiting on a subagent. The parent can act on it while the child finishes in the background. After a daemon restart, Ncode checks for completed tasks that still need to notify the parent.
-- **Pi runs turns and background tasks.** MCode already uses Pi to stream replies, run tools and feed results back to the model. Ncode also uses Pi Durable to schedule background work, and stores each conversation in compressed SQLite. When you reopen a session, the messages and tool results are still there.
-- **Account switching from the CLI.** Use `ncode --profile work` for a separate login, session history and settings. Run `ncode profile list` to see your profiles.
+- **Close the terminal, keep the task.** Ncode’s local daemon owns the turn. Reopen the workspace with `ncode --continue` to see what happened. If a subagent is still working, press Enter to steer the parent now or Alt+Enter to queue your next request.
+- **Scroll back from your editor.** MCode can already resume an ACP session. Ncode adds `session/history`: a compatible client can page through earlier messages, tool calls, results and compaction summaries without attaching to the session. It can also check whether a turn is active and how much input is queued.
+- **Long sessions start summarizing early.** Ncode prepares a summary in the background while you keep working. If the next model call needs room, it can use that work and keep the latest messages, including input that arrived during summarization. The original conversation stays available to read.
+- **Background work survives a restart.** MCode uses Pi to stream replies and run tools. Ncode also uses Pi Durable to schedule work and saves its progress in SQLite. If a child finishes just before the daemon restarts, Ncode picks up the saved result and delivers it to the parent.
+- **Keep two accounts open at once.** Run `ncode --profile work` in one terminal and `ncode` in another. Each profile has its own login, sessions and settings, so switching projects doesn’t mean signing out.
 
-[How sessions and recovery work](docs/architecture.md) · [Run two accounts](#run-two-accounts)
+[Sessions, ACP history and context](docs/architecture.md) · [Run two accounts](#run-two-accounts)
 
 <p align="center">
   <a href="#quick-start">Get started</a> ·
@@ -49,7 +50,7 @@ pnpm ncode --version
 
 Run `pnpm ncode` from the checkout, or run its built `dist/cli.js` with Node.js
 from another directory. The examples below use `ncode` as shorthand for that
-built CLI. The `mcode` launcher remains available for existing integrations.
+built CLI.
 The official MiniMax installers, registry packages and update channel
 belong to [upstream](https://github.com/MiniMax-AI/minimax-code). Update this source
 build by rebuilding a newer checkout.
@@ -204,6 +205,11 @@ TUI, use `/sessions` to find previous sessions and `/help` for commands and shor
 
 ## Uninstall
 
+For the Ncode npm package, run `npm uninstall --global @niwa-labs/ncode`. Your conversation history stays on disk.
+
+<details>
+<summary>Removing an official MiniMax Code installation</summary>
+
 Close running MCode sessions, including editor integrations, before uninstalling. First locate the command with `command -v mcode` (macOS / Linux / WSL) or `Get-Command mcode -All` (PowerShell), then follow the matching installation method below. The current official install scripts do **not** provide an uninstall flag.
 
 ### Installed with the script
@@ -237,6 +243,8 @@ npm uninstall -g @minimax-ai/code
 For a source build, save any work and remove only the checkout you created; see [Update or remove](docs/installation.md#update-or-remove).
 
 After uninstalling, reopen your terminal (fully restart the editor for integrated terminals) and run `command -v mcode` or `Get-Command mcode -All` again. No result means the command is no longer on PATH. If another copy appears, identify its installation method before removing it.
+
+</details>
 
 ### Optional: delete user data
 

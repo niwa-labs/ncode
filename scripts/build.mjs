@@ -131,6 +131,7 @@ writeFileSync(
   JSON.stringify(
     {
       name: cliIdentity.packageName, version, type: "module", private: true,
+      bin: { [cliIdentity.command]: "cli.js" },
       ...(process.env.MCODE_RELEASE_TAG ? {
         gitHead: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
       } : {}),

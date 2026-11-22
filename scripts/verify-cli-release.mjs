@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,11 +47,13 @@ try {
   assert.equal(release.version, version);
   assert.equal(release.tag, process.env.MCODE_RELEASE_TAG);
   assert.equal(release.revision, revision);
-  for (const command of new Set([identity.command, 'mcode'])) {
-    const launcher = path.join(prefix, 'bin', command);
-    const result = execFileSync(launcher, ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
-    assert.equal(result.trim(), version);
-  }
+  const manifest = JSON.parse(readFileSync(path.join(installed, 'package.json'), 'utf8'));
+  assert.deepEqual(manifest.bin, { [identity.command]: 'cli.js' }, 'Installed CLI must declare one launcher');
+  const launcherDirectory = path.join(prefix, 'bin');
+  assert.deepEqual(readdirSync(launcherDirectory), [identity.command], 'Fresh installation must expose one launcher');
+  const launcher = path.join(launcherDirectory, identity.command);
+  const result = execFileSync(launcher, ['--version'], { cwd: home, env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.trim(), version);
   const require = createRequire(path.join(installed, 'package.json'));
   const Database = require('better-sqlite3');
   const db = new Database(':memory:');

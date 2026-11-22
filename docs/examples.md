@@ -3,7 +3,7 @@
 Try the [Pocket Pet walkthrough](../examples/pocket-pet) for a visual example with two real requests: add a focus timer, then change pause to a long press. It includes a starter, finished implementation, and tests. No hardware is required.
 
 
-Build the project using the [installation guide](installation.md). Run the `pnpm mcode` commands below from the source root. For interactive tasks, open the target project directory and launch the built CLI by absolute path.
+Build the project using the [installation guide](installation.md). Run the `pnpm ncode` commands below from the source root. For interactive tasks, open the target project directory and launch the built CLI by absolute path.
 
 ## 1. Edit code and run tests
 
@@ -51,12 +51,12 @@ $env:MCODE_PROVIDER_API_KEY = [System.Net.NetworkCredential]::new('', $secureKey
 Add, inspect, and test the provider:
 
 ```bash
-pnpm mcode provider add --name my-provider --base-url https://example.com/v1 \
+pnpm ncode provider add --name my-provider --base-url https://example.com/v1 \
   --api-format openai-completions --model my-model \
   --api-key-env MCODE_PROVIDER_API_KEY --use
-pnpm mcode provider list
-pnpm mcode provider test <provider-id> --model <model-id>
-pnpm mcode exec "Explain this project's test entry points" --model <provider-id>/<model-id>
+pnpm ncode provider list
+pnpm ncode provider test <provider-id> --model <model-id>
+pnpm ncode exec "Explain this project's test entry points" --model <provider-id>/<model-id>
 ```
 
 Replace the example URL, model name, and IDs with your configuration and the IDs returned by the list command. `--use` tests the first listed model, then saves the provider and selects that model as the default. A failed connection test exits nonzero without saving or changing the default; correct the URL, key, or first model ID and retry. Omit `--use` to save without a connection test or default-model change. `exec --model` overrides only the current run. Backslash line continuations are for POSIX shells; use a single line in PowerShell.
@@ -64,11 +64,11 @@ Replace the example URL, model name, and IDs with your configuration and the IDs
 For a local server, configure its actual token limits explicitly:
 
 ```bash
-pnpm mcode provider add --name local-models --base-url http://localhost:8080/v1 \
+pnpm ncode provider add --name local-models --base-url http://localhost:8080/v1 \
   --api-format openai-completions --model local-model --model another-model \
   --api-key-env MCODE_PROVIDER_API_KEY \
   --context-limit 32768 --output-limit 4096 --use
-pnpm mcode provider list --json
+pnpm ncode provider list --json
 ```
 
 `--context-limit` and `--output-limit` each accept a positive safe integer (at most `9007199254740991`). Either flag can be used independently. The same limits apply to every repeated `--model`; only the first model is tested and selected by `--use`. The JSON list shows the configured values as `contextLimit` and `maxOutputTokens`. Without these flags, the existing defaults remain unchanged (unknown custom models currently fall back to 200,000 context tokens and 16,384 output tokens). Model discovery does not infer your local server's context size.
@@ -77,12 +77,12 @@ pnpm mcode provider list --json
 
 ### Third-party relays and custom auth headers
 
-Providers created by `mcode provider add` are stored under `custom_provider` in the active profile's `config.yaml`. That tree is the supported home for any endpoint other than the official MiniMax API; `minimax_api` is reserved for the official endpoint and keeps its fixed authentication scheme.
+Providers created by `ncode provider add` are stored under `custom_provider` in the active profile's `config.yaml`. That tree is the supported home for any endpoint other than the official MiniMax API; `minimax_api` is reserved for the official endpoint and keeps its fixed authentication scheme.
 
 Google-compatible endpoints use Pi's native Google adapter. Add the model manually with a base URL ending at the API version (not `/models`):
 
 ```bash
-mcode provider add --name "OpenCode Go Gemini" \
+ncode provider add --name "OpenCode Go Gemini" \
   --base-url https://opencode.ai/inference/go/v1 \
   --api-format google-generative-ai --model gemini-4-argon-contributor \
   --api-key-env OPENCODE_API_KEY --use
@@ -104,7 +104,7 @@ custom_provider:
       MiniMax-M2: {}
 ```
 
-`api` can be omitted and defaults to `anthropic-messages`. Configured headers are sent on both connection tests and conversation requests, and they are part of the connection-test fingerprint, so editing them retires a cached test verdict. The default `x-api-key` header is still sent alongside; the relay must tolerate rather than reject it. Header values are stored in plaintext like `apiKey` and are reported by name only in provider views. After editing the file, verify with `mcode provider list` and `mcode provider test <provider-id>`.
+`api` can be omitted and defaults to `anthropic-messages`. Configured headers are sent on both connection tests and conversation requests, and they are part of the connection-test fingerprint, so editing them retires a cached test verdict. The default `x-api-key` header is still sent alongside; the relay must tolerate rather than reject it. Header values are stored in plaintext like `apiKey` and are reported by name only in provider views. After editing the file, verify with `ncode provider list` and `ncode provider test <provider-id>`.
 
 [Live acceptance](verification.md) separately verified MiniMax Token Plan and one configured BYOK provider. This is not a guarantee for every compatible service.
 
@@ -134,7 +134,7 @@ For a custom BYOK model, declare image input support explicitly when adding the
 provider. Use this only if the selected provider endpoint and model accept images:
 
 ```bash
-pnpm mcode provider add --name my-vision-provider --base-url https://example.com/v1 \
+pnpm ncode provider add --name my-vision-provider --base-url https://example.com/v1 \
   --api-format openai-completions --model my-vision-model \
   --api-key-env MCODE_PROVIDER_API_KEY --support-image --use
 ```
@@ -191,7 +191,7 @@ Acceptance observed an actual `web_search` call and returned results; see the [v
 Paste your own image into the TUI, or attach a file explicitly:
 
 ```bash
-pnpm mcode exec "Describe this UI screenshot's layout and suggest three improvements" \
+pnpm ncode exec "Describe this UI screenshot's layout and suggest three improvements" \
   --file /absolute/path/to/your-screenshot.png
 ```
 
@@ -203,7 +203,7 @@ See [capability coverage](tui-capabilities.md) for custom MCP, managed connector
 
 Synchronous Hooks can show [TUI-only messages](hooks.md) with `systemMessage`, including notices after a normal Stop.
 
-Open `/plugins` inside the TUI, or run `mcode plugin` from a shell to open that panel. For a source build, use `pnpm mcode plugin` from the source root instead; the commands below use the installed `mcode` executable.
+Open `/plugins` inside the TUI, or run `ncode plugin` from a shell to open that panel. For a source build, use `pnpm ncode plugin` from the source root instead; the commands below use the installed `mcode` executable.
 
 The panel combines the **official** catalog and **local** plugin directories. Use `Tab` / `Shift+Tab` to switch between All Plugins, Installed, Official, and Local; type to search and use the arrow keys to select a row.
 
@@ -219,28 +219,28 @@ With a nonempty search, `Delete` / `Ctrl+D` edit the search instead of removing 
 The same operations are available from the shell:
 
 ```bash
-mcode plugin --help
-mcode plugin marketplace list
-mcode plugin list --available --marketplace official
-mcode plugin add <name>@official
-mcode plugin disable <name>@official
-mcode plugin enable <name>@official
-mcode plugin remove <name>@official
-mcode plugin marketplace upgrade
+ncode plugin --help
+ncode plugin marketplace list
+ncode plugin list --available --marketplace official
+ncode plugin add <name>@official
+ncode plugin disable <name>@official
+ncode plugin enable <name>@official
+ncode plugin remove <name>@official
+ncode plugin marketplace upgrade
 ```
 
 Replace `<name>` with a plugin name returned by `list`. Use `@official` or `@local` to disambiguate names shared by both sources; `--marketplace official` / `--marketplace local` are equivalent source selectors. The list and mutation commands support `--json`. `marketplace upgrade` refreshes source snapshots; it does not register a new marketplace.
 
-For a local plugin, run `mcode plugin marketplace list` to find the active profile's local directory. Place a supported plugin package in a direct child directory there, with its manifest at the package's expected location, then refresh `/plugins`. Copy the individual plugin package, not an entire marketplace repository. Discovered local packages already count as installed:
+For a local plugin, run `ncode plugin marketplace list` to find the active profile's local directory. Place a supported plugin package in a direct child directory there, with its manifest at the package's expected location, then refresh `/plugins`. Copy the individual plugin package, not an entire marketplace repository. Discovered local packages already count as installed:
 
 ```bash
-mcode plugin list --available --marketplace local
-mcode plugin disable <name>@local
-mcode plugin enable <name>@local
-mcode plugin remove <name>@local
+ncode plugin list --available --marketplace local
+ncode plugin disable <name>@local
+ncode plugin enable <name>@local
+ncode plugin remove <name>@local
 ```
 
-`mcode plugin add <name>@local` is not a local import command and is unsupported. Neither `plugin add` nor `/plugins` currently accepts a GitHub URL, local path, or arbitrary third-party marketplace registration. Compatible package readers and a GitHub importer exist in the runtime, but the CLI/TUI do not expose that importer. Managing arbitrary marketplaces from the panel remains a separate feature request; the current source selectors are only `official` and `local`.
+`ncode plugin add <name>@local` is not a local import command and is unsupported. Neither `plugin add` nor `/plugins` currently accepts a GitHub URL, local path, or arbitrary third-party marketplace registration. Compatible package readers and a GitHub importer exist in the runtime, but the CLI/TUI do not expose that importer. Managing arbitrary marketplaces from the panel remains a separate feature request; the current source selectors are only `official` and `local`.
 
 ## 5. Connect an authenticated project MCP server
 

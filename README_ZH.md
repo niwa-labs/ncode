@@ -5,12 +5,13 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 ## Ncode 在 MCode 基础上增加了什么
 
 - **每日自动签到。** 登录 MiniMax 后，在终端打开 `ncode` 就能领取当天可领的积分。签到确认后，当天再打开同一配置档会跳过签到。ACP 和无界面模式也会跳过自动签到。
-- **关闭终端后任务仍可继续。** 终端、`ncode exec` 和 ACP 共用本地守护进程。回到同一工作区，使用相同的配置档运行 `ncode --continue` 即可继续对话。
-- **子代理可以在后台工作。** 主代理等待子代理时，你可以发来新指令。主代理可以接着处理，子代理则在后台完成任务。守护进程重启后，Ncode 会检查哪些已完成的任务还需要通知主代理。
-- **从对话到后台任务，都由 Pi 驱动。** MCode 已经使用 Pi 流式返回回复、执行工具，再把工具结果交给模型继续处理。Ncode 还用 Pi Durable 调度后台任务，并将会话历史写入压缩的 SQLite 数据库。重新打开会话时，消息和工具结果都还在。
-- **在命令行切换账号。** 用 `ncode --profile work` 单独保存工作账号的登录信息、会话和设置。运行 `ncode profile list` 即可查看已有的配置档。
+- **关掉终端，任务还能继续。** 当前回合由本地守护进程运行。回到同一工作区，用 `ncode --continue` 查看进展。子代理还在工作时，按 Enter 可以立即给主代理新指令，按 Alt+Enter 则把请求排到下一回合。
+- **在编辑器里翻看历史。** MCode 已支持通过 ACP 恢复会话。Ncode 新增了 `session/history`，支持该扩展的客户端无需接管会话，就能分页读取旧消息、工具调用、结果和上下文摘要。客户端还能查看当前是否有活跃回合，以及有多少条输入正在排队。
+- **长对话会提前准备摘要。** Ncode 在后台整理较早的消息，你可以继续工作。下一次模型调用需要腾出空间时，可以沿用这份摘要，并保留最近的消息，包括整理期间发来的新指令。原始对话仍可随时翻阅。
+- **守护进程重启后还能收到子任务结果。** MCode 用 Pi 流式返回回复并执行工具，Ncode 还用 Pi Durable 调度后台任务，并将进度存入 SQLite。即使子代理刚完成任务守护进程就重启，主代理仍能收到已保存的结果。
+- **两个账号可以同时使用。** 在一个终端运行 `ncode --profile work`，在另一个终端运行 `ncode`。各自的登录、会话和设置独立，切换项目无需反复退出账号。
 
-[会话与恢复机制](docs/architecture.md) · [账号配置档](docs/installation.md#profiles)
+[会话、ACP 历史和上下文](docs/architecture.md) · [账号配置档](docs/installation.md#profiles)
 
 <p align="center">
   <a href="#快速开始">Get started</a> ·
@@ -48,7 +49,7 @@ pnpm ncode --version
 ```
 
 在工作目录中运行 `pnpm ncode`，或在其他目录中用 Node.js 运行构建后的
-`dist/cli.js`。下文用 `ncode` 指代构建后的 CLI，现有集成仍可使用 `mcode`。MiniMax 官方安装器、软件包和更新渠道属于
+`dist/cli.js`。下文用 `ncode` 指代构建后的 CLI。MiniMax 官方安装器、软件包和更新渠道属于
 [上游项目](https://github.com/MiniMax-AI/minimax-code)。要更新此分支，请切换到较新的源码版本并重新构建。
 
 ### 2. 登录账号或配置 API Key
@@ -183,6 +184,11 @@ ncode --session
 
 ## 卸载
 
+运行 `npm uninstall --global @niwa-labs/ncode` 即可卸载 Ncode 的 npm 包。会话历史仍保存在本机。
+
+<details>
+<summary>卸载 MiniMax Code 官方版本</summary>
+
 卸载前请关闭正在运行的 MCode 会话，包括编辑器中的集成。先通过 `command -v mcode`（macOS / Linux / WSL）或 `Get-Command mcode -All`（PowerShell）定位命令，再按对应的安装方式操作。当前官方安装脚本**不提供卸载参数**。
 
 ### 通过脚本安装
@@ -216,6 +222,8 @@ npm uninstall -g @minimax-ai/code
 源码构建请先保存工作，再仅删除自己创建的源码目录，详见[更新或移除](docs/installation.md#update-or-remove)。
 
 卸载后重新打开终端（编辑器集成终端需要完全重启编辑器），再次运行 `command -v mcode` 或 `Get-Command mcode -All`。没有结果表示 PATH 中已找不到该命令。如果出现另一份安装，请先确认它的安装方式再移除。
+
+</details>
 
 ### 可选：删除用户数据
 
