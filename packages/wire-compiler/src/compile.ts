@@ -6,7 +6,7 @@
  * `(dialect.name, dialect.normalizerVersion, entryId)`), and assembles the
  * body with one `Buffer.concat` — never a `JSON.stringify` over the whole
  * message array. The byte budget guard is arithmetic over the per-entry
- * segment lengths, so an oversized body is rejected with an exact per-entry
+ * segment lengths and any bytes carried outside NDJSON, so an oversized payload is rejected with an exact per-entry
  * breakdown before anything is sent.
  *
  * Each segment is one JSON line (trailing `\n`), so the concatenated body
@@ -112,7 +112,8 @@ export function compile(
   const parts: Buffer[] = [];
   const stats: SegmentStat[] = [];
   const insertedKeys: string[] = [];
-  let totalBytes = 0;
+  let bodyBytes = 0;
+  let additionalBytes = 0;
   let cacheHits = 0;
   const startedAtMs = Date.now();
 
@@ -156,9 +157,11 @@ export function compile(
       sha256,
       cacheHit,
     });
-    totalBytes += segment.length;
+    bodyBytes += segment.length;
+    additionalBytes += opts.additionalBytesByEntry?.get(entry.entryId) ?? 0;
   }
 
+  const totalBytes = bodyBytes + additionalBytes;
   if (totalBytes > opts.maxBytes) {
     // Roll back the segments THIS pass inserted: a failed compile must not
     // warm the shared cache on behalf of other callers — otherwise a later
@@ -167,8 +170,12 @@ export function compile(
     for (const key of insertedKeys) cache.delete?.(key);
     const err = new WireBudgetExceeded({
       totalBytes,
+      additionalBytes,
       maxBytes: opts.maxBytes,
-      breakdown: stats.map((stat) => ({ entryId: stat.entryId, bytes: stat.bytes })),
+      breakdown: stats.map((stat) => ({
+        entryId: stat.entryId,
+        bytes: stat.bytes + (opts.additionalBytesByEntry?.get(stat.entryId) ?? 0),
+      })),
     });
     log.warn('wire budget exceeded; cache inserts rolled back', {
       totalBytes,
@@ -187,5 +194,5 @@ export function compile(
     cacheHitRatio: stats.length === 0 ? 0 : cacheHits / stats.length,
     durationMs: Date.now() - startedAtMs,
   });
-  return { body: Buffer.concat(parts, totalBytes), totalBytes, segments: stats };
+  return { body: Buffer.concat(parts, bodyBytes), totalBytes: bodyBytes, segments: stats };
 }

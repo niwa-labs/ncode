@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
+import { PiTurnRunner, type RuntimeEvent } from '@mavis/agent-core/pi-turn-runner';
 import {
   createBackgroundCompactionScheduler,
   createMessageEntryDraft,
@@ -183,6 +184,44 @@ describe('TurnImageResidency fixed one-turn lifetime', () => {
       .records.filter((r) => r.images);
     expect(records).toHaveLength(1);
     expect(records[0]!.text).toContain('new');
+  });
+
+  it('rejects a resident image budget breach before the provider call', async () => {
+    const sessionId = 'provider-budget';
+    const turnId = 'turn-budget';
+    const wire = createTurnContextWire({ residency: new TurnImageResidency(), maxBytes: 128 });
+    const data = 'QUFB'.repeat(128);
+    wire.seed({ sessionId, messages: [] });
+    wire.observeCommit({ sessionId, reason: 'messageDelta', messages: [screenshotMessage('screenshot', data)] });
+    const projection = wire.projection(sessionId)!;
+    const streamFn = vi.fn(() => { throw new Error('provider must not be called'); });
+    const events: RuntimeEvent[] = [];
+
+    await new PiTurnRunner().runTurn({
+      sessionId,
+      turnId,
+      workspaceDir: tmpdir(),
+      systemPrompt: 'test',
+      userMessage: { text: 'screenshot', attachments: [{ type: 'image', data, mimeType: 'image/png' }] },
+      llm: { model: { ...model, input: ['text', 'image'] }, streamFn },
+      contextWire: projection,
+      eventWriter: {
+        appendEvents: (batch) => { events.push(...batch); },
+        pushRuntime: (event) => { events.push(event); },
+      },
+      toolConfig: { tools: [], disableBuiltinToolFallback: true, context: { sessionId, turnId } },
+    });
+
+    expect(streamFn).not.toHaveBeenCalled();
+    expect(JSON.stringify(events)).toContain('Reduce attached image data or compact the conversation.');
+    expect(wire.projection(sessionId)).toBeDefined();
+  });
+
+  it('still falls back when a history-only window exceeds the byte budget', () => {
+    const wire = createTurnContextWire({ maxBytes: 128 });
+    const sessionId = 'history-budget';
+    wire.seed({ sessionId, messages: [textMessage('history'.repeat(64))] });
+    expect(wire.projection(sessionId)!.project()).toBeUndefined();
   });
 
   it('budget zero keeps images as placeholders', () => {

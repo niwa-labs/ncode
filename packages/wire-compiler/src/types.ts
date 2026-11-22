@@ -123,11 +123,13 @@ export interface WireSegmentCache {
 /** Options of {@link compile}. */
 export type CompileOptions = {
   /**
-   * Hard cap on the compiled body size in bytes. The guard runs on the
+   * Hard cap on the body and any additional payload bytes. The guard runs on the
    * per-entry byte lengths (arithmetic over the manifest, no serialization
    * work); a breach aborts the compile with {@link WireBudgetExceeded}.
    */
   readonly maxBytes: number;
+  /** Bytes carried outside NDJSON, counted only for entries selected by the manifest. */
+  readonly additionalBytesByEntry?: ReadonlyMap<string, number>;
   /**
    * Force the per-segment sha256 even on cache hits. Default `false`: a hit
    * reuses the cached segment as-is and reports `sha256: undefined`, keeping
@@ -172,6 +174,6 @@ export type CompiledBody = {
   readonly body: Buffer;
   /** Exact byte length of `body`. */
   readonly totalBytes: number;
-  /** Per-entry breakdown in manifest order; the budget guard uses the same lens. */
+  /** Per-entry NDJSON segment facts, in manifest order. */
   readonly segments: readonly SegmentStat[];
 };

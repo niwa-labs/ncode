@@ -12,8 +12,8 @@
  * опцию/hook из композиции, не прямым импортом"). Everything here is plain
  * data in, pi `Message` out.
  *
- * Degradation contract: a projection never throws through the request path.
- * `project()` returning `undefined` (or throwing) degrades THAT single
+ * A projection may reject a request that exceeds the structured-image budget.
+ * `project()` returning `undefined` or failing for other reasons degrades that
  * request to the legacy conversion; the payload is then assembled by
  * `projectAgentMessagesForModel` exactly as without the port, so a wire-mode
  * fault can never lose or corrupt provider context.
@@ -74,10 +74,18 @@ export interface ContextWireRecord {
   readonly timestamp?: number;
 }
 
+/** A structured-image budget rejection must stop request preparation. */
+export class ContextWireImageBudgetExceeded extends Error {
+  constructor(cause: Error) {
+    super(`${cause.message}. Reduce attached image data or compact the conversation.`, { cause });
+    this.name = 'ContextWireImageBudgetExceeded';
+  }
+}
+
 /** The projected payload for one provider request. */
 export interface ContextWireRequest {
   readonly records: readonly ContextWireRecord[];
-  /** Exact byte length the wire compiler measured for this payload. */
+  /** Canonical window bytes, including structured image data when present. */
   readonly totalBytes: number;
 }
 

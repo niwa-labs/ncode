@@ -95,6 +95,7 @@ export { toPiUserMessage } from './agent.js';
 export {
   contextWireMessages,
   contextWireRequestMessages,
+  ContextWireImageBudgetExceeded,
   type ContextWireProjection,
   type ContextWireRecord,
   type ContextWireRecordToolCall,

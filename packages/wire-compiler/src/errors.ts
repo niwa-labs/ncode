@@ -9,14 +9,16 @@ export class WireCompilerError extends Error {
 }
 
 /**
- * The compiled body would exceed the caller's byte budget. Raised before any
+ * The compiled payload would exceed the caller's byte budget. Raised before any
  * body is handed out; `breakdown` carries the per-entry byte lens so callers
  * can decide which entries to drop or compact (the guard is arithmetic over
  * segment lengths, so the breakdown is exact, not estimated).
  */
 export class WireBudgetExceeded extends WireCompilerError {
-  /** Total byte size the compiled body would have had. */
+  /** Total byte size of the NDJSON body plus any additional payload bytes. */
   readonly totalBytes: number;
+  /** Byte count carried outside the NDJSON body. */
+  readonly additionalBytes: number;
   /** The budget that was exceeded. */
   readonly maxBytes: number;
   /** Byte contribution of every segment, in manifest order. */
@@ -24,12 +26,14 @@ export class WireBudgetExceeded extends WireCompilerError {
 
   constructor(params: {
     readonly totalBytes: number;
+    readonly additionalBytes?: number;
     readonly maxBytes: number;
     readonly breakdown: readonly SegmentBreakdownEntry[];
   }) {
     super(formatBudgetMessage(params.totalBytes, params.maxBytes, params.breakdown));
     this.name = 'WireBudgetExceeded';
     this.totalBytes = params.totalBytes;
+    this.additionalBytes = params.additionalBytes ?? 0;
     this.maxBytes = params.maxBytes;
     this.breakdown = params.breakdown;
   }

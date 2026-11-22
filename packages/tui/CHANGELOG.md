@@ -7,6 +7,7 @@
 - Close the terminal and reconnect to the same turn. You can steer it immediately or queue your next message while a subagent works.
 - ACP clients can page through messages, tool results and summaries, and inspect the active turn and queue without attaching.
 - Long sessions prepare summaries in the background, keep recent input in context and retain the original history for scrolling.
+- Images sent with a message or tool result count toward the context byte limit alongside text.
 - Pi Durable stores background work in SQLite and delivers completed results to the parent after a daemon restart.
 
 # MCode TUI Changelog

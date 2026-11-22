@@ -3,7 +3,7 @@ import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { formatUserAgent, getCurrentSystemMessage, type UserMessage } from '@earendil-works/pi-ai';
 import { diffSystemPromptSections } from '@earendil-works/pi-coding-agent';
 import type { TurnTerminationReason } from '../event-bridge/types.js';
-import { contextWireRequestMessages } from './context-wire.js';
+import { ContextWireImageBudgetExceeded, contextWireRequestMessages } from './context-wire.js';
 import { projectAgentMessagesForModel } from './outbound-message-normalizer.js';
 import { resolveMaxImagesPerRequest } from './request-image-limit.js';
 import { createRequestSnapshotBoundary, type RequestSnapshotBoundary } from './request-snapshot.js';
@@ -63,9 +63,8 @@ export function newAgent(turn: turnState, runLoop?: typeof runAgentLoop): Agent 
     },
     convertToLlm: (messages) => {
       // Ш4 context-wire: the composition-owned memoized pipeline compiles the
-      // provider-bound payload. `project()` returning `undefined` (or
-      // throwing) degrades THIS request to the legacy conversion below, so a
-      // wire-mode fault can never lose or corrupt provider context. Note the
+      // provider-bound payload. A structured-image budget rejection stops the
+      // request. Other projection failures fall back to legacy conversion. Note the
       // request-shaping contract: the projected window replaces the payload
       // derived from `messages`; request-only before-LLM message replacements
       // (context lifecycle) are superseded by the pipeline's own window.
@@ -102,6 +101,7 @@ export function newAgent(turn: turnState, runLoop?: typeof runAgentLoop): Agent 
             '[pi-turn-runner] context-wire projection unavailable; legacy conversion used',
           );
         } catch (error) {
+          if (error instanceof ContextWireImageBudgetExceeded) throw error;
           turn.logger.warn(
             {
               session_id: turn.input.sessionId,

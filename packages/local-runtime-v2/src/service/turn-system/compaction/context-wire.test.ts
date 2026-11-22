@@ -388,6 +388,47 @@ describe('ContextWirePipeline image residency (Ф2 R2 overlay, judge round 1)', 
     expect(ids).toContain(imgB.id);
   });
 
+  it('budgets NDJSON and resident image bytes together without changing the body or hashes', () => {
+    const residentData = 'QUFB'.repeat(256);
+    const resident = imageEntry(1, 0, residentData);
+    const digest = imageEntry(1, 1, 'QkJC'.repeat(4096));
+    const pages = [resident, digest];
+    const residency = residencyOf(
+      new Map([
+        [resident.id, { id: 'resident', sha256: 'a'.repeat(64) }],
+        [digest.id, { id: 'digest', sha256: 'b'.repeat(64) }],
+      ]),
+      new Map([['resident', 'resident']]),
+    );
+    const manifest = prepareContextWire(pages).manifest;
+    const cache = createLruSegmentCache(8);
+    const compile = (maxBytes: number) =>
+      compileWindow(pages, manifest, { maxBytes, cache, residency, requireHashes: true });
+    const before = compile(DEFAULT_MAX_PAYLOAD_BYTES);
+    const imageBytes = Buffer.byteLength(residentData) + Buffer.byteLength('image/png');
+    const budget = before.body.length + imageBytes;
+
+    expect(before.totalBytes).toBe(budget);
+    expect(before.body.toString('utf8')).not.toContain(residentData);
+    expect(() => compile(budget - 1)).toThrow(
+      expect.objectContaining({
+        name: 'WireBudgetExceeded',
+        totalBytes: budget,
+        maxBytes: budget - 1,
+        breakdown: before.segments.map((segment, index) => ({
+          entryId: segment.entryId,
+          bytes: segment.bytes + (index === 0 ? imageBytes : 0),
+        })),
+      }),
+    );
+    const admitted = compile(budget);
+    expect(admitted.totalBytes).toBe(budget);
+    expect(admitted.body).toEqual(before.body);
+    expect(admitted.segments.map(({ sha256 }) => sha256)).toEqual(
+      before.segments.map(({ sha256 }) => sha256),
+    );
+  });
+
   it('a residency flip recompiles: the segment cache never serves the other state', () => {
     const img = imageEntry(1, 0, 'QUFBQUFB');
     const page = { id: 'page-a', sha256: 'a'.repeat(64) };

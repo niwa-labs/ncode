@@ -63,7 +63,11 @@ import type { Commit, Entry, Seq } from '@mavis/durable-backend-sqlite-zstd';
 import { createHash } from 'node:crypto';
 
 import { createLogger } from '@mavis/logging';
-import type { ContextWireProjection, ContextWireRecord } from '@mavis/agent-core/pi-turn-runner';
+import {
+  ContextWireImageBudgetExceeded,
+  type ContextWireProjection,
+  type ContextWireRecord,
+} from '@mavis/agent-core/pi-turn-runner';
 import type { CanonicalHistoryMessage } from '../agent-host/history/contracts.js';
 import { resolveHistoryProviderMode } from '../../session-system/messages/history/durable-canonical-history-provider.js';
 
@@ -91,6 +95,7 @@ import {
   recordCacheKey,
   type CompiledEntry,
   type ImageRendering,
+  type RecordImageBlock,
 } from '@mavis/convert-to-llm';
 // Context MMU: type-only here (the runtime wires the instance in via
 // `ContextWireOptions.residency`) — the MMU instance itself is composed by the
@@ -444,7 +449,7 @@ export interface ContextWireOptions {
 export interface PreparedContext {
   /** NDJSON wire body: one normalized provider record per line. */
   readonly body: Buffer;
-  /** Exact byte length of `body` — the provider payload byte truth. */
+  /** NDJSON bytes plus the UTF-8 data and MIME strings of forwarded image carriers. */
   readonly totalBytes: number;
   /** Σ manifest segment bytes (the compaction byte-trigger axis, for contrast). */
   readonly manifestBytes: number;
@@ -773,6 +778,19 @@ function compactionContextUsageOf(
   };
 }
 
+// Image objects are immutable results of the memoized conversion. Measure each once
+// without serializing the base64 again or assuming that legacy data is valid ASCII.
+const imageByteLengths = new WeakMap<RecordImageBlock, number>();
+
+function imageByteLength(image: RecordImageBlock): number {
+  let bytes = imageByteLengths.get(image);
+  if (bytes === undefined) {
+    bytes = Buffer.byteLength(image.data, 'utf8') + Buffer.byteLength(image.mimeType, 'utf8');
+    imageByteLengths.set(image, bytes);
+  }
+  return bytes;
+}
+
 /**
  * Executes the shared context plan with runtime media rendering and memoized
  * conversion/segments. Selection, placement recovery, batching, summary and
@@ -790,7 +808,7 @@ export function compileWindow(
     readonly conversionMemo?: ContextWireConversionMemo;
     readonly requireHashes?: boolean;
   },
-): CompiledBody & { readonly records: readonly WireEntry[] } {
+): Omit<CompiledBody, 'totalBytes'> & Pick<PreparedContext, 'totalBytes' | 'records'> {
   const plan = createContextPlan(windowPages, manifest);
   const memo = options.conversionMemo;
   const liveRecordKeys = new Set<string>();
@@ -920,8 +938,19 @@ export function compileWindow(
 
   const wireEntries = assembled.records.map(compiledEntryToWireEntry);
   const wireManifest = wireEntries.map((entry) => ({ entryId: entry.entryId }));
+  let additionalBytesByEntry: Map<string, number> | undefined;
+  let imageBytes = 0;
+  // Count only the final records and roles that hydrate into image content.
+  // Provider-specific request envelopes are outside this canonical budget.
+  for (const record of assembled.records) {
+    if (record.images === undefined || (record.role !== 'user' && record.role !== 'tool')) continue;
+    const bytes = record.images.reduce((total, image) => total + imageByteLength(image), 0);
+    (additionalBytesByEntry ??= new Map()).set(record.entryId, bytes);
+    imageBytes += bytes;
+  }
   const compiled = compile(wireManifest, wireEntries, {
     maxBytes: options.maxBytes,
+    ...(additionalBytesByEntry === undefined ? {} : { additionalBytesByEntry }),
     dialect: compileDialect,
     cache: options.cache,
     requireHashes: options.requireHashes === true,
@@ -939,7 +968,7 @@ export function compileWindow(
       if (segment !== undefined) residencySegments.set(wireId, segment);
     }
   }
-  return { ...compiled, records: wireEntries };
+  return { ...compiled, totalBytes: compiled.totalBytes + imageBytes, records: wireEntries };
 }
 
 /**
@@ -1317,6 +1346,9 @@ export function createTurnContextWire(options?: TurnContextWireOptions): TurnCon
           });
           return { records, totalBytes: prepared.totalBytes };
         } catch (error) {
+          if (error instanceof WireBudgetExceeded && error.additionalBytes > 0) {
+            throw new ContextWireImageBudgetExceeded(error);
+          }
           // Fail-safe: degrade this (and every subsequent) request to the
           // legacy conversion instead of surfacing a wire fault as a Turn
           // failure. The next seed rebuilds from scratch.
