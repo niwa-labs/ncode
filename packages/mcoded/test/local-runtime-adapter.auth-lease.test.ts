@@ -18,7 +18,8 @@
  * milliseconds; the fake clock is never advanced across a SCHEDULED refresh
  * boundary (expiry minus the 60 s margin) because the frozen clock would turn
  * the boundary's zero-delay reschedule into a loop that cannot exist with a
- * real, advancing clock.
+ * real, advancing clock. After advancing the clock, poll the observable
+ * result on Vitest's real timers while the filesystem work completes.
  */
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -125,25 +126,6 @@ async function corruptCredentialStore(homeDir: string): Promise<void> {
 	await writeFile(join(profileNamespace(homeDir).namespaceHome, 'auth.json'), '{ corrupt');
 }
 
-/**
- * Yield to the real event loop so the file store's threadpool I/O settles
- * after a timer-driven `lease()` ran under fake timers.
- *
- * Budget: a failing lease attempt is a chain of sequential fs hops, and the
- * signed-out family takes the full `CrossProcessAuthLock` round-trip
- * (mkdir/chmod/open/close, proper-lockfile acquire+release, two state reads)
- * before it can log. Measured on this repo (tsx repro against the real
- * oauth-core store): 12 setImmediate rounds for the corrupt-record path and
- * 24 for the signed-out path, so 12 rounds let the assertion sample the
- * spy before the retry's log line landed. 250 rounds is ~10x the measured
- * worst case; rounds are microsecond-scale, so this stays instant.
- */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 250; i += 1) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-}
-
 describe('createProfileAuthSession refresh chain', () => {
 	let homeDir: string | undefined;
 	let session: LocalRuntimeAdapterAuthSession | undefined;
@@ -197,41 +179,37 @@ describe('createProfileAuthSession refresh chain', () => {
 		expect(countLeaseFailures()).toBe(1);
 
 		// …and the retry ladder re-arms: first retry after 30 s (still broken),
-		await vi.advanceTimersByTimeAsync(30_000);
-		await settle();
-		expect(countLeaseFailures()).toBe(2);
+		vi.advanceTimersByTime(30_000);
+		await expect.poll(countLeaseFailures, { timeout: 2_000 }).toBe(2);
 		expect(session!.authContextGetter()).toEqual({
 			accessToken: 'token-1',
 			loginEpoch: 'epoch-1',
 		});
 
 		// the second retry only after 60 s more (doubling backoff),
-		await vi.advanceTimersByTimeAsync(30_000);
-		await settle();
+		vi.advanceTimersByTime(30_000);
+		expect(vi.getTimerCount()).toBe(1);
 		expect(countLeaseFailures()).toBe(2);
-		await vi.advanceTimersByTimeAsync(30_000 + 1);
-		await settle();
-		expect(countLeaseFailures()).toBe(3);
+		vi.advanceTimersByTime(30_000);
+		await expect.poll(countLeaseFailures, { timeout: 2_000 }).toBe(3);
 
 		// and once the store heals (another owner refreshed it), the still-live
 		// chain picks the fresh token up on the next scheduled retry.
 		await seedSignedInCredential(homeDir, { accessToken: 'token-2', generation: 1 });
-		await vi.advanceTimersByTimeAsync(120_000 + 1);
-		await settle();
-		expect(countLeaseFailures()).toBe(3);
-		expect(session!.authContextGetter()).toEqual({
+		vi.advanceTimersByTime(120_000);
+		await expect.poll(() => session!.authContextGetter(), { timeout: 2_000 }).toEqual({
 			accessToken: 'token-2',
 			loginEpoch: 'epoch-1',
 		});
+		expect(countLeaseFailures()).toBe(3);
 
 		// A recovered lease resets the ladder: the NEXT failure retries after
 		// 30 s again, not after the doubled 240 s.
 		await corruptCredentialStore(homeDir);
 		await expect(session!.lease()).resolves.toBeUndefined();
 		expect(countLeaseFailures()).toBe(4);
-		await vi.advanceTimersByTimeAsync(30_000);
-		await settle();
-		expect(countLeaseFailures()).toBe(5);
+		vi.advanceTimersByTime(30_000);
+		await expect.poll(countLeaseFailures, { timeout: 2_000 }).toBe(5);
 	});
 
 	it('drops the lease on signed-out failures but keeps retrying until a later login', async () => {
@@ -250,23 +228,21 @@ describe('createProfileAuthSession refresh chain', () => {
 		expect(countLeaseFailures()).toBe(1);
 
 		// The retry ladder stays armed: first re-attempt at 30 s…
-		await vi.advanceTimersByTimeAsync(29_999);
-		await settle();
+		vi.advanceTimersByTime(29_999);
+		expect(vi.getTimerCount()).toBe(1);
 		expect(countLeaseFailures()).toBe(1);
-		await vi.advanceTimersByTimeAsync(1);
-		await settle();
-		expect(countLeaseFailures()).toBe(2);
+		vi.advanceTimersByTime(1);
+		await expect.poll(countLeaseFailures, { timeout: 2_000 }).toBe(2);
 
 		// …and when the user signs in through the CLI into the same shared
 		// store, the next retry picks the login up — no daemon restart.
 		await seedSignedInCredential(homeDir, { accessToken: 'token-1', generation: 1 });
-		await vi.advanceTimersByTimeAsync(60_000 + 1);
-		await settle();
-		expect(countLeaseFailures()).toBe(2);
-		expect(session!.authContextGetter()).toEqual({
+		vi.advanceTimersByTime(60_000);
+		await expect.poll(() => session!.authContextGetter(), { timeout: 2_000 }).toEqual({
 			accessToken: 'token-1',
 			loginEpoch: 'epoch-1',
 		});
+		expect(countLeaseFailures()).toBe(2);
 	});
 
 	it('builds the namespace from the served dataDir, ignoring MINIMAX_PROFILE', async () => {
