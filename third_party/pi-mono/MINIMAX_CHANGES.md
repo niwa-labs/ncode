@@ -13,6 +13,8 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 
 Ncode imports the upstream libraries as workspace source. The provider adapters, agent loop, coding tools and MCP library use this baseline with the product hooks recorded below. Pi Durable and Chord are maintained in their sibling vendor directories. Ncode owns the terminal, daemon, session storage and delivery of queued input. The standalone Pi apps are outside this source projection.
 
+The coding-agent subprocess loader (`src/experimental/source-resolver.ts`) resolves workspace source exports using the Ncode build's package resolver. This lets CLI and RPC subprocess tests load the same sources as the product. The coding-agent tool and streaming-read tests retain coverage for Ncode's file-read receipts, shell exit observations and separate output streams alongside the upstream assertions.
+
 ## 2026-11-11 — Pi 1.5.2 rebaseline
 
 - Three-way merged the previous `48c8f322` baseline, the local working tree and release `v1.5.2`; retained product agent-loop ownership/steering hooks, system-section patches, tool execution facts, output stream separation and bounded edit receipts.

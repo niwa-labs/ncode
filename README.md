@@ -7,7 +7,7 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 - **Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax to claim the day’s available credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it too.
 - **Work can outlive the terminal.** The TUI, `ncode exec` and ACP share a local daemon. Close the terminal while a task runs, then return to the same workspace and profile with `ncode --continue`.
 - **Background subagents.** Send a new instruction while the agent is waiting on a subagent. The parent can act on it while the child finishes in the background. After a daemon restart, Ncode checks for completed tasks that still need to notify the parent.
-- **Pi runs the conversation.** Pi streams the reply, runs the tools the model asks for and feeds their results into the next model call. Ncode also uses Pi Durable to schedule background work and saves conversation history in compressed SQLite. When you reopen a session, the messages and tool results are still there.
+- **Pi runs turns and background tasks.** MCode already uses Pi to stream replies, run tools and feed results back to the model. Ncode also uses Pi Durable to schedule background work, and stores each conversation in compressed SQLite. When you reopen a session, the messages and tool results are still there.
 - **Account switching from the CLI.** Use `ncode --profile work` for a separate login, session history and settings. Run `ncode profile list` to see your profiles.
 
 [How sessions and recovery work](docs/architecture.md) · [Run two accounts](#run-two-accounts)

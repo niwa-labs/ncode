@@ -117,7 +117,7 @@ describe('MCode Pi Engine local deltas', () => {
           'quoteBorder', 'hr', 'listBullet', 'bold', 'italic', 'strikethrough', 'underline']
           .map((key) => [key, passthrough]),
       ) as ConstructorParameters<typeof Markdown>[3];
-      const markdown = new Markdown('`' + image + '`  \n` `  \n` `\n\n- one', 0, 0, theme);
+      const markdown = new Markdown(`\`${image}\`  \n\` \`  \n\` \`\n\n- one`, 0, 0, theme);
       const lines = markdown.render(80);
       expect(lines.every((line) => !line.includes('\n'))).toBe(true);
       expect(lines[0]).toContain(image);
