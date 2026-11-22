@@ -37,7 +37,7 @@ Niwa coordinates workflows across coding agents. Choose Ncode as its ACP backend
 - **Keep a person in control of tool use.** Niwa can select the permission mode when opening or loading a session, show individual tool decisions and ask the operator to allow a call once or deny it. For requests that support saved decisions, Ncode also offers ACP clients an **Always deny** option.
 - **Ask questions in either direction.** When the agent needs a decision, Niwa presents its questionnaire to the operator and sends the answers back. When a workflow needs a structured answer from the agent, `session.ask` validates the JSON returned over ACP.
 
-In `niwa harness.list`, check that the adapter reports `capabilities.control.tools.niwaOnly: true`. Niwa 0.0.0 predates this mode. Configure the adapter to launch `ncode acp --no-builtin-tools --session-mcp-only`. [Niwa workflow example](https://github.com/niwa-labs/niwa#niwa-and-ncode)
+For session-only tools, configure the adapter to launch `ncode acp --no-builtin-tools --session-mcp-only`. [Niwa workflow example](https://github.com/niwa-labs/niwa#niwa-and-ncode)
 
 ## Quick start
 

@@ -39,7 +39,7 @@ Niwa 协调多个编程代理的工作流。如果工作流需要精确控制每
 - **由操作人员审批工具调用。** Niwa 可以在创建或恢复会话时选择权限模式，显示每次工具调用的审批结果，并让操作人员选择仅允许本次调用或拒绝。对于支持保存决定的请求，Ncode 还向 ACP 客户端提供“始终拒绝”选项。
 - **双向提问。** 当代理需要人做决定时，Niwa 向操作人员展示问卷并把答案传回。工作流也可以通过 `session.ask` 向代理提问，再按指定的结构校验通过 ACP 返回的 JSON。
 
-请先运行 `niwa harness.list`，确认适配器报告 `capabilities.control.tools.niwaOnly: true`。Niwa 0.0.0 尚不支持此模式。将适配器启动命令设为 `ncode acp --no-builtin-tools --session-mcp-only`。[Niwa 工作流示例](https://github.com/niwa-labs/niwa#niwa-and-ncode)
+要仅开放会话指定的工具，请将适配器启动命令设为 `ncode acp --no-builtin-tools --session-mcp-only`。[Niwa 工作流示例](https://github.com/niwa-labs/niwa#niwa-and-ncode)
 
 ## 快速开始
 
