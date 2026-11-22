@@ -1,4 +1,8 @@
-import { NO_BUILTIN_TOOLS_ENV, noBuiltinToolsFromEnv } from '@mavis/config';
+import {
+  NO_BUILTIN_TOOLS_ENV,
+  noBuiltinToolsFromEnv,
+  sessionMcpOnlyFromEnv,
+} from '@mavis/config';
 
 import { loadTuiRuntimeConfig } from '../headless/config.js';
 import { exitCodeForExecError, TuiExecError } from '../headless/exit-policy.js';
@@ -77,7 +81,9 @@ export async function runTuiExecCommand(
     // process, because a shared daemon started without the variable would not
     // honor the request.
     const externalToolsOnly =
-      invocation.noBuiltinTools === true || noBuiltinToolsFromEnv(process.env);
+      invocation.noBuiltinTools === true ||
+      noBuiltinToolsFromEnv(process.env) ||
+      sessionMcpOnlyFromEnv(process.env);
     const runtime = await createRuntime(
       {
         dataDir,

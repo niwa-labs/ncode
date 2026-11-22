@@ -59,6 +59,8 @@ export interface RunTuiCliDependencies {
     systemPromptOverrides?: SystemPromptOverrides,
     profile?: string,
     noDaemon?: boolean,
+    noBuiltinTools?: boolean,
+    sessionMcpOnly?: boolean,
   ) => Promise<void>;
   readonly runLogin?: (
     region?: MavisRegion,
@@ -162,9 +164,24 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         );
         completedCommandExitMode = 'natural';
       },
-      runAcp: async (lane, systemPromptOverrides, profile, noDaemon) => {
+      runAcp: async (
+        lane,
+        systemPromptOverrides,
+        profile,
+        noDaemon,
+        noBuiltinTools,
+        sessionMcpOnly,
+      ) => {
         const runAcp = dependencies.runAcp ?? defaultRunAcp;
-        await runAcp(MINIMAX_CODE_VERSION, lane, systemPromptOverrides, profile, noDaemon);
+        await runAcp(
+          MINIMAX_CODE_VERSION,
+          lane,
+          systemPromptOverrides,
+          profile,
+          noDaemon,
+          noBuiltinTools,
+          sessionMcpOnly,
+        );
         completedCommandExitMode = 'natural';
       },
       runLogin: async (region, openBrowser, lane, profile) => {

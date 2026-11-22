@@ -342,6 +342,9 @@ export async function buildLocalTurnToolSources(
       mcpEntries: [],
       threadGoalTools: [],
       cuRuntimeAvailable: false,
+      // Combining restrictions must never widen the result: the marker keeps
+      // the final catalog from re-adding run_code or host/plugin tools.
+      ...(input.noBuiltinTools === true ? { externalToolsOnly: true } : {}),
     };
   }
   if (input.noBuiltinTools === true) {

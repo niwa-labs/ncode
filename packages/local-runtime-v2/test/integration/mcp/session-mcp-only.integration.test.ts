@@ -20,7 +20,7 @@ afterEach(async () => {
 const fixture = `
 const fs = require('node:fs');
 const readline = require('node:readline');
-fs.writeFileSync('started', 'yes');
+if (process.env.CHECK_MARKER) fs.writeFileSync(process.env.CHECK_MARKER, 'yes');
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 readline.createInterface({input: process.stdin}).on('line', line => {
  const request = JSON.parse(line);
@@ -42,7 +42,11 @@ async function setup() {
     join(workspace, ".mcp.json"),
     JSON.stringify({
       mcpServers: {
-        stray: { command: process.execPath, args: ["./server.cjs"] },
+        stray: {
+          command: process.execPath,
+          args: ["./server.cjs"],
+          env: { CHECK_MARKER: join(workspace, '..', 'stray-started') },
+        },
       },
     }),
   );
@@ -58,7 +62,7 @@ async function setup() {
 
 async function startedMarker(workspace: string): Promise<boolean> {
   try {
-    await access(join(workspace, "started"));
+    await access(join(workspace, "..", "stray-started"));
     return true;
   } catch {
     return false;
@@ -69,7 +73,14 @@ it("session-MCP-only mode connects only the session's own servers", async () => 
   vi.stubEnv("MCODE_SESSION_MCP_ONLY", "1");
   const { workspace, service } = await setup();
   await service.configureSessionServers("ses_harness", [
-    { name: "harness", config: { command: process.execPath, args: [join(workspace, "server.cjs")] } },
+    {
+      name: "harness",
+      config: {
+        command: process.execPath,
+        args: [join(workspace, "server.cjs")],
+        env: { CHECK_MARKER: join(workspace, '..', 'harness-started') },
+      },
+    },
   ]);
 
   const entries = await service.listToolEntriesForTurn({
@@ -82,6 +93,12 @@ it("session-MCP-only mode connects only the session's own servers", async () => 
   expect(entries.map((entry) => entry.tool.def.name)).toEqual(["mcp__harness__probe"]);
   // The workspace-declared server was never launched: its marker is absent.
   expect(await startedMarker(workspace)).toBe(false);
+
+  // Call-time enforcement: even a direct call naming the skipped server
+  // must fail instead of reaching it.
+  await expect(
+    service.call("stray", "probe", {}, { context: { sessionId: "ses_harness", workspaceRoot: workspace } }),
+  ).rejects.toThrow(/outside this session's server scope/u);
 
   // Control: without the mode both servers are discovered.
   vi.unstubAllEnvs();

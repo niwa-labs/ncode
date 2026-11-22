@@ -201,7 +201,12 @@ export function filterLocalTurnCapabilityInventory(input: {
     nativeTools,
     mcpEntries,
     threadGoalTools,
-    ...(input.desktopCapabilities
+    // Plugin runtime tools ride `desktopCapabilities`, not the native list:
+    // in external-tools-only mode they are host-owned built-ins and stay off
+    // here — the shared filter covers both the final catalog and the task
+    // capture that freezes this inventory, so a captured ceiling can never
+    // regain them on resume.
+    ...(input.desktopCapabilities && input.sources.externalToolsOnly !== true
       ? {
           desktopCapabilities: filterDesktopCapabilities(
             input.desktopCapabilities,
@@ -263,9 +268,7 @@ export function buildLocalTurnToolCatalog(
       supportVideo: input.modelCapabilities?.support_video === true,
     });
   }
-  // Plugin runtime tools ride `desktopCapabilities`, not the native list:
-  // in external-tools-only mode they are host-owned built-ins and stay off.
-  const desktopCapabilities = externalOnly ? undefined : inventory.desktopCapabilities;
+  const desktopCapabilities = inventory.desktopCapabilities;
   const effectivePluginSkills = filterExtensionSkills(
     input.effectivePluginSkills ?? [],
     inventory.selector,

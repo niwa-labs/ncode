@@ -2,6 +2,8 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 
+import { noBuiltinToolsFromEnv } from '@mavis/config';
+
 import type { TuiAttachment } from '../application/invocation.js';
 import { assertValidOutputSchema } from './contract.js';
 import { prepareDiagnosticsDirectory } from './diagnostics.js';
@@ -235,9 +237,10 @@ async function resolveTuiExecReviewInvocation(
   options: RawTuiExecOptions,
   signal?: AbortSignal,
 ): Promise<ResolvedTuiExecInvocation> {
-  if (options.builtinTools === false) {
+  if (options.builtinTools === false || noBuiltinToolsFromEnv(process.env)) {
     // The review guard admits only the built-in inspection tools, so a
-    // restricted review would leave the model with nothing it may call.
+    // restricted review would leave the model with nothing it may call. The
+    // environment counts so an inherited mode fails with the same error.
     throw invocationError(
       'exec review needs the built-in inspection tools; --no-builtin-tools is not supported here.',
     );

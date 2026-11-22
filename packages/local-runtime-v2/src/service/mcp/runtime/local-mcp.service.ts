@@ -1,7 +1,7 @@
 import { ProjectMcpRuntime } from '../project-mcp.service.js';
 import { SessionMcpServers } from './session-servers.js';
 import { projectNativeTools, reserveConfiguredServerNames } from './native-tool-projection.js';
-import { sessionMcpOnlyFromEnv } from '@mavis/config';
+import { noBuiltinToolsFromEnv, sessionMcpOnlyFromEnv } from '@mavis/config';
 import { McpNameRegistry } from '@mavis/mcp';
 import { coerceRuntimeToolInput } from '@mavis/agent-core/tools';
 import type { RuntimeTool, ToolResult } from '@mavis/agent-core/tools';
@@ -692,18 +692,27 @@ export class LocalMcpService {
   ): Promise<LocalMcpNativeToolInfo[]> {
     this.assertOpen();
     const file = await this.readEffectiveFile(context);
-    const invalidNames = this.reserveRuntimeServerNames(file, context);
     // Session-MCP-only mode (harness-driven runs): only servers the session's
     // client supplied may connect. Data-dir and workspace declarations are
-    // dropped BEFORE discovery, so a workspace under review cannot start its
-    // own MCP server; without a session id nothing qualifies.
+    // dropped BEFORE discovery and BEFORE name reservation, so a workspace
+    // under review can neither start its own MCP server nor claim a tool-name
+    // segment; without a session id nothing qualifies. External-tools-only
+    // mode additionally skips the bundled Matrix server, whose discovery
+    // would open a connection even though the entries are filtered later.
     const sessionScoped = sessionServerScope(this.sessionServers, context);
+    const builtinsOff = noBuiltinToolsFromEnv(process.env);
+    const eligible = Object.entries(file.mcpServers).filter(([server, config]) => {
+      if (config.enabled === false || !hasLocalCallAdapter(config)) return false;
+      if (builtinsOff && isBuiltinMatrixConfig(server, config)) return false;
+      if (sessionScoped !== undefined && !sessionScoped.has(normalizeServerName(server)))
+        return false;
+      return true;
+    });
+    const scopedFile = { ...file, mcpServers: Object.fromEntries(eligible) };
+    const invalidNames = this.reserveRuntimeServerNames(scopedFile, context);
     const discovered = await Promise.all(
-      Object.entries(file.mcpServers).map(async ([server, config]) => {
-        if (config.enabled === false || invalidNames.has(server) || !hasLocalCallAdapter(config))
-          return [];
-        if (sessionScoped !== undefined && !sessionScoped.has(normalizeServerName(server)))
-          return [];
+      eligible.map(async ([server, config]) => {
+        if (invalidNames.has(server)) return [];
         const isBuiltinMatrix = isBuiltinMatrixConfig(server, config);
         const rawTools =
           isBuiltinMatrix && !context
@@ -859,6 +868,15 @@ export class LocalMcpService {
   ): Promise<LocalMcpCallResult> {
     const { context, signal } = options;
     this.assertOpen();
+    // Session-MCP-only mode must hold at call time too: discovery scoping
+    // alone would still let a stale tool call (e.g. replayed from resumed
+    // history) reach a data-dir or workspace server by name.
+    const scoped = sessionServerScope(this.sessionServers, context);
+    if (scoped !== undefined && !scoped.has(normalizeServerName(server))) {
+      throw new Error(
+        `MCP server "${server}" is outside this session's server scope.`,
+      );
+    }
     const config = await this.getServerConfig(server, context);
     if (!config || config.enabled === false) {
       return {
