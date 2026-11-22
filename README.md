@@ -304,7 +304,7 @@ From the source directory, use `pnpm ncode` in place of `ncode` in the examples 
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-This checkout builds the **Niwa Labs Ncode 0.1.0** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
+This checkout builds the **Niwa Labs Ncode 0.1.1** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
 
 ## Documentation and contributing
 

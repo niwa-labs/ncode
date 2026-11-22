@@ -31,6 +31,7 @@ import type { IAgentConfig } from '@mavis/protocol';
 import type { GlobalEventInput } from '@mavis/shared/global-events';
 import {
   TOOL_RESULT_COMPACTION_DEFAULTS,
+  noBuiltinToolsFromEnv,
   parseToolResultCompactionConfig,
   type ResolvedAgentCapabilities,
   type RunawayGuardOverride,
@@ -161,6 +162,8 @@ export interface ProductionAgentProductCapabilities<
       readonly resourceAgentName: string;
       readonly builtinCapabilities?: ResolvedAgentCapabilities;
       readonly toolsDisabled: boolean;
+      /** External-tools-only mode: native sources off, configured MCP only. */
+      readonly noBuiltinTools?: boolean;
       readonly cuModeActive: boolean;
       readonly excludeAgentResources?: boolean;
       readonly skipAgentResolution?: boolean;
@@ -528,6 +531,7 @@ export async function createLocalAgentHost<
             : {}),
           ...(input.builtinCapabilities ? { builtinCapabilities: input.builtinCapabilities } : {}),
           toolsDisabled: process.env.MAVIS_LOCAL_RUNTIME_DISABLE_TOOLS === '1',
+          noBuiltinTools: noBuiltinToolsFromEnv(process.env),
           cuModeActive: input.cuModeActive,
           ...(input.agentMemoryEnabled === undefined
             ? {}

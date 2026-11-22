@@ -26,6 +26,15 @@ import type { LocalRuntimeApiHostOptions } from './host-helpers.js';
 
 export interface LocalTurnToolSourcesInput {
   toolsDisabled: boolean;
+  /**
+   * External-tools-only mode for harness-driven runs: every native source —
+   * builtin tools, the bundled Matrix MCP server, thread-goal tools and the
+   * codemode runtime — is dropped, and only configured MCP servers
+   * (session-scoped or from the data dir) remain. The filter sits at the
+   * source level rather than per tool name, so built-in tools added by later
+   * versions are covered by the same switch.
+   */
+  noBuiltinTools?: boolean;
   dataDir: string;
   workspaceRoot: string;
   agentName: string;
@@ -109,4 +118,10 @@ export interface LocalTurnToolSources {
   readonly mcpEntries: readonly McpToolEntry[];
   readonly threadGoalTools: readonly RuntimeTool[];
   readonly cuRuntimeAvailable: boolean;
+  /**
+   * Set by external-tools-only mode: the sources below were produced under the
+   * `noBuiltinTools` switch, so the final catalog must not re-add native tools
+   * (run_code, plugin runtime tools) or defer the remaining MCP entries.
+   */
+  readonly externalToolsOnly?: boolean;
 }

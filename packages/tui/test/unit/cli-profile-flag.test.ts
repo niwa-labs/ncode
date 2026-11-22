@@ -149,7 +149,7 @@ describe('acp contract: --profile reaches the runtime creation options', () => {
     const error = await parse(program, ['node', 'mcode', 'acp', '--profile', 'cedar']);
     expect(error).toBeUndefined();
     expect(runAcp).toHaveBeenCalledOnce();
-    expect(runAcp).toHaveBeenCalledWith(undefined, undefined, 'cedar', false);
+    expect(runAcp).toHaveBeenCalledWith(undefined, undefined, 'cedar', false, false, false);
   });
 
   it('runTuiAcpCommand forwards the profile into createTuiRuntime options', async () => {
@@ -262,7 +262,7 @@ describe('--no-daemon flag: contracts translate daemon=false into noDaemon=true'
     const program = buildProgram({ launchTui: vi.fn(async () => undefined), runAcp });
     const error = await parse(program, ['node', 'mcode', 'acp', '--no-daemon']);
     expect(error).toBeUndefined();
-    expect(runAcp).toHaveBeenCalledWith(undefined, undefined, undefined, true);
+    expect(runAcp).toHaveBeenCalledWith(undefined, undefined, undefined, true, false, false);
   });
 
   it('acp: runTuiAcpCommand forwards noDaemon into createTuiRuntime options', async () => {

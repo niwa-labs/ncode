@@ -24,6 +24,8 @@ export type BuildOwnerTurnToolSourcesInput = {
   skipAgentResolution?: boolean;
   builtinCapabilities?: ResolvedAgentCapabilities;
   toolsDisabled: boolean;
+  /** External-tools-only mode: native sources off, configured MCP only. */
+  noBuiltinTools?: boolean;
   cuModeActive: boolean;
   /** Host-owned Mini App Tool is present for this exact execution surface. */
   miniappAvailable?: boolean;
@@ -68,6 +70,7 @@ export async function buildLocalTurnToolSourcesForHost(
       : input.memoryAgentScopeEnabled;
   return buildLocalTurnToolSources({
     toolsDisabled: input.toolsDisabled,
+    ...(input.noBuiltinTools === undefined ? {} : { noBuiltinTools: input.noBuiltinTools }),
     dataDir: runtimeConfig.dataDir,
     workspaceRoot: input.session.workspaceDir,
     agentName: input.resourceAgentName,

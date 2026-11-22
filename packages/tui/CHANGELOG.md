@@ -1,5 +1,10 @@
 # Ncode changelog
 
+## 0.1.1 · 2026-11-22
+
+- Disable built-in tools for ACP or exec with `--no-builtin-tools`. ACP clients can also pass `--session-mcp-only` to limit discovery to servers supplied on session creation or load.
+- Based on MCode 0.7.2 with Pi 1.6.0.
+
 ## 0.1.0 · 2026-11-22
 
 - Ncode is based on MCode 0.7.2 and runs Pi 1.6.0. `ncode --version` lists all three versions. HTTP requests identify the fork as `ncode/0.1.0`.

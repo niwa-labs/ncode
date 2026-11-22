@@ -220,6 +220,12 @@ export function applyExecCliContract(command: Command): Command {
         '--no-daemon',
         'run the agent in this process without the daemon (overrides MCODE_SERVER_MODE)',
       ),
+    )
+    .addOption(
+      new Option(
+        '--no-builtin-tools',
+        'disable every built-in tool; only MCP servers remain (implies --no-daemon)',
+      ),
     );
   return applySystemPromptCliOptions(configured);
 }
