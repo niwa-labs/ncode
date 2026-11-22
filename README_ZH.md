@@ -28,13 +28,18 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 
 ![Ncode 终端欢迎界面，显示本地服务在线，当前尚未登录，工作区为 pocket-pet](docs/assets/ncode-terminal.png)
 
-## 在 Niwa 中运行 Ncode
+<a id="niwa-and-ncode"></a>
 
-[Niwa](https://github.com/niwa-labs/niwa) 在本地运行编程代理和工作流。它的 Ncode 适配器会为每个会话启动独立的 ACP 进程。工作流可以只向模型提供当前任务所需的工具，例如仅提供一个用于提交答案的 MCP 工具。
+## Niwa 与 Ncode
 
-在 Niwa 中，你可以回看消息、工具调用及其结果，允许工具执行一次或拒绝执行，也可以在代理等待时回答问卷。工作流可通过 `session.ask` 请求结构化回答，由 Niwa 校验通过 ACP 返回的 JSON 后再使用。Ncode 的 ACP 扩展还支持分页读取历史记录、查看当前回合、向当前回合追加指令或将后续消息加入队列。
+Niwa 协调多个编程代理的工作流，Ncode 则为每个编程会话启动独立的 ACP 进程。工作流可以决定向代理开放哪些工具，以及何时需要操作人员参与。
 
-要使用此模式，请运行 `ncode acp --no-builtin-tools --session-mcp-only`。Niwa 会在创建会话时传入工具，并在新进程中恢复会话时再次传入。
+- **按会话选择工具。** 在 Niwa 的 `niwa-only` 模式下，工作流可以授予 `task.list`，让代理查看分配给它的任务。模型的工具列表不会包含内置工具，也不会包含用户配置或工作区声明的 MCP 服务器。
+- **重启后继续工作。** Niwa 恢复原会话并重新传入工具列表，还可以从 Ncode 的本地历史记录中读取消息、工具调用和结果。其他 ACP 客户端也可通过 `session/history` 分页读取历史，查看当前回合状态或将后续消息加入队列。
+- **由操作人员审批工具调用。** Niwa 可以在创建或恢复会话时选择权限模式，显示每次工具调用的审批结果，并让操作人员选择仅允许本次调用或拒绝。
+- **双向提问。** 当代理需要人做决定时，Niwa 向操作人员展示问卷并把答案传回。工作流也可以通过 `session.ask` 向代理提问，再按指定的结构校验通过 ACP 返回的 JSON。
+
+要仅开放会话指定的工具，请将适配器启动命令设为 `ncode acp --no-builtin-tools --session-mcp-only`。[Niwa 工作流示例](https://github.com/niwa-labs/niwa#niwa-and-ncode)
 
 ## 快速开始
 
