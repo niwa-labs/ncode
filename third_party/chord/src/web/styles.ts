@@ -1,4 +1,5 @@
 /// <reference lib="dom" />
+/// <reference lib="dom.iterable" />
 // A page's plugin stylesheets (p3 step 0a; design §21, "UI on client hosts"): each plugin's `<link>` paired with the
 // code it runs, the bootstrap's at first. An update fetches a plugin's new stylesheet inactive (`media="not all"`:
 // loaded, not applied) right after the plugin's own before the reload, and applies it only when the plugin's new code

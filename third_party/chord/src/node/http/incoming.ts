@@ -1,3 +1,4 @@
+/// <reference lib="dom.iterable" />
 // What the component reads of a request (decision "The HTTP core is a fetch handler"): one shape for a Web `Request`
 // (`fetch`) and for Chord's own Node server, so admission, routing and the baseline have one implementation. The Node
 // side reads Node's own parsed headers and builds a Web `Request` only when something asks for it (a route's

@@ -123,7 +123,7 @@ async function scenario(storage: Storage): Promise<TraceEntry[]> {
 		const result = await commitFlat([writes], (_index, received) => {
 			seq = received;
 		}, context);
-		if (result.refused !== undefined) {
+		if (result.kind === 'refused') {
 			throw result.refused instanceof Error
 				? result.refused
 				: new Error(String(result.refused));

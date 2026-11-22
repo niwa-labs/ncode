@@ -349,7 +349,7 @@ export class NativeForeground {
                   results.length ||
                   decision?.action === 'continue'
                 )
-                  return { continue: boundaryInput };
+                  return { kind: 'continue', continue: boundaryInput };
               } catch (error) {
                 failure ??= error;
               }

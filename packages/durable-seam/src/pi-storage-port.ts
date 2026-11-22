@@ -168,7 +168,10 @@ export interface PiStorageLike {
 		batches: readonly (readonly PiStorageWriteLike[])[],
 		receive: (index: number, seq: number) => void,
 		context?: unknown,
-	): Promise<{ readonly stored: number; readonly refused?: unknown }>;
+	): Promise<
+		| { readonly kind: 'stored'; readonly stored: number }
+		| { readonly kind: 'refused'; readonly stored: number; readonly refused: unknown }
+	>;
 	mintId(): Promise<number>;
 	entry(id: number): Promise<PiEntryLookup | undefined>;
 	scanEntries(
@@ -605,7 +608,7 @@ export async function openPiStorageDurableLogPort(
 						const result = await storage.commit([writes], (_index, received) => {
 							seq = received;
 						});
-						if (result.refused !== undefined) {
+						if (result.kind === 'refused') {
 							throw result.refused instanceof Error
 								? result.refused
 								: new Error(String(result.refused));

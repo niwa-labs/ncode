@@ -268,6 +268,37 @@ describe('Editor behavior', () => {
     expect(editor.getCursor().line).toBe(11);
   });
 
+  it('moves repeated prompts to the front of history', () => {
+    const { editor } = createEditor();
+    editor.addToHistory('first');
+    editor.addToHistory('second');
+    editor.addToHistory('  first  ');
+    expect(editor.getHistoryEntries()).toEqual(['first', 'second']);
+  });
+
+  it('completes an absolute path from an untyped menu without submitting the editor', async () => {
+    const { editor } = createEditor();
+    const submit = vi.fn();
+    editor.onSubmit = submit;
+    const completed = 'look at /tmp/example';
+    editor.setText('look at /tmp/ex');
+    editor.setAutocompleteProvider({
+      getSuggestions: async () => ({
+        prefix: '/tmp/ex',
+        items: [
+          { value: '/tmp/example', label: 'example' },
+          { value: '/tmp/extra', label: 'extra' },
+        ],
+      }),
+      applyCompletion: () => ({ lines: [completed], cursorLine: 0, cursorCol: completed.length }),
+    });
+    editor.handleInput('\t');
+    await vi.waitFor(() => expect(editor.render(80).join('\n')).toContain('example'));
+    editor.handleInput('\r');
+    expect(editor.getText()).toBe(completed);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('honors Pi dedicated history keybinding overrides', () => {
     const previous = getKeybindings();
     setKeybindings(

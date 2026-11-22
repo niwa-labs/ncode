@@ -454,13 +454,13 @@ export class Editor implements Component, Focusable {
 
   /**
    * Add a prompt to history for up/down arrow navigation.
-   * Called after successful submission.
+   * Repeated prompts move to the front.
    */
   addToHistory(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
-    // Don't add consecutive duplicates
-    if (this.history.length > 0 && this.history[0] === trimmed) return;
+    const existing = this.history.indexOf(trimmed);
+    if (existing !== -1) this.history.splice(existing, 1);
     this.history.unshift(trimmed);
     // Limit history size
     if (this.history.length > 100) {
@@ -824,6 +824,11 @@ export class Editor implements Component, Focusable {
       } else if (kb.matches(data, 'tui.select.confirm')) {
         const selected: AutocompleteItem | null = this.autocompleteList.getSelectedItem();
         if (selected && this.autocompleteProvider) {
+          const currentLine = this.state.lines[this.state.cursorLine] ?? '';
+          const beforeCursor = currentLine.slice(0, this.state.cursorCol);
+          const isCommand = this.autocompleteSuggestions?.kind
+            ? this.autocompleteSuggestions.kind === 'command'
+            : this.autocompletePrefix.startsWith('/') && this.isInSlashCommandNameContext(beforeCursor);
           if (this.autocompleteSuggestions) {
             this.onAutocompleteSelect?.(this.autocompleteSuggestions, selected);
           }
@@ -840,9 +845,6 @@ export class Editor implements Component, Focusable {
           this.state.cursorLine = result.cursorLine;
           this.setCursorCol(result.cursorCol);
 
-          const isCommand = this.autocompleteSuggestions?.kind
-            ? this.autocompleteSuggestions.kind === 'command'
-            : this.autocompletePrefix.startsWith('/');
           if (isCommand && !selected.continueCompletion) {
             this.cancelAutocomplete();
             // Fall through to submit
@@ -2365,6 +2367,10 @@ export class Editor implements Component, Focusable {
     return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith('/');
   }
 
+  private isInSlashCommandNameContext(textBeforeCursor: string): boolean {
+    return this.isInSlashCommandContext(textBeforeCursor) && !textBeforeCursor.trimStart().includes(' ');
+  }
+
   // Autocomplete methods
   /**
    * Find the best autocomplete item index for the given prefix.
@@ -2426,10 +2432,7 @@ export class Editor implements Component, Focusable {
     const currentLine = this.state.lines[this.state.cursorLine] || '';
     const beforeCursor = currentLine.slice(0, this.state.cursorCol);
 
-    if (
-      (this.isInSlashCommandContext(beforeCursor) && !beforeCursor.trimStart().includes(' ')) ||
-      this.providerRequestsAutocomplete()
-    ) {
+    if (this.isInSlashCommandNameContext(beforeCursor) || this.providerRequestsAutocomplete()) {
       this.handleSlashCommandCompletion();
     } else {
       this.forceFileAutocomplete(true);

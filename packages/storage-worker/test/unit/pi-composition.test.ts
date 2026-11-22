@@ -30,7 +30,7 @@ function referenceStorage(): PiWritableStorageLike {
     async commit(writes) {
       let seq = 0;
       const result = await storage.commit([writes] as never, (_index, value) => { seq = value; }, BACKGROUND_CONTEXT);
-      if (result.refused !== undefined) throw result.refused;
+      if (result.kind === 'refused') throw result.refused;
       return seq;
     },
   };
@@ -299,12 +299,12 @@ describe('Pi 1.5 batched durability receipts', () => {
       receipts.push(seq);
     }, BACKGROUND_CONTEXT);
     expect(result.stored).toBe(1);
-    expect(result.refused).toBeDefined();
+    expect(result).toMatchObject({ kind: 'refused', refused: expect.any(Error) });
     expect(receipts).toEqual([1]);
     const nextId = await gated.mintId();
     const next = await gated.commit([[{ type: 'conversation', value: { id: nextId } }]],
       (_index, seq) => receipts.push(seq), BACKGROUND_CONTEXT);
-    expect(next).toEqual({ stored: 1 });
+    expect(next).toEqual({ kind: 'stored', stored: 1 });
     expect(receipts).toEqual([1, 2]);
   });
 
@@ -316,7 +316,7 @@ describe('Pi 1.5 batched durability receipts', () => {
       async commit(_batches: readonly unknown[], receive: (index: number, seq: number) => void) {
         if (++count === 2) throw fault;
         receive(0, 7);
-        return { stored: 1 };
+        return { kind: 'stored', stored: 1 };
       },
     };
     const gated = gatePiStorageMutations(storage);

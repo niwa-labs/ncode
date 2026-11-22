@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "forkState": "pi_canonical_with_recorded_local_changes",
-  "baselineAdaptedTreeDigest": "4b8947874c89752e22f82722d579a8becf4af38ed26cb803eb68eed4c60798c1",
+  "baselineAdaptedTreeDigest": "45583a230ecf47e082f2db80b07646f7619e34fe252c394c0de738fe7782a9c1",
   "typescriptContract": {
     "config": "packages/tui/tsconfig.json",
     "target": "ES2022",
@@ -26,17 +26,18 @@
     },
     {
       "path": "components/editor.ts",
-      "currentSha256": "55d313e4f7f5760212e0ff397cb7a599c52d42a90df8c0014f25cf4652897d20",
+      "currentSha256": "65aa7feb83e3d2c07d3fc04fc3c06ea69904b40aa665886377b91023214667fb",
       "changeIds": [
         "L005",
         "L009",
         "L022",
         "L030",
         "L032",
-        "L042"
+        "L042",
+        "L049"
       ],
-      "reason": "Preserve product history metadata through a generic text transform and draft extension state. Keep strict TypeScript fixes and add the smallest generic snapshot, paste, telemetry, programmatic submission, undo-extension and empty-placeholder hooks needed by the MCode product wrapper. 提供方通过上下文回调控制自动触发，并通过 applyOnEnter 控制 Enter 是否填入候选。 强制补全上下文失效时立即取消请求并清空菜单。 支持单帧 placeholder 覆盖，由 Editor 统一保留 padding、可见光标和 IME 定位标记。 命令参数候选标记阶段，接受命令后续查参数，并隔离参数回调失败。",
-      "behaviorImpact": "MCode Draft, attachment, product-level submission-intent and empty-input guidance semantics use the canonical Pi Editor cursor, width, padding, history, undo, paste-marker and autocomplete behavior. Shell 补全只由 Tab 打开，菜单内输入继续过滤；Enter 执行当前输入，Tab 填入选中项。其他提供方沿用默认行为。 删除 Shell 标记或命令名前缀后立即关闭候选；已取消请求的延迟结果无法恢复旧菜单。 带参数候选的命令支持连续补全，参数 Enter 仅填入，Esc 保留草稿；无参数命令保持原行为。"
+      "reason": "Preserve product history metadata through a generic text transform and draft extension state. Keep strict TypeScript fixes and add the smallest generic snapshot, paste, telemetry, programmatic submission, undo-extension and empty-placeholder hooks needed by the MCode product wrapper. 提供方通过上下文回调控制自动触发，并通过 applyOnEnter 控制 Enter 是否填入候选。 强制补全上下文失效时立即取消请求并清空菜单。 支持单帧 placeholder 覆盖，由 Editor 统一保留 padding、可见光标和 IME 定位标记。 命令参数候选标记阶段，接受命令后续查参数，并隔离参数回调失败。 Backport Pi #12312 and #12370 while preserving typed command menus and transport history.",
+      "behaviorImpact": "MCode Draft, attachment, product-level submission-intent and empty-input guidance semantics use the canonical Pi Editor cursor, width, padding, history, undo, paste-marker and autocomplete behavior. Shell 补全只由 Tab 打开，菜单内输入继续过滤；Enter 执行当前输入，Tab 填入选中项。其他提供方沿用默认行为。 删除 Shell 标记或命令名前缀后立即关闭候选；已取消请求的延迟结果无法恢复旧菜单。 带参数候选的命令支持连续补全，参数 Enter 仅填入，Esc 保留草稿；无参数命令保持原行为。 Absolute path completion keeps the prompt in the editor, and repeated prompt entries move to the front."
     },
     {
       "path": "components/input.ts",
@@ -51,17 +52,18 @@
     },
     {
       "path": "components/markdown.ts",
-      "currentSha256": "1d32aa3553e99178db5a96130f9a18c1add235d5d70100a8cd2d47c4189ddd1b",
+      "currentSha256": "52656409257dcbcc80cf183ccc79770df7158eb982533cd19ab6656bb6981d16",
       "changeIds": [
         "L005",
         "L007",
         "L013",
         "L029",
         "L026",
-        "L045"
+        "L045",
+        "L050"
       ],
-      "reason": "Keep strict TypeScript fixes and product Markdown hooks, plus Pi's post-baseline wrapped-table style restoration. 链接标签使用独立样式上下文，防止外层正文或标题颜色覆盖链接颜色。 稳定 Markdown 块缓存",
-      "behaviorImpact": "MCode keeps its compact code presentation without reimplementing Pi Markdown or leaking wrapped link styles into table borders and adjacent cells. 链接保留嵌套强调与行内代码，并在结束后恢复外层样式。 保留两个尾部块并对引用回退全文。"
+      "reason": "Keep strict TypeScript fixes and product Markdown hooks, plus Pi's post-baseline wrapped-table style restoration. 链接标签使用独立样式上下文，防止外层正文或标题颜色覆盖链接颜色。 稳定 Markdown 块缓存 Backport Pi #12045 to the cached Markdown token renderer.",
+      "behaviorImpact": "MCode keeps its compact code presentation without reimplementing Pi Markdown or leaking wrapped link styles into table borders and adjacent cells. 链接保留嵌套强调与行内代码，并在结束后恢复外层样式。 保留两个尾部块并对引用回退全文。 Markdown hard breaks preserve rows following inline image escapes."
     },
     {
       "path": "components/scroll-view.ts",
@@ -190,6 +192,15 @@
       "behaviorImpact": "An asynchronous color reply or DEC 2031 report is still recognized when it arrives coalesced with unrelated input; the remaining bytes stay dispatchable."
     },
     {
+      "path": "terminal-image.ts",
+      "currentSha256": "887c5d9711ee64f10aa65c44981c78aea4bdc63d5c70166860a2716d0ebdbd07",
+      "changeIds": [
+        "L052"
+      ],
+      "reason": "Backport Pi #12109 extent and image escape handling for overlay compositing.",
+      "behaviorImpact": "Image coordinates include the full placement for Kitty and iTerm2."
+    },
+    {
       "path": "terminal.ts",
       "currentSha256": "8d88bdd66b95028a03d0a82fd7ebc561cc9d320dee7548aa681ab33e7e3327b0",
       "changeIds": [
@@ -203,14 +214,15 @@
     },
     {
       "path": "tui-alt-screen.ts",
-      "currentSha256": "5b515248179d34879cd8c29171cafe56e27c3502ec662a93fcfd054f27d88e26",
+      "currentSha256": "9b5c531c2073006fd0737243139ebec7b2a235afe56251b394345f7b32fc7a98",
       "changeIds": [
         "L005",
         "L031",
-        "L035"
+        "L035",
+        "L051"
       ],
-      "reason": "Rebase onto pin 48c8f3228 (layout-targeted mouse dispatch, primaryScrollView, search overlay navigation directions, wheel-scroll, WezTerm kitty ordering); keep the L031 focused-panel handlesViewportKeys paging clause and the L035 reserved-gutter hit test plus scrollbarGutter option; take the pin jump-then-drag scrollbar mechanics and event-result contract in place of the fork dragScrollbarTo; L019/L020/L025 are upstream-equivalent in the pin.",
-      "behaviorImpact": "Standalone fixed-frame panels keep PgUp/PgDn; always-visible scrollbars never swallow content clicks beside the painted bar; track jumps and thumb drags follow the pin semantics."
+      "reason": "Rebase onto pin 48c8f3228 (layout-targeted mouse dispatch, primaryScrollView, search overlay navigation directions, wheel-scroll, WezTerm kitty ordering); keep the L031 focused-panel handlesViewportKeys paging clause and the L035 reserved-gutter hit test plus scrollbarGutter option; take the pin jump-then-drag scrollbar mechanics and event-result contract in place of the fork dragScrollbarTo; L019/L020/L025 are upstream-equivalent in the pin. Backport Pi #12047 to the fullscreen renderer.",
+      "behaviorImpact": "Standalone fixed-frame panels keep PgUp/PgDn; always-visible scrollbars never swallow content clicks beside the painted bar; track jumps and thumb drags follow the pin semantics. Cached Kitty images survive a full redraw such as terminal resize."
     },
     {
       "path": "tui-main-screen.ts",
@@ -249,7 +261,7 @@
     },
     {
       "path": "tui.ts",
-      "currentSha256": "200d6cbe9c132e16252fb37eafe1960e17a6abb10e6181a8874bfb4288390948",
+      "currentSha256": "528cec8a1a41a1ca6f66c77b2f79f5755ce93a50189a91e7c76c39032ca800d5",
       "changeIds": [
         "L005",
         "L015",
@@ -261,10 +273,11 @@
         "L041",
         "L044",
         "L046",
-        "L047"
+        "L047",
+        "L052"
       ],
-      "reason": "Rebase onto pin 48c8f3228: take queryTerminalColors (fragmented replies, palette), onTerminalColorSchemeChange, program-status plumbing, wheel-scroll input, overlay focus restore and resolveFakeCursors; keep the observability render frame (observeRender/observeRenderWait/transcript performance), L023 within-chunk color dispatch over the pin query system (reply consumption gated on a pending query, matching the pin: with no query pending an OSC color reply is ordinary input again), the L027 onTerminalResize hook (pin wires resize straight to requestRender), L040 immediate-render-before-dispatch ordering, L044 backpressure deferral in renderFrame, the L046/L041 Component surface and the L047 onUserInput/containsUserInput classification; requestImmediateRender stays public; PI_HARDWARE_CURSOR/PI_CLEAR_ON_SHRINK env initializers stay authoritative; queryTerminalBackgroundColor remains as a product wrapper.",
-      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state; color replies sharing a chunk with keys no longer swallow the keys; resize still replays through the renderer hook; synchronous submission renders exactly one frame; output-driven reconstruction waits for user input; slow terminals coalesce to the latest model."
+      "reason": "Rebase onto pin 48c8f3228: take queryTerminalColors (fragmented replies, palette), onTerminalColorSchemeChange, program-status plumbing, wheel-scroll input, overlay focus restore and resolveFakeCursors; keep the observability render frame (observeRender/observeRenderWait/transcript performance), L023 within-chunk color dispatch over the pin query system (reply consumption gated on a pending query, matching the pin: with no query pending an OSC color reply is ordinary input again), the L027 onTerminalResize hook (pin wires resize straight to requestRender), L040 immediate-render-before-dispatch ordering, L044 backpressure deferral in renderFrame, the L046/L041 Component surface and the L047 onUserInput/containsUserInput classification; requestImmediateRender stays public; PI_HARDWARE_CURSOR/PI_CLEAR_ON_SHRINK env initializers stay authoritative; queryTerminalBackgroundColor remains as a product wrapper. Backport Pi #12109 image-aware overlay compositing.",
+      "behaviorImpact": "Urgent product interactions render immediately without resetting differential state; color replies sharing a chunk with keys no longer swallow the keys; resize still replays through the renderer hook; synchronous submission renders exactly one frame; output-driven reconstruction waits for user input; slow terminals coalesce to the latest model. Overlapping overlays hide image placements until dismissed."
     },
     {
       "path": "utils.ts",

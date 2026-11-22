@@ -1507,6 +1507,7 @@ function parseChunkUsage(
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 		completion_tokens_details?: { reasoning_tokens?: number };
+		reasoning_tokens?: number;
 	},
 	model: Model<"openai-completions">,
 ): AssistantMessage["usage"] {
@@ -1534,7 +1535,7 @@ function parseChunkUsage(
 		output: outputTokens,
 		cacheRead: cacheReadTokens,
 		cacheWrite: cacheWriteTokens,
-		reasoning: rawUsage.completion_tokens_details?.reasoning_tokens || 0,
+		reasoning: rawUsage.completion_tokens_details?.reasoning_tokens || rawUsage.reasoning_tokens || 0,
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
@@ -1595,15 +1596,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isAntLing = provider === "ant-ling" || baseUrl.includes("api.ant-ling.com");
 	const isCerebras = provider === "cerebras" || baseUrl.includes("cerebras.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.toLowerCase().includes("deepseek.com");
-	// MINIMAX №7–10 (see MINIMAX_CHANGES.md, 2026-10-24 reapply): exact-host
-	// entries for providers whose Chat Completions schema has no `developer`
-	// role; a thinking model must keep sending `system`.
-	const isKimiCoding = /^https?:\/\/api\.kimi\.(?:com|ai)(?::\d+)?(?:\/|$)/i.test(baseUrl);
-	const isDashScope =
-		/^https?:\/\/(?:dashscope(?:-intl|-us)?|(?:coding(?:-intl)?|cn-hongkong)\.dashscope)\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl) ||
-		/^https?:\/\/[a-z0-9-]+\.(?:cn-beijing|cn-hongkong|ap-southeast-1|ap-northeast-1|eu-central-1|us-east-1)\.maas\.aliyuncs\.com(?::\d+)?(?:\/|$)/i.test(baseUrl);
-	const isSiliconFlow = /^https?:\/\/api\.siliconflow\.(?:cn|com)(?::\d+)?(?:\/|$)/i.test(baseUrl);
-	const isMistralApi = /^https?:\/\/api\.mistral\.ai(?::\d+)?(?:\/|$)/i.test(baseUrl);
 
 	const isNonStandard =
 		isNvidia ||
@@ -1632,18 +1624,14 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isZai;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isOpenRouterDeveloperRoleModel =
-		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
+	// The developer role is OpenAI's. Other hosts' chat templates often reject it (#10741),
+	// and every host accepts system, so only OpenAI's own API gets developer by default.
+	const isOpenAI = provider === "openai" || /^https?:\/\/api\.openai\.com(?::\d+)?(?:\/|$)/i.test(baseUrl);
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,
-		supportsDeveloperRole:
-			!isKimiCoding &&
-			!isDashScope &&
-			!isSiliconFlow &&
-			!isMistralApi &&
-			(isOpenRouterDeveloperRoleModel || (!isNonStandard && !isOpenRouter)),
+		supportsDeveloperRole: isOpenAI,
 		supportsReasoningEffort:
 			!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway && !isNvidia && !isAntLing,
 		supportsUsageInStreaming: true,

@@ -371,7 +371,10 @@ export class Markdown implements Component {
 	}
 
 	private renderTokenLines(token: Token, width: number, contentWidth: number, nextTokenType?: string): string[] {
-		const renderedLines = this.renderToken(token, contentWidth, nextTokenType);
+		// Image escapes bypass wrapping, so preserve explicit rows before that step.
+		const renderedLines = this.renderToken(token, contentWidth, nextTokenType).flatMap((line) =>
+			isImageLine(line) ? line.split("\n") : [line],
+		);
 		// Wrap lines (NO padding, NO background yet)
 		const wrappedLines: string[] = [];
 		for (const line of renderedLines) {

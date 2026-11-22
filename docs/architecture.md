@@ -19,7 +19,7 @@ For an in-process session, set `MCODE_SERVER_MODE=off`. On the welcome screen, *
 
 ## What happens to my prompt?
 
-The runtime starts a turn and Pi runs the model and tool loop. The host checks tool permissions and sends approval requests back to the client. If the agent is busy, you can steer the current turn or queue a message for the next one. Ncode records when it accepts your input and when that input reaches the model context. [Turn system](../packages/local-runtime-v2/src/service/turn-system) · [Input delivery](../packages/input-delivery)
+The runtime starts a turn. Pi's provider adapter streams the reply, and its agent loop calls tools and feeds their results into the next model request. The host checks tool permissions and sends approval requests back to the client. If the agent is busy, you can steer the current turn or queue a message for the next one. Ncode records when it accepts your input and when that input reaches the model context. [Turn system](../packages/local-runtime-v2/src/service/turn-system) · [Input delivery](../packages/input-delivery)
 
 When the parent agent is waiting for a subagent, a new instruction can release that wait. The child keeps running in the background, and the parent can answer you right away. When the child finishes, its result goes back to the parent session. [Subagent recovery scenarios](../packages/local-runtime-v2/test/integration/reactive-task-batch-recovery.e2e.test.ts)
 
@@ -31,7 +31,7 @@ Each session has its own SQLite history store with Zstd compression. For each mo
 
 Run `ncode --continue` in the same workspace and profile to reopen the latest conversation, or `ncode --session` to choose one. A reconnecting client can ask for events after the last one it saw. If that event is too old for replay, the daemon reports the gap. The saved conversation is still available. [Event replay](../packages/mcoded/src/hub.ts)
 
-The daemon also keeps a shared log for scheduling and delegation. If a background task finished just before the daemon stopped, startup recovery checks for a saved result whose notification is still due and schedules it for delivery to the parent session. [Orchestration](../packages/local-runtime-v2/src/service/orchestration/runtime-orchestration.ts) · [Startup recovery](../packages/local-runtime-v2/src/runtime.ts)
+Ncode uses Pi Durable’s commit and watch APIs with its own SQLite/Zstd backend. Alongside each session’s conversation, the daemon keeps a shared log for scheduling and delegation. Pi Durable schedules those tasks. The storage adapter uses Chord to apply a document’s saved changes when reading its current state. If a background task finished just before the daemon stopped, startup recovery checks for a saved result whose notification is still due and schedules it for delivery to the parent session. [Orchestration](../packages/local-runtime-v2/src/service/orchestration/runtime-orchestration.ts) · [Startup recovery](../packages/local-runtime-v2/src/runtime.ts)
 
 ## Where to look in the source
 

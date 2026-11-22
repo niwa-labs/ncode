@@ -47,7 +47,7 @@ the global adaptations (L001 NodeNext import rewrite), plus the unnumbered local
 "Unnumbered local additions" section below.
 Files that are byte-identical to the pin or differ only by import specifiers have no entry; at the
 W09 pin that is the complete list `alt-screen-search.ts`, `colors.ts`, `oklab.ts`,
-`native-modifiers.ts`, `native-platform.ts`, `terminal-image.ts`, `word-navigation.ts`,
+`native-modifiers.ts`, `native-platform.ts`, `word-navigation.ts`,
 `editor-component.ts`, `layout-node.ts`, `components/alt-screen-flash.ts`,
 `components/cancellable-loader.ts`, `components/h-stack.ts`, `components/image.ts`,
 `components/loader.ts`, `components/mouse-region.ts`, `components/spacer.ts`,
@@ -238,6 +238,26 @@ Remove `L024` when the pinned baseline natively matches legacy-terminal `Ctrl+/`
 - Evidence: `tui-engine-local-deltas.test.ts` scrolls xterm up and, without input, changes a scrollback row, removes the previous run-duration note from a real append-only transcript, shrinks the document by more than a screen, and refreshes a footer taller than a five-row screen, asserting no ED 3, an unchanged scroll position and a current screen, then exact history after the next key; existing reconstruction cases deliver the next key before asserting exact history. It also scrolls xterm up, collapses the Tasks section without input, and asserts no ED 3, an unchanged scroll position and unique history, then exact history after the next key; a tailing reader stays at the bottom when output ends and the task list collapses; recent input reconstructs immediately; resize keeps its replay; each report kind and a report-only mixed chunk do not trigger the replay, while keys, Escape and a paste mixed with reports do; and the deferred replay runs before stop. The shrink and input cases emit ED 3 or fail without the change, and cursor position and mixed report chunks counted as input under whole-chunk matching. Native Windows Terminal and ConPTY acceptance remain separate.
 - Product side: the transcript no longer removes one-time feedback (the run-duration note, a finished ephemeral `!` shell block, a stale run error) once settled output follows it, which was the common trigger of changed historical text; this fallback covers the remaining causes, such as the welcome header's live status on screens too small to hold the welcome surface.
 - Removal condition: the pinned baseline preserves the host scroll position through history reconstruction, or MCode stops reconstructing native history outside user input.
+
+## L049: Editor completion and history
+
+- Pi #12312 and #12370. Untyped completion providers use the context before completion to distinguish path menus from command names. Explicit menu kinds and continuation retain the product behavior. Repeated prompt transports move to the front, preserving distinct mention identities.
+- Evidence is in `editor-behavior.test.ts`. Remove this adaptation when the engine baseline includes both fixes.
+
+## L050: Preserve hard breaks after inline images
+
+- Pi #12045. The cached Markdown token renderer splits image lines at hard breaks before bypassing wrapping. Text after an inline image keeps its own rows.
+- Evidence is in `tui-engine-local-deltas.test.ts` and the upstream Markdown suite. Remove the adaptation when the engine baseline includes the fix.
+
+## L051: Preserve Kitty uploads during fullscreen redraws
+
+- Pi #12047. With cached uploads, delete placements and erase individual rows without issuing the display erase that would free the uploads. The alternate screen can re-place images after resizing.
+- Evidence is in `tui-engine-local-deltas.test.ts`. Remove the adaptation when the engine baseline includes the fix.
+
+## L052: Hide images covered by overlays
+
+- Pi #12109 with placement geometry needed by the overlay compositor. When a text panel intersects Kitty or iTerm2 image cells, omit that image from the composited frame. The underlying renderer can draw it when the overlay closes.
+- Evidence is in `tui-engine-local-deltas.test.ts` and the upstream overlay suite. Remove the adaptation when the engine baseline includes the fix.
 
 ## Unnumbered local additions
 

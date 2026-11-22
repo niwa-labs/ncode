@@ -5,9 +5,13 @@ This directory vendors `pi-mono` as source so MiniMax can patch, validate, and s
 ## Import baseline
 
 - Upstream: `https://github.com/earendil-works/pi.git` (the pi monorepo; the 0.79.x baseline was published as `pi-mono.git`, both share history)
-- Ref: `refs/tags/v1.5.2`, commit `b4afdddf44e059c67ccf5097e5317d913521b470` (Release v1.5.2)
-- Imported at: 2026-11-11
-- Previous baseline: upstream `https://github.com/earendil-works/pi-mono.git`, ref `refs/tags/v0.79.1`, commit `28df940f0d07b65284849a483be7b06e2ca046ee`, imported 2026-06-16 (recorded in `.minimax-vendor.json → upstream.previousBaseline`)
+- Ref: `refs/heads/main`, commit `780bf31fcaeb252fa9b68df3964c735eae75bde3` (43 commits after v1.6.0)
+- Imported at: 2026-11-22
+- Previous baseline: v1.5.2, commit `b4afdddf44e059c67ccf5097e5317d913521b470`, imported 2026-11-11
+
+## 2026-11-22 — Pi 1.6.0 and subsequent main updates
+
+Ncode imports the upstream libraries as workspace source. The provider adapters, agent loop, coding tools and MCP library use this baseline with the product hooks recorded below. Pi Durable and Chord are maintained in their sibling vendor directories. Ncode owns the terminal, daemon, session storage and delivery of queued input. The standalone Pi apps are outside this source projection.
 
 ## 2026-11-11 — Pi 1.5.2 rebaseline
 

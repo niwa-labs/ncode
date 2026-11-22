@@ -84,7 +84,7 @@
     {
       "name": "@aws-sdk/credential-provider-node",
       "versions": [
-        "3.972.83"
+        "3.972.82"
       ],
       "license": "Apache-2.0",
       "homepage": "https://github.com/aws/aws-sdk-js-v3/tree/main/packages-internal/credential-provider-node"
@@ -327,7 +327,7 @@
     {
       "name": "@google/genai",
       "versions": [
-        "2.21.0"
+        "2.32.0"
       ],
       "license": "Apache-2.0",
       "homepage": "https://github.com/googleapis/js-genai#readme"
@@ -4012,7 +4012,7 @@
     {
       "name": "openai",
       "versions": [
-        "7.19.0"
+        "7.59.0"
       ],
       "license": "Apache-2.0",
       "homepage": "https://github.com/openai/openai-node#readme"
@@ -5396,7 +5396,7 @@
       "versions": [
         "7.30.1",
         "8.10.2",
-        "8.12.3"
+        "8.12.4"
       ],
       "license": "MIT",
       "homepage": "https://undici.nodejs.org"

@@ -1,12 +1,13 @@
 import { execFileSync } from "child_process";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import type * as fsPromises from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { pathToFileURL } from "url";
 import type * as util from "util";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { createReadToolDefinition, type ReadOperations } from "../src/core/tools/read.ts";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "../src/core/tools/truncate.ts";
+import { createReadToolDefinition, type ReadOperations, type ReadToolDetails } from "../src/core/tools/read.ts";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../src/core/tools/truncate.ts";
 
 // Runs when the read tool decodes a chunk: the file is open and partly read, so a test can change it mid-read.
 const decodeHook = vi.hoisted(() => ({ run: undefined as (() => void) | undefined }));
@@ -21,13 +22,24 @@ vi.mock("util", async (importOriginal) => {
 	return { ...actual, TextDecoder: HookedTextDecoder };
 });
 
+// Runs when a file is opened, so a test can abort while the read tool opens the file.
+const openHook = vi.hoisted(() => ({ run: undefined as (() => void) | undefined }));
+vi.mock("fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof fsPromises>();
+	const open: typeof actual.open = (...args) => {
+		openHook.run?.();
+		return actual.open(...args);
+	};
+	return { ...actual, open };
+});
+
 // The read tool's text path before it streamed (#9654), kept as the reference the new path must match.
 function referenceRead(
 	textContent: string,
 	path: string,
 	offset: number | undefined,
 	limit: number | undefined,
-): { text: string; details: { truncation: TruncationResult } | undefined } {
+): { text: string; details: ReadToolDetails } {
 	const allLines = textContent.split("\n");
 	const totalFileLines = allLines.length;
 	const startLine = offset ? Math.max(0, offset - 1) : 0;
@@ -46,7 +58,7 @@ function referenceRead(
 	}
 	const truncation = truncateHead(selectedContent);
 	let outputText: string;
-	let details: { truncation: TruncationResult } | undefined;
+	let details: ReadToolDetails = {};
 	if (truncation.firstLineExceedsLimit) {
 		const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
 		outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
@@ -68,7 +80,21 @@ function referenceRead(
 	} else {
 		outputText = truncation.content;
 	}
-	return { text: outputText, details };
+	return {
+		text: outputText,
+		details: {
+			...details,
+			textFile: {
+				path,
+				content: truncation.content,
+				numLines: truncation.outputLines,
+				startLine: startLineDisplay,
+				totalLines: totalFileLines,
+				truncatedByOutputLimit: truncation.truncated,
+				wholeFileAutoTruncated: truncation.truncated && offset === undefined && limit === undefined,
+			},
+		},
+	};
 }
 
 type ReadOutcome = { text: string; details: unknown } | { error: string };
@@ -235,6 +261,54 @@ describe("read tool streaming", () => {
 			type: "text",
 			text: "head\n\n[1 more lines in file. Use offset=2 to continue.]",
 		});
+	});
+
+	// #11956
+	it("rejects without an unhandled stream error when aborted while opening a local file", async () => {
+		const path = join(tempDir, "abort-on-open.txt");
+		writeFileSync(path, "line\n");
+		const controller = new AbortController();
+		openHook.run = () => {
+			openHook.run = undefined;
+			controller.abort();
+		};
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			const tool = createReadToolDefinition(tempDir);
+			await expect(tool.execute("call", { path }, controller.signal, undefined, undefined as never)).rejects.toThrow(
+				"Operation aborted",
+			);
+			// The stream's 'error' would be emitted on a later tick.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			process.off("uncaughtException", onUncaught);
+			openHook.run = undefined;
+		}
+		expect(uncaught).toEqual([]);
+	});
+
+	it("stops reading a local file when aborted mid-read", async () => {
+		const path = join(tempDir, "abort-mid-read.txt");
+		// Many 64 KB stream chunks, so the abort lands with most of the file unread.
+		writeFileSync(path, "x".repeat(1024 * 1024));
+		const controller = new AbortController();
+		let decodedChunks = 0;
+		decodeHook.run = () => {
+			decodedChunks++;
+			controller.abort();
+		};
+		try {
+			const tool = createReadToolDefinition(tempDir);
+			await expect(tool.execute("call", { path }, controller.signal, undefined, undefined as never)).rejects.toThrow(
+				"Operation aborted",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			decodeHook.run = undefined;
+		}
+		expect(decodedChunks).toBe(1);
 	});
 
 	it("reads a 200 MB line with a 64 MB heap", () => {

@@ -8,9 +8,14 @@ import {
   CURSOR_MARKER,
   Editor,
   Input,
+  Markdown,
   SelectList,
   Text,
   TuiMainScreen,
+  TuiAltScreen,
+  getCapabilities,
+  renderImage,
+  setCapabilities,
   type Component,
   type TUI,
   visibleWidth,
@@ -102,6 +107,91 @@ function createMutableChatParts(surface: 'welcome' | 'conversation') {
 }
 
 describe('MCode Pi Engine local deltas', () => {
+  it('preserves hard breaks between an inline image and following Markdown', () => {
+    const capabilities = getCapabilities();
+    try {
+      setCapabilities({ ...capabilities, images: 'kitty' });
+      const image = '\x1b_Ga=T,f=100,q=2,c=2,r=3,C=1;AAAA\x1b\\';
+      const theme = Object.fromEntries(
+        ['heading', 'link', 'linkUrl', 'code', 'codeBlock', 'codeBlockBorder', 'quote',
+          'quoteBorder', 'hr', 'listBullet', 'bold', 'italic', 'strikethrough', 'underline']
+          .map((key) => [key, passthrough]),
+      ) as ConstructorParameters<typeof Markdown>[3];
+      const markdown = new Markdown('`' + image + '`  \n` `  \n` `\n\n- one', 0, 0, theme);
+      const lines = markdown.render(80);
+      expect(lines.every((line) => !line.includes('\n'))).toBe(true);
+      expect(lines[0]).toContain(image);
+      expect(lines.slice(1).map((line) => stripVTControlCharacters(line).trim())).toEqual(['', '', '', '- one']);
+    } finally {
+      setCapabilities(capabilities);
+    }
+  });
+
+  it.each([
+    ['regular', TuiMainScreen],
+    ['fullscreen', TuiAltScreen],
+  ] as const)('hides a Kitty image under a %s overlay and restores it when uncovered', async (_mode, Tui) => {
+    const capabilities = getCapabilities();
+    const terminal = new RecordingVirtualTerminal(20, 6);
+    const tui = new Tui(terminal);
+    try {
+      setCapabilities({ ...capabilities, images: 'kitty' });
+      const image = renderImage('AAAA', { widthPx: 40, heightPx: 100 }, { imageId: 11584 });
+      if (!image) throw new Error('Expected a Kitty image');
+      tui.addChild({
+        render: () => ['top', image.sequence, '', '', '', 'bottom'],
+        invalidate() {},
+      });
+      tui.start();
+      await terminal.waitForRender();
+      expect(terminal.takeWrites()).toContain('\x1b_Ga=T');
+
+      const overlay = tui.showOverlay(
+        { render: () => ['PANEL'], invalidate() {} },
+        { row: 2, col: 0, width: 8 },
+      );
+      await terminal.waitForRender();
+      expect(terminal.takeWrites()).not.toMatch(/\x1b_Ga=[Tp]/);
+      expect(terminal.getViewport()[2]?.trimEnd()).toBe('PANEL');
+
+      overlay.hide();
+      await terminal.waitForRender();
+      expect(terminal.takeWrites()).toMatch(/\x1b_Ga=[Tp]/);
+    } finally {
+      tui.stop();
+      setCapabilities(capabilities);
+    }
+  });
+
+  it('re-places cached Kitty images after a fullscreen resize without erasing the uploads', async () => {
+    const capabilities = getCapabilities();
+    const terminal = new RecordingVirtualTerminal(20, 6);
+    const tui = new TuiAltScreen(terminal);
+    try {
+      setCapabilities({ ...capabilities, images: 'kitty' });
+      const image = renderImage('AAAA', { widthPx: 20, heightPx: 36 }, { imageId: 12010 });
+      if (!image) throw new Error('Expected a Kitty image');
+      tui.setLayoutRoot({
+        render: () => ['before', image.sequence, '', '', 'after'],
+        invalidate() {},
+      });
+      tui.start();
+      await terminal.waitForRender();
+      expect(terminal.takeWrites()).toContain('\x1b_Ga=T');
+
+      terminal.resize(20, 8);
+      await terminal.waitForRender();
+      const redraw = terminal.takeWrites();
+      expect(redraw).toContain('\x1b_Ga=p,q=2');
+      expect(redraw).not.toContain('\x1b_Ga=T');
+      expect(redraw).not.toContain('\x1b[2J');
+      expect(terminal.getViewport().some((line) => line.trimEnd() === 'after')).toBe(true);
+    } finally {
+      tui.stop();
+      setCapabilities(capabilities);
+    }
+  });
+
   describe.each([
     ['xterm', RecordingVirtualTerminal],
     ['clear-to-scrollback host', ClearToScrollbackTerminal],

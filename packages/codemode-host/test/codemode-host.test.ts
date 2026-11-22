@@ -17,7 +17,7 @@ import {
   type NestedToolInvoker,
 } from '../src/index.js';
 import { classifyReplay, replayRecording, startRecordingRun } from '../src/replay.js';
-import { CodemodeSandbox, InlineCodemodeSandbox } from '@earendil-works/pi-codemode';
+import { CodemodeSandbox, InlineCodemodeSandbox, loadQuickJSWasm } from '@earendil-works/pi-codemode';
 
 const ECHO_TOOL: CallableToolDeclaration = {
   name: 'echo',
@@ -101,17 +101,19 @@ describe('U21: QuickJS capability sandbox (no ambient Node/fetch)', () => {
   });
 
   it('a runaway CPU-bound script hits the interrupt budget instead of hanging the host', async () => {
-    const { invoker } = makeInvoker();
-    const output = await executeCodemodeScript({
-      code: 'while (true) {} return 1;',
-      parentToolCallId: 'u21-4',
-      callableTools: [ECHO_TOOL],
-      invoker,
-      sandboxMode: 'inline',
-      timeoutMs: 500,
-    });
-    expect(output.isError).toBe(true);
-    expect(output.text).toMatch(/Script timed out|interrupt/);
+    // Inline execution blocks the event loop. A small poll budget exercises the
+    // real interrupt path without depending on how quickly CI reaches the default.
+    const interruptBudget = 1_000;
+    const sandbox = new InlineCodemodeSandbox({ interruptBudget, wasm: loadQuickJSWasm() });
+    try {
+      const result = await sandbox.execute('while (true) {}');
+      expect(result).toMatchObject({
+        ok: false,
+        error: { kind: 'timeout', message: `Execution exceeded its interrupt budget of ${interruptBudget}` },
+      });
+    } finally {
+      await sandbox.close();
+    }
   }, 20000);
 });
 

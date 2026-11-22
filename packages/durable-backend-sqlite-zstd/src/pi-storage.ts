@@ -284,7 +284,7 @@ export class PiSqliteZstdStorage implements Storage {
 		this.assertOpen();
 		if (typeof contextOrReceive !== 'function') return this.commitSingle(writesOrBatches as readonly StorageWrite[]);
 		const receipts: Seq[] = [];
-		let refused: unknown;
+		let refusal: { error: unknown } | undefined;
 		try {
 			for (const writes of writesOrBatches as readonly (readonly StorageWrite[])[]) {
 				// Expected validation refusals have no durable effect and do not fail
@@ -293,13 +293,15 @@ export class PiSqliteZstdStorage implements Storage {
 					this.assertOpen();
 					this.checkGlobalIds(this.sql, writes);
 					this.checkDocumentActions(this.sql, prepareDocumentActions(writes));
-				} catch (error) { refused = error; break; }
+				} catch (error) { refusal = { error }; break; }
 				receipts.push(await this.commitSingle(writes));
 			}
 		} finally {
 			for (let index = 0; index < receipts.length; index++) contextOrReceive(index, receipts[index]!);
 		}
-		return { stored: receipts.length, ...(refused !== undefined ? { refused } : {}) };
+		return refusal === undefined
+			? { kind: 'stored', stored: receipts.length }
+			: { kind: 'refused', stored: receipts.length, refused: refusal.error };
 	}
 
 	private async commitSingle(writes: readonly StorageWrite[]): Promise<Seq> {

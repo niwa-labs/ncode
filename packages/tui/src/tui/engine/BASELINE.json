@@ -28,7 +28,7 @@
   },
   "sourceFileCount": 46,
   "upstreamTreeDigest": "dd90269799a60f39f0b70d0f3a5f082a1888c5cdfe0c938102d60dda52449583",
-  "adaptedTreeDigest": "4b8947874c89752e22f82722d579a8becf4af38ed26cb803eb68eed4c60798c1",
+  "adaptedTreeDigest": "45583a230ecf47e082f2db80b07646f7619e34fe252c394c0de738fe7782a9c1",
   "localSourceFiles": [
     {
       "path": "public.ts",
@@ -73,7 +73,7 @@
     {
       "path": "components/editor.ts",
       "upstreamSha256": "48c6a498527df4f645f66574904bdc82c1a4021b29ff81674132219043d4d016",
-      "adaptedSha256": "55d313e4f7f5760212e0ff397cb7a599c52d42a90df8c0014f25cf4652897d20"
+      "adaptedSha256": "65aa7feb83e3d2c07d3fc04fc3c06ea69904b40aa665886377b91023214667fb"
     },
     {
       "path": "components/h-stack.ts",
@@ -98,7 +98,7 @@
     {
       "path": "components/markdown.ts",
       "upstreamSha256": "f2688f2f9acaae81803792ab1af18b5c65dde766cdac7080868c9bf87107dd1a",
-      "adaptedSha256": "1d32aa3553e99178db5a96130f9a18c1add235d5d70100a8cd2d47c4189ddd1b"
+      "adaptedSha256": "52656409257dcbcc80cf183ccc79770df7158eb982533cd19ab6656bb6981d16"
     },
     {
       "path": "components/mouse-region.ts",
@@ -228,7 +228,7 @@
     {
       "path": "terminal-image.ts",
       "upstreamSha256": "751d26508eb6b8040929545b6682272fd71e9e82aff957b34f9706a95302c8e4",
-      "adaptedSha256": "d06d116ea931de0041a32f58d2843183167cbf8ea90f4919656c4a78341d936c"
+      "adaptedSha256": "887c5d9711ee64f10aa65c44981c78aea4bdc63d5c70166860a2716d0ebdbd07"
     },
     {
       "path": "terminal.ts",
@@ -238,7 +238,7 @@
     {
       "path": "tui-alt-screen.ts",
       "upstreamSha256": "dd978db4f24a07e58a6e63819388a07700cb6237bbc0c8e9994bfc5f5d656800",
-      "adaptedSha256": "5b515248179d34879cd8c29171cafe56e27c3502ec662a93fcfd054f27d88e26"
+      "adaptedSha256": "9b5c531c2073006fd0737243139ebec7b2a235afe56251b394345f7b32fc7a98"
     },
     {
       "path": "tui-main-screen.ts",
@@ -248,7 +248,7 @@
     {
       "path": "tui.ts",
       "upstreamSha256": "206519884c4cb27096d00048a2fc4e8a0c404714e548c8dd5b62c38060d3b240",
-      "adaptedSha256": "200d6cbe9c132e16252fb37eafe1960e17a6abb10e6181a8874bfb4288390948"
+      "adaptedSha256": "528cec8a1a41a1ca6f66c77b2f79f5755ce93a50189a91e7c76c39032ca800d5"
     },
     {
       "path": "undo-stack.ts",

@@ -14,16 +14,17 @@ Chord builds applications out of **objects** that live in several processes (a s
 | Import | Contents | Runs in |
 |--------|----------|---------|
 | `@earendil-works/chord` | Contracts (`local`, `remote`, `method`, the schema builders), errors (`ChordError`, `isChordError`), hosts and facets (`createHost`, `defineFacet`), documents (`defineState`), derives and natives (`constant`, `mapShared`), routines and jobs (`defineJob`), links (`memoryLinkPair`, `ipcLink`, `webSocketLink`), registries (`defineRegistry`), the store (`openStore`, `defineTable`, queries, export and import), and the client surfaces' shared part (`Themes`, `ThemeChoice`, `WebScripts`, `TuiScripts`, messages and languages: `defineMessages`, `Translations`, `LocaleChoice`, `formatTime`, `formatNumber`). | Node and browsers |
+| `@earendil-works/chord/telemetry-ingest` | Record telemetry on page and worker hosts and send batches to a server host. | Node and browsers |
 | `@earendil-works/chord/http` | HTTP: a Web-standard `fetch` handler (`createHttp`) built from the routes, wraps and sockets plugins contribute to the registry `Http`, authenticators (`Authenticators`), responses as descriptions, a security baseline on by default, Chord's Node listener and `nodeRequest`, the links endpoint. | Node |
 | `@earendil-works/chord/workers` | Workers: `createWorkers` runs a forked worker per address of a host kind, started on demand and stopped when idle; `workerMain` is a worker's entry; `processLock`. | Node |
 | `@earendil-works/chord/compression` | `nodeCompression`: the synchronous compressor `createHost({ compression })` takes (raw deflate over `node:zlib`), so JSON parts above 16 KiB a host originates go deflated. | Node |
 | `@earendil-works/chord/workers/child` | The worker's side alone: `workerMain` and `processLock`, without esbuild (a worker entry imports this). | Node |
 | `@earendil-works/chord/plugins` | Plugins: discovery, builds with esbuild (`buildFacet`), evaluation, the watcher, rollouts, `createPlugins`, `installPlugin`, `testPlugin`, `pluginFile`. | Node |
 | `@earendil-works/chord/plugins/runtime` | `createPluginRuntime`: loads built plugins without esbuild (a worker's side). | Node |
-| `@earendil-works/chord/app` | The app kit: `startServer`, `startWorker`, the start-data objects, sessions and the owner's sign-in, device pairing, files, export and import per address, optional plugins (users, invites, ephemeral login). | Node |
+| `@earendil-works/chord/app` | The app kit: `startServer`, `startWorker`, the start-data objects, sign-ins including the owner's, device pairing, files, export and import per address, optional plugins (users, invites, ephemeral login). | Node |
 | `@earendil-works/chord/surfaces` | The client surfaces' server side: `webSurface` (base bundle, plugin scripts, the page) and `tuiSurface` (the terminal surface). | Node |
 | `@earendil-works/chord/web` | The web surface's browser side: `startPage` in the app's web entry, `followThemes`, `followLanguage`. | Browsers |
-| `@earendil-works/chord/react` | Optional React bindings: `HostProvider`, `useHold`, `useWatch`, `useRefState`, `useRegistry`, `usePageState`, `useMessages`, `watchStore`. | Browsers |
+| `@earendil-works/chord/react` | Optional React bindings: `HostProvider`, `useHold`, `useWatch`, `useRefState`, `useVariant`, `useRegistry`, `usePageState`, `useMessages`, `watchStore`. | Browsers |
 | `@earendil-works/chord/tui` | The terminal surface's sandbox side: `startTerminalRuntime` in the app's terminal entry, `BridgeTerminal`, `TerminalTheme`, `TuiScope`. | Node (sandboxed) |
 | `@earendil-works/chord/tui/launcher` | The terminal launcher, the trusted side of a terminal client: `startTerminal`, `requireSandboxNode`. | Node |
 | `@earendil-works/chord/context` | Explicit cancellation, telemetry, and invocation values: `BACKGROUND_CONTEXT`, `withCancel`, `withAbortSignal`, `withoutAbortSignal`, `withTelemetry`, `traceIn`, `withContextValue`, `awaitWithContext`. | Node and browsers |
@@ -74,7 +75,7 @@ await host.close(context);
 ## Documentation
 
 - [Plugins and hosts](docs/guide-plugins-hosts/book.md): a tutorial building a notes app with plugins, HTTP and workers; [plugin authoring](docs/plugin-authoring.md): the guide for agents writing plugins.
-- [Examples](test/examples/): runnable references, one topic each. Run from `packages/chord`: `node --conditions=source --experimental-strip-types test/examples/01-objects.ts`.
+- [Examples](test/examples/): runnable references, one topic each. Run from `third_party/chord`: `node --conditions=source --experimental-strip-types test/examples/01-objects.ts`.
 - Each layer's README in `src/*/README.md` and `src/node/*/README.md`; the [delta guide](src/delta/README.md): ownership, lifecycle, operation, and replica contracts of `@earendil-works/chord/delta`.
 
 ## Explicit Context telemetry

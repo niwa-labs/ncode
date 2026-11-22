@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from "node:util";
+import type { TUI } from "@earendil-works/pi-tui";
 import { applyPatch } from "diff";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -32,6 +34,8 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "../src/index.ts";
+import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import * as shellModule from "../src/utils/shell.ts";
 
 const readTool = createReadTool(process.cwd());
@@ -94,7 +98,15 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toBe(content);
 			// No truncation message since file fits within limits
 			expect(getTextOutput(result)).not.toContain("Use offset=");
-			expect(result.details).toBeUndefined();
+			expect(result.details?.textFile).toEqual({
+				path: testFile,
+				content,
+				numLines: 3,
+				startLine: 1,
+				totalLines: 3,
+				truncatedByOutputLimit: false,
+				wholeFileAutoTruncated: false,
+			});
 			expect(result.structuredContent).toBe(content);
 		});
 
@@ -231,6 +243,45 @@ describe("Coding Agent Tools", () => {
 				mimeType: "image/png",
 				note: getTextOutput(result),
 			});
+		});
+
+		it("should keep a text-only model's image warning out of what the model gets", async () => {
+			const png1x1Base64 =
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
+			const testFile = join(testDir, "text-model.png");
+			writeFileSync(testFile, Buffer.from(png1x1Base64, "base64"));
+			const ctx = { cwd: testDir, model: { id: "text-only", input: ["text"] } } as unknown as ExtensionToolContext;
+
+			const result = await createReadToolDefinition(testDir).execute(
+				"test-call-img-text-model",
+				{ path: testFile },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+			// The result is replayed after a switch to a vision model, so it keeps the image and no
+			// note saying the model cannot see it; pi-ai replaces the image per request instead.
+			expect(getTextOutput(result)).toBe("Read image file [image/png]");
+			expect(result.content.some((c) => c.type === "image")).toBe(true);
+
+			// The user still sees the warning, collapsed and expanded.
+			initTheme("dark");
+			const component = new ToolExecutionComponent(
+				"read",
+				"test-call-img-text-model",
+				{ path: testFile },
+				{},
+				createReadToolDefinition(testDir),
+				// SAFETY: ToolExecutionComponent only calls ui.requestRender(), which this stub implements.
+				{ requestRender() {} } as TUI,
+				testDir,
+			);
+			component.updateResult({ ...result, isError: false });
+			const warning = "[text-only does not support images; it saw a placeholder instead]";
+			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain(warning);
+			component.setExpanded(true);
+			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain(warning);
 		});
 
 		it("should read BMP files from disk as PNG image attachments", async () => {
@@ -501,7 +552,7 @@ describe("Coding Agent Tools", () => {
 			const result = await bashTool.execute("test-call-8", { command: "echo 'test output'" });
 
 			expect(getTextOutput(result)).toContain("test output");
-			expect(result.details).toBeUndefined();
+			expect(result.details?.execution).toEqual({ exitCode: 0, status: "succeeded", reason: "exited" });
 		});
 
 		it("should report non-zero exit codes as error results with structured content", async () => {
@@ -575,8 +626,10 @@ describe("Coding Agent Tools", () => {
 						command: `printf 'before-kill\\n'; kill -${signal} $$`,
 					});
 					expect(result.isError).toBe(true);
+					expect(result.structuredContent?.exit_code).toBe(exitCode);
+					expect(result.details?.execution?.reason).toBe("signaled");
 					expect(getTextOutput(result)).toMatch(
-						new RegExp(`before-kill\\s+Command exited with code ${exitCode}$`),
+						new RegExp(`before-kill\\s+Command terminated by signal SIG${signal}$`),
 					);
 				}
 			},
@@ -719,6 +772,7 @@ describe("Coding Agent Tools", () => {
 
 				expect(shellModule.getShellConfig(shellPath)).toEqual({
 					shell: shellPath,
+					type: "bash",
 					args: ["-s"],
 					commandTransport: "stdin",
 				});
@@ -795,6 +849,50 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("line-4000");
 			expect(output).toMatch(/\[Showing lines 2001-4000 of 4000\. Full output: /);
 			expect(output).not.toContain("4001");
+		});
+
+		// #12062: a short line followed by one line far past the limit returned no output at all.
+		it("should show the end of an over-long last line after a short line", async () => {
+			const longLine = `${"y".repeat(219_000)}END`;
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					const data = Buffer.from(`first line\n${longLine}\n`, "utf-8");
+					for (let i = 0; i < data.length; i += 8192) onData(data.subarray(i, i + 8192));
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-long-last-line", { command: "grep -n x bundle.min.js" });
+			const output = getTextOutput(result);
+
+			expect(result.details?.truncation?.lastLinePartial).toBe(true);
+			expect(output).toContain("yyyyEND");
+			expect(output).toMatch(/\[Showing last 50\.0KB of line 2 /);
+		});
+
+		// #12350: an over-long line followed by a blank line returned "(no output)".
+		it.each([
+			[60_000, "\n"],
+			[219_000, "\n"],
+			[219_000, "\r\n"],
+		])("should show the end of an over-long line followed by a blank line (%i bytes, %j)", async (length, eol) => {
+			const longLine = `${"y".repeat(length)}END`;
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					const data = Buffer.from(`first line${eol}${longLine}${eol}${eol}`, "utf-8");
+					for (let i = 0; i < data.length; i += 8192) onData(data.subarray(i, i + 8192));
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			const result = await bash.execute("test-call-long-line-blank-line", { command: "long-line" });
+			const output = getTextOutput(result);
+
+			expect(result.details?.truncation?.lastLinePartial).toBe(true);
+			expect(output).toMatch(/^y+END\r?\n/);
+			expect(output).toMatch(/\[Showing last 50\.0KB of line 2 /);
 		});
 
 		it("should decode UTF-8 characters split across output chunks", async () => {
@@ -1215,6 +1313,22 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(getTextOutput(result)).toContain("No files found matching pattern");
+		});
+
+		// #12020: fd matches nothing for a leading "./", so the tool drops it.
+		it("should ignore a leading ./ in the pattern", async () => {
+			mkdirSync(join(testDir, "src"));
+			writeFileSync(join(testDir, "src", "a.ts"), "a");
+			writeFileSync(join(testDir, "package.json"), "{}");
+
+			for (const pattern of ["./src/*.ts", "./src/**/*.ts", "././src/*.ts"]) {
+				const result = await findTool.execute("test-call-find-dot-slash", { pattern, path: testDir });
+				expect(getTextOutput(result)).toBe("src/a.ts");
+			}
+			// Without a "/" left, "./*.json" matches basenames at any depth, like "*.json".
+			writeFileSync(join(testDir, "src", "b.json"), "{}");
+			const json = await findTool.execute("test-call-find-dot-slash-json", { pattern: "./*.json", path: testDir });
+			expect(getTextOutput(json).split("\n").sort()).toEqual(["package.json", "src/b.json"]);
 		});
 
 		// #7121: exactly `limit` matches must not report that the limit was reached.

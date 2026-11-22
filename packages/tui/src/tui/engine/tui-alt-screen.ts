@@ -1745,11 +1745,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
-			const clearImages =
-				this.imageProtocol === "kitty" && hadUploadedKittyImages
-					? deleteAllKittyPlacements()
-					: this.deleteKittyImages();
-			buffer += `${clearImages}\x1b[2J`;
+			if (this.imageProtocol === "kitty" && hadUploadedKittyImages) {
+				// ED 2 frees unplaced Kitty uploads. The rows are already cleared individually below.
+				buffer += deleteAllKittyPlacements();
+			} else {
+				buffer += `${this.deleteKittyImages()}\x1b[2J`;
+			}
 		} else if (imagesNeedRedraw) {
 			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
 			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();

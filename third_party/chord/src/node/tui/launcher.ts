@@ -1,3 +1,4 @@
+/// <reference lib="dom.asynciterable" />
 // `startTerminal` (slice 11 §4, decision "Slice 11, P8"): the trusted launcher of a terminal client. It signs in with
 // its token (given, from a file, or by pairing), downloads the terminal kind's base bundle and plugin scripts, and
 // runs them in the sandbox, always. It keeps the credentials, the real terminal and the user's choices: the sandbox

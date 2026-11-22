@@ -266,17 +266,19 @@ export function gatePiStorageMutations<S extends PiMutationStorageLike>(
   const gatedCommit = (...args: never[]): Promise<unknown> =>
     gate.run(async () => {
       if (typeof args[1] === 'function') {
-        // Pi 1.5 batches are durable in order; receipts follow all stored
+        // Pi batches are durable in order; receipts follow all stored
         // batches, including a durable prefix before a refusal/fatal error.
         const batches = args[0] as readonly (readonly PiStorageWriteLike[])[];
         const receive = args[1] as (index: number, seq: number) => void;
         const receipts: number[] = [];
-        let refused: unknown;
+        let refusal: { error: unknown } | undefined;
         try {
           for (const writes of batches) {
             try { await options.onBeforeCommit?.(writes); }
-            catch (error) { refused = error; break; }
-            let result: { stored: number; refused?: unknown };
+            catch (error) { refusal = { error }; break; }
+            let result:
+              | { kind: 'stored'; stored: number }
+              | { kind: 'refused'; stored: number; refused: unknown };
             try {
               result = await (storage.commit as (...input: unknown[]) => Promise<typeof result>)(
                 [writes], (_index: number, seq: number) => {
@@ -285,15 +287,18 @@ export function gatePiStorageMutations<S extends PiMutationStorageLike>(
                 }, args[2],
               );
             } catch (error) { return fail(error); }
-            if (result.refused !== undefined || result.stored === 0) {
-              refused = result.refused;
+            if (result.kind === 'refused') {
+              refusal = { error: result.refused };
               break;
             }
+            if (result.stored === 0) break;
           }
         } finally {
           receipts.forEach((seq, index) => receive(index, seq));
         }
-        return { stored: receipts.length, ...(refused !== undefined ? { refused } : {}) };
+        return refusal === undefined
+          ? { kind: 'stored', stored: receipts.length }
+          : { kind: 'refused', stored: receipts.length, refused: refusal.error };
       }
       // Compatibility for the product's existing one-batch journal port.
       const writes = (args[0] ?? []) as readonly PiStorageWriteLike[];

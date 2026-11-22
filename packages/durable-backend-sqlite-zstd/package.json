@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "better-sqlite3": "12.11.1",
-    "@earendil-works/chord": "1.5.2"
+    "@earendil-works/chord": "1.6.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -33,7 +33,7 @@
     "@types/node": "22.19.19",
     "typescript": "^5",
     "vitest": "^2",
-    "@earendil-works/pi-durable": "1.5.2"
+    "@earendil-works/pi-durable": "1.6.0"
   },
   "engines": {
     "node": ">=22.15"

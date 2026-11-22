@@ -1441,8 +1441,9 @@ describe('LocalModelResolver custom provider compat overrides', () => {
     expect(await systemPromptRoleFor({ supportsDeveloperRole: false })).toBe('system');
   });
 
-  it('still sends `developer` when the gateway declares nothing, reproducing the incident', async () => {
-    expect(await systemPromptRoleFor(undefined)).toBe('developer');
+  it('defaults to `system` for an unconfigured gateway and honors its override', async () => {
+    expect(await systemPromptRoleFor(undefined)).toBe('system');
+    expect(await systemPromptRoleFor({ supportsDeveloperRole: true })).toBe('developer');
   });
 
   it('keeps the system role for a thinking model on the Mistral API', async () => {
@@ -1475,24 +1476,26 @@ describe('LocalModelResolver custom provider compat overrides', () => {
 
   it.each([
     ['https://api.openai.com/v1', 'developer'],
+    ['https://api.openai.com.example/v1', 'system'],
+    ['https://gateway.example/api.openai.com/v1', 'system'],
     ['https://api.deepseek.com/v1', 'system'],
-    ['https://api.mistral.ai.example/v1', 'developer'],
-    ['https://gateway.example/api.mistral.ai/v1', 'developer'],
-    ['https://api.siliconflow.cn.example/v1', 'developer'],
-    ['https://gateway.example/api.siliconflow.cn/v1', 'developer'],
-    ['https://api.siliconflow.com.example/v1', 'developer'],
-    ['https://gateway.example/api.siliconflow.com/v1', 'developer'],
+    ['https://api.mistral.ai.example/v1', 'system'],
+    ['https://gateway.example/api.mistral.ai/v1', 'system'],
+    ['https://api.siliconflow.cn.example/v1', 'system'],
+    ['https://gateway.example/api.siliconflow.cn/v1', 'system'],
+    ['https://api.siliconflow.com.example/v1', 'system'],
+    ['https://gateway.example/api.siliconflow.com/v1', 'system'],
     ['https://api.moonshot.cn/v1', 'system'],
     ['https://api.moonshot.ai/v1', 'system'],
-    ['https://dashscope.aliyuncs.com.example/v1', 'developer'],
-    ['https://gateway.example/dashscope.aliyuncs.com/v1', 'developer'],
-    ['https://coding.dashscope.aliyuncs.com.example/v1', 'developer'],
-    ['https://token-plan.cn-beijing.maas.aliyuncs.com.example/v1', 'developer'],
-    ['https://gateway.example/token-plan.cn-beijing.maas.aliyuncs.com/v1', 'developer'],
-    ['https://example-workspace.unknown-region.maas.aliyuncs.com/v1', 'developer'],
-    ['https://example-workspace.cn-beijing.aliyuncs.com/v1', 'developer'],
-    ['https://api.kimi.com.example/v1', 'developer'],
-    ['https://gateway.example/api.kimi.com/coding/v1', 'developer'],
+    ['https://dashscope.aliyuncs.com.example/v1', 'system'],
+    ['https://gateway.example/dashscope.aliyuncs.com/v1', 'system'],
+    ['https://coding.dashscope.aliyuncs.com.example/v1', 'system'],
+    ['https://token-plan.cn-beijing.maas.aliyuncs.com.example/v1', 'system'],
+    ['https://gateway.example/token-plan.cn-beijing.maas.aliyuncs.com/v1', 'system'],
+    ['https://example-workspace.unknown-region.maas.aliyuncs.com/v1', 'system'],
+    ['https://example-workspace.cn-beijing.aliyuncs.com/v1', 'system'],
+    ['https://api.kimi.com.example/v1', 'system'],
+    ['https://gateway.example/api.kimi.com/coding/v1', 'system'],
   ])('preserves the system prompt role for %s', async (baseURL, role) => {
     expect(await systemPromptRoleFor(undefined, baseURL)).toBe(role);
   });

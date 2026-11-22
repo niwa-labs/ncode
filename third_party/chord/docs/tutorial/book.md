@@ -11,9 +11,7 @@ stats:
 note: |
   The app is `packages/chord/test/examples/61-tutorial/`, runnable with the line in its `main.ts`. Every code block
   below is quoted from its files, and every console output from what its steps print:
-  `test/examples/61-tutorial/tutorial.test.ts` fails when a quote or an output drifts. The design is
-  `packages/chord/docs/design.md`; where this tutorial says "the rule", design.md has the full statement. The last
-  chapter is about p2, whose code lives outside this repository.
+  `test/examples/61-tutorial/tutorial.test.ts` checks for drift in quotes and output.
 colophon: Together · first edition · 2026-11-03 · Chord v2 slices 1-13, the app kit, example 61
 ---
 
@@ -306,7 +304,7 @@ console.log("   GET / signed in:", (await fetch(url, { headers: { cookie } })).s
 1. owner link: http://127.0.0.1:<port>/_chord/owner#<token>
    data directory: cache, logs, owner-token, plugins, server, telemetry.sqlite, telemetry.sqlite-shm, telemetry.sqlite-wal, workers
    GET / signed out: 401
-   the owner signs in: 200 chord-session=…
+   the owner signs in: 200 chord-sign-in=…
    GET / signed in: 200
 ```
 
@@ -319,7 +317,7 @@ answered 401: HTTP **denies by default**, before any plugin code runs, unless a 
 
 The **owner link** (`/_chord/owner#<token>`) is how the owner gets in: a single-use token, valid ten minutes, made at
 each start. It sits in the URL's fragment, which browsers never send, so it never reaches a log; the link's page posts
-it and receives a session cookie. A command-line client on the same machine reads `owner-token` instead (mode 0600,
+it and receives a sign-in cookie. A command-line client on the same machine reads `owner-token` instead (mode 0600,
 chapter III). Nothing is the owner because it comes from loopback: any local process could.
 
 # A List on Its Own Worker {#worker lede="A host kind, a remote contract, a worker facet with a table and a live query, and the principal that adds a todo."}
@@ -1333,7 +1331,7 @@ await until(() => app.plugins.state.value.dirty.includes("@todo/lists"));
 const applied = await app.applyChanges(context);
 console.log("9. lists changed, rolled out to:", applied.steps.map(({ name }) => name).join(", "));
 for (const host of applied.steps.find(({ name }) => name === "list")!.hosts) {
-	const fates = "report" in host ? host.report.objects.map(({ object, kind }) => `${object} ${kind}`) : [];
+	const fates = host.kind === "reloaded" ? host.report.objects.map(({ object, kind }) => `${object} ${kind}`) : [];
 	console.log(`   on ${host.host}:`, [...new Set(fates)].join(", "));
 }
 await adas.add("  tea  ", context);
@@ -1634,20 +1632,21 @@ a span of another trace; the renderer prints it and never follows it.
 
 ## Trap: a trace starts where a span starts
 
-The panel took its reference to `Todos` before the click (`useHold`), under `BACKGROUND_CONTEXT`, and that hold is in no
-trace of the page: **a context without a recording span records nothing.** A host gives such work no span of its own,
-so its calls start no `chord.call` and send no carrier, and the provider's `chord.method` becomes a root of its own trace
-(the server's relay of the page's hold is one: `chord.relay` with `member="hold"`). So were the server's calls in step 2:
-on the worker each is a root `chord.method`. Start a span where the work begins, a click handler or a job
-(`host.root(fn, context, { trace })`), and pass its `ctx` down. The kit's HTTP component does this for every request: a
-`chord.http` span (method, route pattern, status), with the route's `ctx` under it. Step 11 adds honey from the command
-line, as step 3 did; the request is the trace's root, the server's call to the worker under it:
+The panel took its reference to `Todos` before the click (`useHold`), under `BACKGROUND_CONTEXT`, and that reference is
+in no trace of the page: **a context without a recording span records nothing.** Its hold is shared work (the page's
+other references to the same list use it too), a `chord.hold` root of its own, linked to the getter's span when there is
+one; but calls made under such a context start no `chord.call` and send no carrier, and the provider's `chord.method`
+becomes a root of its own trace (the server's relay of the page's hold is one: `chord.relay` with `member="hold"`). So
+were the server's calls in step 2: on the worker each is a root `chord.method`. Start a span where the work begins, a
+click handler or a job (`host.root(fn, context, { trace })`), and pass its `ctx` down. The kit's HTTP component does
+this for every request: a `chord.http` span (method, route pattern, status), with the route's `ctx` under it. Step 11
+adds honey from the command line, as step 3 did; the request is the trace's root, the server's call to the worker under
+it (its hold of the list is shared work: a root of its own, linked to the request):
 
 <!-- output: main -->
 ```text
 11. adding honey from the command line:
    chord.http chord.host="server" method="POST" route="POST /api/lists/:list" status=200
-     chord.hold chord.host="server" type="todo.todos" object="todo.todos(groceries)" address.kind="list" outcome="bound"
      chord.call chord.host="server" type="todo.todos" member="add" object="todo.todos(groceries)" address.kind="list" chord.principal="owner" outcome="ok"
        chord.method chord.host="list|groceries" type="todo.todos" member="add" object="todo.todos(groceries)" principal.kind="owner" chord.principal="owner" outcome="ok"
          chord.method chord.host="list|groceries" type="todo.store" member="add" object="todo.store" principal.kind="worker" chord.principal="worker:list|groceries" outcome="ok"

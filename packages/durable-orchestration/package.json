@@ -16,9 +16,9 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/chord": "1.6.0",
     "@earendil-works/pi-ai": "workspace:*",
-    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-durable": "1.6.0",
     "@mavis/background-task": "workspace:^",
     "@mavis/goal": "workspace:^",
     "@mavis/logging": "workspace:^"

@@ -135,7 +135,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-durable": "1.6.0",
     "@mavis/logging": "workspace:*",
     "@types/node": "^22",
     "@types/proper-lockfile": "^4",

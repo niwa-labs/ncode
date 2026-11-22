@@ -1,7 +1,7 @@
 /** MiniMax Code source baseline (upstream 3c21163). Update when syncing upstream. */
 export const MCODE_BASE_VERSION = '0.7.2';
 /** Checked against the vendored Pi coding-agent manifest in build-marker.test.ts. */
-export const PI_VENDOR_VERSION = '1.5.2';
+export const PI_VENDOR_VERSION = '1.6.0';
 
 export function formatComponentVersions(ncodeVersion: string): string {
   return `Ncode ${ncodeVersion}\nMCode ${MCODE_BASE_VERSION}\nPi ${PI_VENDOR_VERSION}`;

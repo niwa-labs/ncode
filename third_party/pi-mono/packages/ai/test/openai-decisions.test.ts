@@ -138,6 +138,34 @@ describe("OpenAI Decisions", () => {
 		expect(result.usage?.cost.total).toBeCloseTo(0.06, 12);
 	});
 
+	it("reports cached and cache-write input tokens separately at their model prices", async () => {
+		const pricedModel = { ...model, cost: { ...model.cost, cacheRead: 0.025, cacheWrite: 0.2 } };
+		const result = await classify(pricedModel, context, {
+			apiKey: "secret",
+			fetch: async () =>
+				Response.json({
+					answers: wireAnswers,
+					usage: {
+						input_tokens: 2000,
+						input_tokens_details: { cached_tokens: 1600, cache_write_tokens: 100 },
+						output_tokens: 0,
+						total_tokens: 2000,
+					},
+				}),
+		});
+
+		expect(result.usage).toMatchObject({
+			input: 300,
+			output: 0,
+			cacheRead: 1600,
+			cacheWrite: 100,
+			totalTokens: 2000,
+		});
+		expect(result.usage?.cost.cacheRead).toBeCloseTo(0.00004, 12);
+		expect(result.usage?.cost.cacheWrite).toBeCloseTo(0.00002, 12);
+		expect(result.usage?.cost.total).toBeCloseTo(0.00009, 12);
+	});
+
 	it("sends images after the state in one user message", async () => {
 		const fetch = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
 			Response.json({ answers: wireAnswers }),

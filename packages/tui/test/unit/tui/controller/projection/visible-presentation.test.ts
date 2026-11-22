@@ -672,7 +672,7 @@ describe("visible presentation selector", () => {
         const rendered = stripAnsi(new TuiWelcome(shell).render(width).join("\n"));
         expect(rendered).toContain("Ncode by Niwa Labs");
         expect(rendered).toContain("Independent fork of MiniMax Code (MCode) 0.7.2");
-        expect(rendered).toContain("Built with Pi 1.5.2");
+        expect(rendered).toContain("Built with Pi 1.6.0");
         expect(rendered).toContain(activity);
         expect(rendered.includes("Sign in with /login")).toBe(loginRequired);
         expect(rendered.includes("Login required")).toBe(loginRequired);

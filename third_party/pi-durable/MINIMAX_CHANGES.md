@@ -2,8 +2,8 @@
 
 This directory (`third_party/pi-durable`, plus its sibling `third_party/chord`) vendors two packages from the `pi` monorepo as source so MiniMax can integrate and patch the durable runtime and its typed host runtime without waiting on upstream release cadence.
 
-- `third_party/pi-durable` ← upstream `packages/durable` (imported name: `@minimax/local/pi-durable`)
-- `third_party/chord` ← upstream `packages/chord` (imported name: `@minimax/local/chord`)
+- `third_party/pi-durable` ← upstream `packages/durable` (workspace name: `@earendil-works/pi-durable`)
+- `third_party/chord` ← upstream `packages/chord` (workspace name: `@earendil-works/chord`)
 
 ## Upgrade policy
 
@@ -12,9 +12,17 @@ Upstream is never upgraded without a deliberate rebase. Do not bump the pin, cop
 ## Import baseline
 
 - Upstream: `https://github.com/earendil-works/pi.git`
-- Ref: `refs/tags/v1.5.2`
-- Commit: `b4afdddf44e059c67ccf5097e5317d913521b470` (Release v1.5.2)
-- Imported at: 2026-11-11
+- Ref: upstream snapshot after `refs/tags/v1.6.0`
+- Commit: `780bf31fcaeb252fa9b68df3964c735eae75bde3`
+- Imported at: 2026-11-22
+
+## 2026-11-22 — Pi 1.6.0 runtime and Chord snapshot
+
+- Rebased both packages from the previous upstream baseline `b4afdddf44e059c67ccf5097e5317d913521b470` (v1.5.2) to the commit above.
+- Retained workspace dependency links, local Node type dependencies, and the portable writer's Node-compatible MessageChannel handler.
+- Adopted the native tagged commit results in the SQLite storage adapter, single-writer gate, and durable log bridge. The existing single-batch product journal API still returns its sequence directly.
+- Retained the foreground host's direct `afterTools` stop decision alongside upstream hook tasks. If other hooks start tasks in the same round, the generation checkpoints that decision and applies it once the tasks settle.
+- Updated the foreground host to the native tagged `onYield` continuation.
 
 ## 2026-11-11 — native commit receipts and Chord v2
 
@@ -26,7 +34,7 @@ Upstream is never upgraded without a deliberate rebase. Do not bump the pin, cop
 - Native foreground GenerationTask is not enabled by this rebaseline. The existing canonical transcript, background compaction scheduler and product turn owner are retained.
 
 
-The copied trees are byte-identical to upstream at that commit (verified with `diff -rq`), except for the local changes below.
+The following ledger records the original import and later local adaptations.
 
 ## Local patch ledger
 

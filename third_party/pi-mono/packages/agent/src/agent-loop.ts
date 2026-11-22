@@ -611,7 +611,8 @@ async function executeToolCallsSequential(
 		if (
 			toolIndex > 0 &&
 			ownerInputGenerationAtBatchStart !== undefined &&
-			(await config.ownerInputGeneration?.()) !== ownerInputGenerationAtBatchStart
+			(await config.ownerInputGeneration?.()) !== ownerInputGenerationAtBatchStart &&
+			!signal?.aborted
 		) {
 			// Yield-to-owner-input boundary: the remaining calls of the batch are
 			// not started blind against an instruction the runtime already
@@ -707,9 +708,6 @@ async function executeToolCallsSequential(
 			}
 			break;
 		}
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	return {
@@ -754,16 +752,10 @@ async function executeToolCallsParallel(
 				await appendSkippedParallelToolCalls(finalizedCalls, toolCalls.slice(toolIndex + 1), STOPPED_BY_HOOK, emit);
 				break;
 			}
-			if (signal?.aborted) {
-				break;
-			}
 			continue;
 		}
 
 		finalizedCalls.push({ kind: "prepared-entry", preparation });
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	const orderedFinalizedCalls = await Promise.all(
@@ -948,6 +940,15 @@ async function prepareToolCall(
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	// Once aborted, skip preparation and the hooks; callers still record this result, so no call
+	// is left without one (#9986).
+	if (signal?.aborted) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+	}
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
@@ -989,13 +990,6 @@ async function prepareToolCall(
 					...(beforeResult.terminateAgent === true ? { terminateAgent: true } : {}),
 				};
 			}
-		}
-		if (signal?.aborted) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-			};
 		}
 		return {
 			kind: "prepared",
@@ -1041,8 +1035,9 @@ export interface RunToolCallOptions extends ToolCallHooks {
  * messages. Tools that call other tools use this so the hooks (for example permission checks)
  * apply to those calls too.
  *
- * Never rejects for tool failures: unknown tools, validation errors, blocked calls, and thrown
- * errors come back as `isError: true`.
+ * Never rejects for tool failures: an aborted `signal`, unknown tools, validation errors, blocked
+ * calls, and thrown errors come back as `isError: true`. An aborted `signal` is checked first,
+ * before the hooks run.
  */
 export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;

@@ -61,6 +61,9 @@
       "@earendil-works/chord/sync": [
         "./third_party/chord/src/sync/index.ts"
       ],
+      "@earendil-works/chord/telemetry-ingest": [
+        "./third_party/chord/src/telemetry-ingest/index.ts"
+      ],
       "@earendil-works/chord/telemetry-sqlite": [
         "./third_party/chord/src/telemetry-sqlite/index.ts"
       ],
@@ -121,6 +124,9 @@
       "@earendil-works/pi-ai/providers/*": [
         "./third_party/pi-mono/packages/ai/src/providers/*.ts"
       ],
+      "@earendil-works/pi-ai/session-resources": [
+        "./third_party/pi-mono/packages/ai/src/session-resources.ts"
+      ],
       "@earendil-works/pi-ai/utils/*": [
         "./third_party/pi-mono/packages/ai/src/utils/*.ts"
       ],
@@ -171,6 +177,9 @@
       ],
       "@earendil-works/pi-durable/images/cloudflare": [
         "./third_party/pi-durable/src/images/cloudflare.ts"
+      ],
+      "@earendil-works/pi-durable/images/fit": [
+        "./third_party/pi-durable/src/images/fit.ts"
       ],
       "@earendil-works/pi-durable/images/node": [
         "./third_party/pi-durable/src/images/node.ts"

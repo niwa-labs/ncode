@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TerminalColorMode } from "./colors.js";
+import { visibleWidth } from "./utils.js";
 
 export type ImageProtocol = "kitty" | "iterm2" | null;
 
@@ -220,6 +221,55 @@ export function isImageLine(line: string): boolean {
 }
 
 /**
+ * Cells covered by the image placement on an image line. Rows are relative to the line; columns are
+ * absolute, with `endCol` exclusive and `Infinity` when the image width cannot be read.
+ */
+export interface ImageLineExtent {
+	firstRow: number;
+	lastRow: number;
+	startCol: number;
+	endCol: number;
+}
+
+/**
+ * Return the cells an image line draws over. Kitty places the image at the line and extends it
+ * downward; iTerm2 lines move the cursor up before drawing, so the image ends at the line.
+ */
+export function getImageLineExtent(line: string): ImageLineExtent | undefined {
+	const kittyStart = line.indexOf(KITTY_PREFIX);
+	if (kittyStart !== -1) {
+		const controls = /\x1b_G([^;]*);/.exec(line)?.[1] ?? "";
+		const columnValue = /(?:^|,)c=(\d+)(?:,|$)/.exec(controls)?.[1];
+		const columns =
+			columnValue === undefined
+				? getRegisteredKittyImageMetadataFromControls(controls)?.columns
+				: Number.parseInt(columnValue, 10);
+		const startCol = visibleWidth(line.slice(0, kittyStart));
+		const rows = getKittyImagePlacementRows(line) ?? 1;
+		return { firstRow: 0, lastRow: rows - 1, startCol, endCol: startCol + (columns ?? Infinity) };
+	}
+	const iterm2Start = line.indexOf(ITERM2_PREFIX);
+	if (iterm2Start === -1) return undefined;
+	const before = line.slice(0, iterm2Start);
+	const moveUp = /\x1b\[(\d+)A$/.exec(before);
+	// Only a plain cell count is a known width; `auto`, pixel and percent widths depend on the image.
+	const columnValue = /[;=]width=(\d+)[;:]/.exec(line.slice(iterm2Start))?.[1];
+	// visibleWidth counts the cursor-up sequence as text, so measure only what precedes it.
+	const startCol = visibleWidth(moveUp ? before.slice(0, moveUp.index) : before);
+	return {
+		firstRow: moveUp ? -Number.parseInt(moveUp[1]!, 10) : 0,
+		lastRow: 0,
+		startCol,
+		endCol: startCol + (columnValue === undefined ? Infinity : Number.parseInt(columnValue, 10)),
+	};
+}
+
+/** Remove Kitty and iTerm2 image sequences, including iTerm2's cursor-up prefix, keeping the text. */
+export function stripImageSequences(line: string): string {
+	return line.replace(/\x1b_G[^\x1b]*\x1b\\/g, "").replace(/(?:\x1b\[\d+A)?\x1b\]1337;File=[^\x07]*\x07/g, "");
+}
+
+/**
  * Generate a random image ID for Kitty graphics protocol.
  * Uses random IDs to avoid collisions between different module instances
  * (e.g., main app vs extensions).
@@ -351,15 +401,22 @@ export interface KittyImagePlacement {
 
 const kittyImageMetadata = new Map<number, RegisteredKittyImageMetadata>();
 let kittyTransmissionGeneration = 0;
+let maxKittyImageRows = 0;
 
 export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
 	kittyTransmissionGeneration += 1;
+	maxKittyImageRows = Math.max(maxKittyImageRows, metadata.rows);
 	kittyImageMetadata.delete(metadata.imageId);
 	kittyImageMetadata.set(metadata.imageId, { ...metadata, transmissionGeneration: kittyTransmissionGeneration });
 	if (kittyImageMetadata.size > 1000) {
 		const oldestImageId = kittyImageMetadata.keys().next().value;
 		if (oldestImageId !== undefined) kittyImageMetadata.delete(oldestImageId);
 	}
+}
+
+/** Return the row height of the tallest Kitty image registered so far. */
+export function getMaxKittyImageRows(): number {
+	return maxKittyImageRows;
 }
 
 function getRegisteredKittyImageMetadataFromControls(controls: string): RegisteredKittyImageMetadata | undefined {
