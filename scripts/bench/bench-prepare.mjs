@@ -177,10 +177,8 @@ function textFor(index) {
 function imageBase64(index) {
   const raw = Buffer.alloc(Math.floor((imageKib * 1024 * 3) / 4));
   let state = (index * 2654435761) >>> 0;
-  // All four state bytes per step, not just the low byte: a low-byte-only
-  // stream is periodic in 256 and every image repeats every other image's
-  // substrings — the residency leak check below would false-positive on a
-  // resident page carrying an evicted page's 48-char sample.
+  // Use all four state bytes so the residency check can identify each
+  // synthetic image by its first 48 base64 characters.
   for (let i = 0; i < raw.length; ) {
     state = (Math.imul(state, 1103515245) + 12345) >>> 0;
     raw[i++] = (state >>> 24) & 0xff;
@@ -446,8 +444,20 @@ try {
   // ── Phase 4: the LLM mock — body verification, no network ─────────────────
   const mockErrors = [];
   function verifyBody(compiled) {
-    const { body, totalBytes, segments } = compiled;
-    if (body.length !== totalBytes) mockErrors.push(`body length ${body.length} != totalBytes ${totalBytes}`);
+    const { body, totalBytes, segments, records } = compiled;
+    const carriedImages = new Set();
+    let carriedBytes = 0;
+    for (const record of records) {
+      if (record.role !== 'user' && record.kind !== 'toolResult') continue;
+      for (const block of record.content ?? []) {
+        if (block.type !== 'image') continue;
+        carriedImages.add(block.data.slice(0, 48));
+        carriedBytes += Buffer.byteLength(block.data) + Buffer.byteLength(block.mimeType);
+      }
+    }
+    if (body.length + carriedBytes !== totalBytes) {
+      mockErrors.push(`body and image carriers have ${body.length + carriedBytes} bytes, expected ${totalBytes}`);
+    }
     let offset = 0;
     let hashesOk = 0;
     let placeholders = 0;
@@ -475,11 +485,11 @@ try {
     }
     if (offset !== body.length) mockErrors.push(`segment bytes (${offset}) do not cover the body (${body.length})`);
     for (const { entryId, sample } of imageLeakSamples) {
-      // A RESIDENT page's base64 is SUPPOSED to be in the body (the Ф2 R2
-      // overlay); only an evicted page's bytes leaking is a defect.
-      if (imageResident(entryId) || !body.includes(sample)) continue;
-      mockErrors.push('evicted image base64 leaked into the wire body');
-      break;
+      const expected = windowEntryIds.has(entryId) && imageResident(entryId);
+      if (carriedImages.has(sample) !== expected) {
+        mockErrors.push(`image ${entryId} has unexpected residency in the structured carriers`);
+      }
+      if (body.includes(sample)) mockErrors.push(`image ${entryId} base64 leaked into the text body`);
     }
     return { lines: segments.length, hashesOk, placeholders, roles: [...roles].sort() };
   }

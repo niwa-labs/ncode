@@ -18,6 +18,7 @@ import { mkdirSync, statSync, writeFileSync, createWriteStream } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { crc32, deflateSync } from 'node:zlib';
 
 const MIB = 1048576;
 
@@ -65,8 +66,34 @@ function messageLine(index, textBytes) {
   return JSON.stringify(line);
 }
 
-/** One image-block record: base64 of size `base64Bytes`. */
-function imageLine(index, base64Bytes) {
+function pngChunk(type, data) {
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(data.length);
+  header.write(type, 4, 'ascii');
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(data, crc32(header.subarray(4))));
+  return Buffer.concat([header, data, checksum]);
+}
+
+const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
+const imageWidth = 128;
+const imageHeight = 127;
+const imageHeader = Buffer.alloc(13);
+imageHeader.writeUInt32BE(imageWidth, 0);
+imageHeader.writeUInt32BE(imageHeight, 4);
+imageHeader[8] = 8; // Eight bits per channel.
+imageHeader[9] = 2; // RGB.
+const pngHeader = pngChunk('IHDR', imageHeader);
+const pngEnd = pngChunk('IEND', Buffer.alloc(0));
+
+/** One valid PNG per entry, sized to approximately 64 KiB on the wire. */
+function imageLine(index) {
+  // Each row starts with the PNG filter byte (0). Encoding the index in
+  // the first pixels gives each image a separate CAS identity.
+  const scanlines = Buffer.alloc((1 + imageWidth * 3) * imageHeight);
+  scanlines.writeUInt32BE(index, 1);
+  const imageData = pngChunk('IDAT', deflateSync(scanlines, { level: 0 }));
+  const data = Buffer.concat([pngSignature, pngHeader, imageData, pngEnd]).toString('base64');
   const line = {
     message_id: `msg-bench-${String(index).padStart(8, '0')}`,
     turn_id: turnId,
@@ -74,7 +101,7 @@ function imageLine(index, base64Bytes) {
       role: 'user',
       content: [
         { type: 'text', text: `screenshot ${index}` },
-        { type: 'image', data: 'A'.repeat(base64Bytes) },
+        { type: 'image', data, mimeType: 'image/png' },
       ],
       timestamp: 1760755230000 + index * 1000,
     },
@@ -194,8 +221,7 @@ if (kind === 'messages') {
   console.log(`fixture=${outputPath} bytes=${built.bytes} lines=${built.lines}`);
 } else if (kind === 'images') {
   // ~100 MB of ~64 KB base64 image blocks: the picture-heavy session shape.
-  const perImageBytes = 64 * 1024;
-  const built = await build(targetBytes, (index) => imageLine(index, perImageBytes), outputPath);
+  const built = await build(targetBytes, imageLine, outputPath);
   console.log(`fixture=${outputPath} bytes=${built.bytes} lines=${built.lines}`);
 } else if (kind === 'hybrid') {
   // The Ф2 full-shape corpus (equivalence gate): plain messages plus, on a

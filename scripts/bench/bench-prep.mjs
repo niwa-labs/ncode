@@ -13,29 +13,21 @@
 // Image residency (Ф2 R2, judge round 1): the window's image entries are
 // published into a real CAS and wrapped in the Context MMU (budget
 // MMU_RESIDENT_BYTES), and the pipeline runs WITH the residency overlay —
-// RESIDENT pages ride the payload with their real bytes (data URLs,
-// content-keyed wire ids), the rest stay dialect placeholders.
-// prep.payloadBytes on the images corpus therefore measures a payload that
-// actually carries resident image bytes, not the all-evicted 16 KB baseline.
+// RESIDENT pages ride the compiled records as structured image blocks; the
+// rest stay dialect placeholders. The text-only equivalence body omits those
+// blocks. Capture the serialized provider request separately, after timing.
 //
 // The residency seam ALSO carries a content-addressed segment store
 // (`ContextWireResidency.segments`): resident-image record segments keyed by
 // their content-keyed wire identity `<entryId>#resident@<sha16>` — the CAS
 // page's sha256 is in the key and pages are immutable, so a hit's bytes are
 // always that page's bytes (no second truth). A fresh pipeline seeds its
-// compiler cache from the store instead of re-serializing + re-hashing
-// ~10 МБ of resident data URLs — the byte-dominated cold rework the Ф2 cold
-// budget (prep ≤50 мс p95 at ANY history length) forbids at the residency
-// scale.
+// compiler cache from the store instead of serializing and hashing the
+// text-only record segments again.
 //
-// Default budget 256 KiB: at the images corpus's 64 KiB-per-image shape that
-// keeps exactly 4 pages resident — the architecture's "≤4 резидентных
-// картинки" residency behavior (final-architecture.md:310), exercised on the
-// measured path (~262 KB of resident bytes ride the 278 KB payload, against
-// the 16200 B all-evicted baseline). The ≈10 MB production shape (4 × 2.6 MB
-// images) needs bigger image blocks than this pinned corpus carries; at this
-// fixture's size a bigger budget only inflates the conversion cost the warm
-// budget (≤5 ms) prices in, without changing the behavior under test.
+// The default 256 KiB MMU budget keeps a few of the 200 window images
+// resident. The scale gate raises the MMU budget to 9 MiB so the captured
+// provider request carries roughly 10 MB of base64 with the same fixture.
 //
 //   prep.p95Ms     — cold compiles: a fresh pipeline (fresh PRIVATE segment
 //                    cache + fresh conversion memo) per iteration; every
@@ -56,11 +48,8 @@
 //                    unchanged code). Real, sustained degradations survive
 //                    the median; outlier passes stay visible in
 //                    prep.warmP95MaxMs (unthresholded).
-//   prep.payloadBytes — the compiled body size: THE byte truth of the
-//                    provider payload (dialect-normalized wire segments),
-//                    gated at ≤32 MB always and ≤12 MB on the images corpus.
-//                    The pipeline's maxBytes guard runs on this measured
-//                    path; a breach fails the bench with WireBudgetExceeded.
+//   prep.payloadBytes — serialized provider request, including hydrated image
+//                    blocks. Gated at ≤32 MB always and ≤12 MB on images.
 //   prep.manifestBytes — Σ segment byteLen of the projection manifest (the
 //                    compaction byte-trigger axis) for contrast.
 //
@@ -115,6 +104,10 @@ const { createMMU } = await import(contextMmuUrl);
 const { openCas } = await import(casUrl);
 const { createLruSegmentCache } = await import(load('wire-compiler/src/index.ts'));
 const { scanFixture, gc, percentileMs, metric } = await import('./lib/scan-fixture.mjs');
+const { contextWireMessages } = await import(load('agent-core/src/pi-turn-runner/context-wire.ts'));
+const piAiRoot = new URL('../../third_party/pi-mono/packages/ai/src/', import.meta.url);
+const { stream } = await import(new URL('api/openai-completions.ts', piAiRoot));
+const { normalizeContext } = await import(new URL('utils/transcript.ts', piAiRoot));
 
 // The durable entries of the window: the fixture line's REAL message under
 // the pi-durable payload convention (`{model:[message]}`) — what
@@ -150,9 +143,10 @@ for (const [index, line] of lastLines.entries()) {
   const blocks = Array.isArray(message?.content) ? message.content : [];
   const image = blocks.find((block) => block?.type === 'image' && typeof block.data === 'string');
   if (image === undefined) continue;
+  if (typeof image.mimeType !== 'string') fail(`image at entry ${index0 + 1} is missing mimeType`);
   const bytes = Buffer.from(image.data, 'base64');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
-  const handle = mmu.page({ sha256, mime: typeof image.mimeType === 'string' ? image.mimeType : 'image/png', bytes });
+  const handle = mmu.page({ sha256, mime: image.mimeType, bytes });
   mmu.admit(handle);
   await mmu.fault(handle); // publish the bytes into the CAS; drop the RAM copy
   pageByEntry.set(`e${index0 + 1}`, handle);
@@ -163,7 +157,7 @@ const entries = lastLines.map((line, index) => {
   return {
     id: `e${index0 + 1}`,
     parentId: index === 0 ? null : `e${index0}`,
-    kind: index0 % 2 === 0 ? 'pi.user' : 'pi.assistant',
+    kind: 'session.message',
     payload: { model: [messageOf(line, index0)] },
     seq: totalLines,
     ordinal: index,
@@ -191,16 +185,14 @@ function makePipeline(cacheCapacity) {
 // ── Cold: a fresh pipeline per iteration (fresh cache, conversion +
 // serialization + hashing from scratch), one prepare each.
 const coldSamples = [];
-const coldPayloadBytes = [];
 const openSamples = [];
 for (let i = 0; i < iters; i += 1) {
   gc();
   const { pipeline, constructMs } = makePipeline(windowSize * 2);
   openSamples.push(constructMs);
   const started = performance.now();
-  const prepared = pipeline.prepare();
+  pipeline.prepare();
   coldSamples.push(performance.now() - started);
-  coldPayloadBytes.push(prepared.totalBytes);
 }
 
 // ── Warm: one pipeline, pre-warmed; the steady-state prepare — cache hits,
@@ -214,7 +206,6 @@ const warmPasses = Number(process.env.WARM_PASSES ?? 5);
 if (!Number.isInteger(warmPasses) || warmPasses < 2) fail(`WARM_PASSES must be an integer >= 2, got "${process.env.WARM_PASSES}"`);
 const warm = makePipeline(windowSize * 2);
 warm.pipeline.prepare(); // warm the segment cache
-let warmPayloadBytes = 0;
 const warmP95s = [];
 const warmP50s = [];
 const perPass = Math.max(4, Math.ceil(iters / warmPasses));
@@ -222,9 +213,8 @@ for (let pass = 0; pass < warmPasses; pass += 1) {
   const warmSamples = [];
   for (let i = 0; i < perPass; i += 1) {
     const started = performance.now();
-    const prepared = warm.pipeline.prepare();
+    warm.pipeline.prepare();
     warmSamples.push(performance.now() - started);
-    warmPayloadBytes = prepared.totalBytes;
   }
   warmP95s.push(percentileMs(warmSamples, 0.95));
   warmP50s.push(percentileMs(warmSamples, 0.5));
@@ -238,7 +228,6 @@ metric('prep.warmP95Ms', percentileMs(measuredWarm, 0.5));
 metric('prep.warmP95MaxMs', Math.max(...measuredWarm));
 metric('prep.warmP50Ms', percentileMs(measuredWarmP50, 0.5));
 metric('prep.warmPasses', measuredWarm.length);
-metric('prep.payloadBytes', warmPayloadBytes);
 metric('prep.manifestBytes', warm.pipeline.manifest().windowBytes);
 metric('prep.windowEntries', warm.pipeline.manifest().segments.length);
 metric('prep.openMs', percentileMs(openSamples, 0.5));
@@ -247,10 +236,48 @@ metric('prep.iters', iters);
 // payload bytes are resident-image data URLs, and the MMU's own accounting.
 const windowImages = [...pageByEntry.keys()];
 const residentImages = windowImages.filter((id) => mmu.statusOf(pageByEntry.get(id)) === 'resident');
-const imageWireBytes = warm.pipeline
-  .prepare()
-  .segments.filter((segment) => segment.entryId.includes('#resident@'))
-  .reduce((sum, segment) => sum + segment.bytes, 0);
+const prepared = warm.pipeline.prepare();
+// The synthetic corpus has only user/assistant records. Hydrate their
+// projected text and images through the same marker decoder the turn uses.
+const records = prepared.records.map(({ role, content }) => ({
+  role,
+  text: content.filter((block) => block.type === 'text').map((block) => block.text).join('\n\n'),
+  images: content.filter((block) => block.type === 'image'),
+}));
+const model = {
+  id: 'bench-image-capable',
+  api: 'openai-completions',
+  provider: 'openai',
+  baseUrl: 'https://bench.invalid/v1',
+  input: ['text', 'image'],
+  reasoning: false,
+  contextWindow: 1_000_000,
+  maxTokens: 1,
+};
+const messages = contextWireMessages({ records, totalBytes: prepared.totalBytes }, model);
+let requestBody;
+const response = await stream(model, normalizeContext({ messages }), {
+  apiKey: 'bench',
+  cacheRetention: 'none',
+  maxRetries: 0,
+  fetch: async (_input, init) => {
+    requestBody = init?.body;
+    return new Response('data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  },
+}).result();
+if (typeof requestBody !== 'string') fail(`provider request was not serialized: ${response.errorMessage ?? response.stopReason}`);
+const payloadBytes = Buffer.byteLength(requestBody);
+if (payloadBytes > maxPayloadBytes) fail(`provider request has ${payloadBytes} bytes, exceeds ${maxPayloadBytes}`);
+const imageUrls = JSON.parse(requestBody).messages.flatMap(({ content }) =>
+  Array.isArray(content)
+    ? content.filter((block) => block.type === 'image_url').map((block) => block.image_url.url)
+    : [],
+);
+if (imageUrls.length !== residentImages.length) {
+  fail(`provider request carries ${imageUrls.length} images, expected ${residentImages.length} resident images`);
+}
+const imageWireBytes = imageUrls.reduce((sum, url) => sum + Buffer.byteLength(url), 0);
+metric('prep.payloadBytes', payloadBytes);
 metric('prep.images', windowImages.length);
 metric('prep.residentImages', residentImages.length);
 metric('prep.imageWireBytes', imageWireBytes);

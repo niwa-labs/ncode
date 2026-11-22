@@ -183,37 +183,18 @@ jobs:
             echo '| --- | --- |'
             grep -E '^prep\.' "$RUNNER_TEMP/bench-fixtures/residency-scale.txt" | sed 's/^/| `/; s/=/` | /; s/$/ |/'
           } >> "$GITHUB_STEP_SUMMARY"
-          # The round-2 judge finding: at the default 256 KiB residency the
-          # gate carries only ~2% of the payload budget as resident bytes,
-          # while the architecture's archetype is ~10 MB resident (<=4
-          # resident x ~2.6 MB images, final-architecture.md:310). This step
-          # measures THAT scale: MMU_RESIDENT_BYTES=9437184 keeps ~151 of the
-          # 200 window images resident (~9.9 MB of resident bytes on the
-          # wire). Gated here: the DETERMINISTIC shape — the resident set is
-          # really present, its bytes land in the payload, and the payload
-          # fits the 12 MB guard — plus BOTH timing budgets. WARM steady
-          # state: prep.warmP95Ms <= 8 (the x1.6-normalized warm row
-          # thresholds.images.json gates at the default scale; ~1.8 ms
-          # locally). COLD: prep.p95Ms <= 50 — the Ф2 acceptance verbatim
-          # ("prep <=50 мс p95 на любой длине истории",
-          # final-architecture.md:404), now enforced at the architectural
-          # scale too. The wave-2 round-3 fix removed the byte-dominated cold
-          # rework: resident-image segments are content-addressed by the CAS
-          # page sha256 (`ContextWireResidency.segments` — pages immutable,
-          # no second truth) and a fresh pipeline reuses their bytes instead
-          # of re-serializing + re-hashing ~9.9 MB of data URLs per cold
-          # start (55.64 ms local / 56.6 ms judge-run BEFORE the fix; ~27 ms
-          # after, ~2x headroom to the 50 ms row). ITERS=100 (not the default
-          # 50) tightens the p95 estimate — the nearest-rank p95 tolerates
-          # proportionally more single-sample scheduler/GC outliers, the same
-          # shared-runner-noise discipline the warm row's median-of-windows
-          # normalization applies.
+          # A 9 MiB MMU budget keeps about 151 of the 200 window images
+          # resident. The bench measures cold and warm pipeline prep, then
+          # captures the serialized provider request through a local mock
+          # transport. The request must carry at least 9 MB of image data
+          # URLs and fit the 12 MiB payload budget. One hundred iterations
+          # stabilize the p95 estimate on shared runners.
           [ "$resident" -ge 1 ] || { echo "residency scale: residentImages=$resident, expected >= 1"; exit 1; }
           [ "$wire" -ge 9000000 ] || { echo "residency scale: imageWireBytes=$wire, expected >= 9000000 (~10 MB architectural shape)"; exit 1; }
           [ "$payload" -le 12582912 ] || { echo "residency scale: payloadBytes=$payload > 12582912 (the 12 MB payload guard)"; exit 1; }
           [ "$(awk "BEGIN{print ($warmP95 <= 8)}")" = "1" ] || { echo "residency scale: prep.warmP95Ms=$warmP95 > 8 (the normalized warm budget)"; exit 1; }
           [ "$(awk "BEGIN{print ($coldP95 <= 50)}")" = "1" ] || { echo "residency scale: prep.p95Ms=$coldP95 > 50 (the Ф2 cold prep budget, final-architecture.md:404)"; exit 1; }
-      - name: Corpus equivalence gate (Ф2 — compiler bytes = full replay + stringify, 100% of heads)
+      - name: Corpus equivalence gate (Ф2 — compiler bytes = full replay + stringify)
         env: *bench-runtime
         run: |
           FIXTURE="$(ls "$RUNNER_TEMP"/bench-fixtures/messages-*.jsonl)" \
