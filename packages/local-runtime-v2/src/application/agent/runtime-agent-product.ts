@@ -72,7 +72,7 @@ export function createRuntimeAgentProduct(
           ...turnInput,
           miniappAvailable,
         });
-        if (turnInput.toolsDisabled) return base;
+        if (turnInput.toolsDisabled || turnInput.noBuiltinTools === true) return base;
         const capability = browserUse.resolveTurnCapability({
           sessionId: turnInput.session.sessionId,
           turnId: turnInput.turnId,

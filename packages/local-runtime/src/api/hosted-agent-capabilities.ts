@@ -188,6 +188,8 @@ export function createHostedAgentCapabilities(
           HostedAgentCapabilitiesHost['buildOwnerTurnToolSources']
         >[0]['builtinCapabilities'];
         readonly toolsDisabled: boolean;
+        /** External-tools-only mode: native sources off, configured MCP only. */
+        readonly noBuiltinTools?: boolean;
         readonly cuModeActive: boolean;
         readonly agentMemoryEnabled?: boolean;
         readonly agentMemoryReadNames?: readonly string[];
@@ -217,6 +219,9 @@ export function createHostedAgentCapabilities(
           builtinCapabilities,
           ...(restrictions.disableMavis ? { mavisHistoryOnly: true } : {}),
           toolsDisabled: input.toolsDisabled,
+          ...(input.noBuiltinTools === undefined
+            ? {}
+            : { noBuiltinTools: input.noBuiltinTools }),
           memoryEnabled: memoryGloballyEnabled,
           memoryReadEnabled,
           memoryWriteEnabled,

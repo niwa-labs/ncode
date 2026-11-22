@@ -29,6 +29,10 @@ Start the adapter with `ncode acp`. Its `initialize` response lists supported ex
 
 After reconnecting, a client can call `mcode/session/turn_status` for the active turn, latest recorded activity and queue depth. It can queue a follow-up for a session opened by another client. The `mcode/` prefix is part of the protocol. [ACP extensions](../packages/tui/src/acp/extensions.ts)
 
+Use `ncode acp --no-builtin-tools` to expose configured MCP tools directly and disable built-in tools. This includes MCP servers from the user profile and workspace. The same flag works with `ncode exec`.
+
+For client-supplied tools only, run `ncode acp --no-builtin-tools --session-mcp-only`. Supply the session’s MCP servers in `session/new` and send them again in `session/load` after restarting the process. An empty list exposes no tools. Both flags run the ACP runtime in-process. Their process environment equivalents are `MCODE_NO_BUILTIN_TOOLS=1` and `MCODE_SESSION_MCP_ONLY=1`.
+
 ## How does a long conversation fit?
 
 Each session has its own SQLite history store with Zstd compression. For each model call, the runtime selects the messages it needs from that history. It can reuse previously converted messages and use placeholders for images outside the media budget. In the default durable mode, Ncode starts preparing a summary in the background at 50% of the model window. At the blocking threshold (75% by default, capped to leave the model its reserve), the next call can join that job. Messages that arrived while the summary was being written stay in the recent tail. Earlier turns remain in the transcript. [Session storage](../packages/local-runtime-v2/src/service/session-system/messages/history/durable-session-stores.ts) · [Model context](../packages/local-runtime-v2/src/service/turn-system/compaction/context-wire.ts)

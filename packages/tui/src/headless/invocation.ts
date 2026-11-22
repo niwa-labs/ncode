@@ -2,6 +2,8 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 
+import { noBuiltinToolsFromEnv } from '@mavis/config';
+
 import type { TuiAttachment } from '../application/invocation.js';
 import { assertValidOutputSchema } from './contract.js';
 import { prepareDiagnosticsDirectory } from './diagnostics.js';
@@ -49,6 +51,8 @@ export interface RawTuiExecOptions extends RawSystemPromptOptions {
   profile?: string;
   /** Commander's negated `--no-daemon` flag (absent ⇒ true). */
   daemon?: boolean;
+  /** Commander's negated `--no-builtin-tools` flag (absent ⇒ true). */
+  builtinTools?: boolean;
 }
 
 export interface ResolvedTuiExecInvocation {
@@ -75,6 +79,12 @@ export interface ResolvedTuiExecInvocation {
    * (overrides MCODE_SERVER_MODE) — isolated/wrapper exec runs.
    */
   noDaemon?: boolean;
+  /**
+   * Explicit `--no-builtin-tools`: every built-in tool is disabled and only
+   * MCP servers remain. Implies `noDaemon` — a shared daemon would not see
+   * this process's request.
+   */
+  noBuiltinTools?: boolean;
   systemPromptOverrides?: SystemPromptOverrides;
 }
 
@@ -218,6 +228,7 @@ export async function resolveTuiExecInvocation(
     ...(outputLastMessagePath === undefined ? {} : { outputLastMessagePath }),
     ...(diagnosticsDir === undefined ? {} : { diagnosticsDir }),
     ...(options.daemon === false ? { noDaemon: true } : {}),
+    ...(options.builtinTools === false ? { noBuiltinTools: true } : {}),
     ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
   };
 }
@@ -226,6 +237,14 @@ async function resolveTuiExecReviewInvocation(
   options: RawTuiExecOptions,
   signal?: AbortSignal,
 ): Promise<ResolvedTuiExecInvocation> {
+  if (options.builtinTools === false || noBuiltinToolsFromEnv(process.env)) {
+    // The review guard admits only the built-in inspection tools, so a
+    // restricted review would leave the model with nothing it may call. The
+    // environment counts so an inherited mode fails with the same error.
+    throw invocationError(
+      'exec review needs the built-in inspection tools; --no-builtin-tools is not supported here.',
+    );
+  }
   const format = readEnum('--output-format', options.outputFormat ?? 'text', [
     'text',
     'json',

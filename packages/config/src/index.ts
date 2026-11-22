@@ -226,9 +226,13 @@ export {
   isAgentBuiltinMcpToolEnabled,
   isAgentBuiltinSkillEnabled,
   isAgentBuiltinToolEnabled,
+  noBuiltinToolsFromEnv,
+  NO_BUILTIN_TOOLS_ENV,
   parseAgentCapabilityConfig,
   parseAgentsConfig,
   resolveAgentCapabilities,
+  sessionMcpOnlyFromEnv,
+  SESSION_MCP_ONLY_ENV,
 } from './agent-capabilities.js';
 export type {
   AgentBuiltinMcpToolId,

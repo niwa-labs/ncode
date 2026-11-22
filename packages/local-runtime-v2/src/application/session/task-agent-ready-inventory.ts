@@ -1,3 +1,4 @@
+import { noBuiltinToolsFromEnv } from '@mavis/config';
 import type { AgentExecutionProfile } from '../../service/agent/index.js';
 import type { InitializedMcpService } from '../../service/mcp/index.js';
 import type { InitializedPluginService } from '../../service/plugin-system/index.js';
@@ -117,6 +118,7 @@ async function capture(
       ...resourceScope,
       builtinCapabilities,
       toolsDisabled: process.env.MAVIS_LOCAL_RUNTIME_DISABLE_TOOLS === '1',
+      noBuiltinTools: noBuiltinToolsFromEnv(process.env),
       cuModeActive: input.product.turnRuntimeFacts.snapshot().cuModeActive,
       ...(lease.capabilities ? { desktopCapabilities: lease.capabilities } : {}),
     });

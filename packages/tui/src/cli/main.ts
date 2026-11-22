@@ -5,13 +5,12 @@ import {
 } from '../build-info.js';
 import type { RawTuiExecOptions } from '../headless/invocation.js';
 import type { MavisRegion } from '@mavis/config';
-import { createTuiProgram, type TuiInteractiveLaunchRequest } from './program.js';
+import { createTuiProgram, type CreateTuiProgramOptions, type TuiInteractiveLaunchRequest } from './program.js';
 import type { McodeProviderCliRequest } from './provider-command.js';
 import type { McodePluginCliRequest } from '../plugin/contract.js';
 import { tuiErrorDiagnostic } from '../user-facing-failure.js';
 import { configureTuiNetworkProxy } from './network-proxy.js';
 import { consumeLoginRestartHandoff } from '../tui/login-restart-handoff.js';
-import type { SystemPromptOverrides } from './system-prompt-options.js';
 import type { McodeTelemetryCliAction } from './telemetry-command.js';
 import type { McodeProfileCliRequest } from './profile-command.js';
 import type { McodeDaemonCliRequest } from './run-daemon-command.js';
@@ -42,6 +41,8 @@ interface LaunchTuiInput extends TuiInteractiveLaunchRequest {
   readonly version: string;
 }
 
+type AcpArgs = Parameters<NonNullable<CreateTuiProgramOptions['runAcp']>>;
+
 export interface RunTuiCliDependencies {
   readonly processRef?: TuiCliProcess;
   readonly platform?: NodeJS.Platform;
@@ -53,13 +54,7 @@ export interface RunTuiCliDependencies {
     options: RawTuiExecOptions,
     version: string,
   ) => Promise<void>;
-  readonly runAcp?: (
-    version: string,
-    lane?: string,
-    systemPromptOverrides?: SystemPromptOverrides,
-    profile?: string,
-    noDaemon?: boolean,
-  ) => Promise<void>;
+  readonly runAcp?: (version: string, ...args: AcpArgs) => Promise<void>;
   readonly runLogin?: (
     region?: MavisRegion,
     openBrowser?: boolean,
@@ -162,9 +157,9 @@ export async function runTuiCli(dependencies: RunTuiCliDependencies = {}): Promi
         );
         completedCommandExitMode = 'natural';
       },
-      runAcp: async (lane, systemPromptOverrides, profile, noDaemon) => {
+      runAcp: async (...args) => {
         const runAcp = dependencies.runAcp ?? defaultRunAcp;
-        await runAcp(MINIMAX_CODE_VERSION, lane, systemPromptOverrides, profile, noDaemon);
+        await runAcp(MINIMAX_CODE_VERSION, ...args);
         completedCommandExitMode = 'natural';
       },
       runLogin: async (region, openBrowser, lane, profile) => {
@@ -307,15 +302,9 @@ async function defaultRunExec(
   await runTuiExecCommand(prompt, options, version);
 }
 
-async function defaultRunAcp(
-  version: string,
-  lane?: string,
-  systemPromptOverrides?: SystemPromptOverrides,
-  profile?: string,
-  noDaemon?: boolean,
-): Promise<void> {
+async function defaultRunAcp(version: string, ...args: AcpArgs): Promise<void> {
   const { runTuiAcpCommand } = await import('./run-acp-command.js');
-  await runTuiAcpCommand(version, {}, lane, systemPromptOverrides, profile, noDaemon);
+  await runTuiAcpCommand(version, {}, ...args);
 }
 
 async function defaultRunLogin(
