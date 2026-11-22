@@ -28,6 +28,12 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 
 ![Ncode 终端欢迎界面，显示本地服务在线，当前尚未登录，工作区为 pocket-pet](docs/assets/ncode-terminal.png)
 
+## 在 Niwa 中运行 Ncode
+
+[Niwa](https://github.com/niwa-labs/niwa) 在本地运行编程代理和工作流。它的 Ncode 适配器会为每个会话启动独立的 ACP 进程。工作流可以只向模型提供当前任务所需的工具，例如仅提供一个用于提交答案的 MCP 工具。
+
+要使用此模式，请运行 `ncode acp --no-builtin-tools --session-mcp-only`。Niwa 会在创建会话时传入工具，并在新进程中恢复会话时再次传入。
+
 ## 快速开始
 
 ### 1. 安装 Ncode
