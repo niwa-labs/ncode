@@ -285,7 +285,7 @@ pnpm ncode
 node /absolute/path/to/minimax-code/dist/cli.js
 ```
 
-本仓库构建 **Niwa Labs Ncode 0.1.1**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
+本仓库构建 **Niwa Labs Ncode 0.1.2**。上游基线和内置工具版本见[源码状态](docs/open-source-status.md#version-and-evidence-baseline)。
 
 ## 文档与贡献
 
