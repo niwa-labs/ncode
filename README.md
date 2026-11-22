@@ -4,6 +4,7 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 
 ## What Ncode adds to MCode
 
+- **Receive the complete answer over ACP.** If the client has received only reasoning, Ncode sends the full answer. If part of the answer has streamed, Ncode sends just the remaining text.
 - **Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax to claim the day’s available credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it too.
 - **Close the terminal, keep the task.** Ncode’s local daemon owns the turn. Reopen the workspace with `ncode --continue` to see what happened. If a subagent is still working, press Enter to steer the parent now or Alt+Enter to queue your next request.
 - **Scroll back from your editor.** MCode can already resume an ACP session. Ncode adds `session/history`: a compatible client can page through earlier messages, tool calls, results and compaction summaries without attaching to the session. It can also check whether a turn is active and how much input is queued.
