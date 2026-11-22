@@ -19,7 +19,6 @@ import {
 import {
   AGENT_BUILTIN_MCP_TOOL_IDS,
   AGENT_BUILTIN_TOOL_IDS,
-  sessionMcpOnlyFromEnv,
 } from '@mavis/config';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -230,14 +229,10 @@ export function buildLocalTurnToolCatalog(
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const inventory = filterLocalTurnCapabilityInventory(input);
   const { nativeTools, mcpEntries, threadGoalTools } = inventory;
-  // External-tools-only mode holds the harness contract at the final catalog
-  // too: no native tool is re-added here. Session-MCP-only mode (the harness
-  // supplied the servers) additionally keeps its MCP entries inline — the
-  // harness names ARE the contract, so tool_search deferral would hide them.
+  // Keep external tools directly callable without adding built-in lookup tools.
   const externalOnly = input.sources.externalToolsOnly === true;
-  const harnessScoped = sessionMcpOnlyFromEnv(input.env ?? process.env);
   const model = input.llmModel;
-  const plan = harnessScoped
+  const plan = externalOnly
     ? { deferred: false as const, inlineTools: mcpEntries.map((entry) => entry.tool) }
     : planMcpDisclosure({ entries: mcpEntries, model, options });
   const tools = plan.deferred
@@ -280,7 +275,7 @@ export function buildLocalTurnToolCatalog(
     options,
     effectivePluginSkills,
     surface: input.agentProfile?.surface ?? 'interactive',
-    ...(input.hostCapabilityRegistry
+    ...(input.hostCapabilityRegistry && !externalOnly
       ? { hostCapabilityRegistry: input.hostCapabilityRegistry }
       : {}),
     ...(input.userText !== undefined ? { userText: input.userText } : {}),

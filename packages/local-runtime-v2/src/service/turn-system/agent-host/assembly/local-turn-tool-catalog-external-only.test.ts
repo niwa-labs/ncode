@@ -83,18 +83,18 @@ describe('external-tools-only catalog policy', () => {
       llmModel: model,
       sources,
       config,
-      env: { MCODE_SESSION_MCP_ONLY: '1' },
+      env: {},
     });
     const inline = harnessScoped.tools.map((entry) => entry.def.name);
     expect(inline).toContain('mcp__harness__submit_answer');
     expect(inline).not.toContain('tool_search');
     expect(inline).not.toContain('mcp_invoke');
 
-    // Control: without the session scope the same options defer the entry.
+    // Control: with built-ins enabled the same options defer the entry.
     const deferred = buildLocalTurnToolCatalog({
       sessionId: 's',
       llmModel: model,
-      sources,
+      sources: { ...sources, externalToolsOnly: false },
       config,
       env: {},
     });

@@ -96,9 +96,10 @@ it("session-MCP-only mode connects only the session's own servers", async () => 
 
   // Call-time enforcement: even a direct call naming the skipped server
   // must fail instead of reaching it.
+  expect(await service.listNativeTools({ sessionId: "ses_harness", workspaceRoot: workspace })).toHaveLength(1);
   await expect(
     service.call("stray", "probe", {}, { context: { sessionId: "ses_harness", workspaceRoot: workspace } }),
-  ).rejects.toThrow(/outside this session's server scope/u);
+  ).resolves.toMatchObject({ isError: true });
 
   // Control: without the mode both servers are discovered.
   vi.unstubAllEnvs();

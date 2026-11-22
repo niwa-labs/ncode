@@ -29,7 +29,9 @@ Start the adapter with `ncode acp`. Its `initialize` response lists supported ex
 
 After reconnecting, a client can call `mcode/session/turn_status` for the active turn, latest recorded activity and queue depth. It can queue a follow-up for a session opened by another client. The `mcode/` prefix is part of the protocol. [ACP extensions](../packages/tui/src/acp/extensions.ts)
 
-A harness that supplies its own tools starts the adapter with `ncode acp --no-builtin-tools` (or sets `MCODE_NO_BUILTIN_TOOLS=1` for the process). Every built-in tool, the bundled Matrix MCP server, thread-goal tools and the codemode runtime are then dropped from every turn's toolset, while the configured MCP servers (session-scoped or from the data dir) remain for users who want their own servers without the built-ins. The filtering sits at the tool-source level rather than per tool name, so built-ins added by later versions stay covered. For harness sessions that must see exactly the tools the client passes in `session/new`, add `--session-mcp-only` (`MCODE_SESSION_MCP_ONLY=1`): turn discovery then connects only the session's own servers, and data-dir or workspace declarations are skipped before any connection, so a workspace under review cannot start its own MCP server. Both flags host the runtime in the adapter process (`--no-daemon` semantics), because a shared daemon started without the variables would not honor the request. `ncode exec --no-builtin-tools` applies the built-ins-off mode to a one-shot run.
+Use `ncode acp --no-builtin-tools` to expose configured MCP tools directly and disable built-in tools. This includes MCP servers from the user profile and workspace. The same flag works with `ncode exec`.
+
+For client-supplied tools only, run `ncode acp --no-builtin-tools --session-mcp-only`. Supply the session’s MCP servers in `session/new` and send them again in `session/load` after restarting the process. An empty list exposes no tools. Both flags run the ACP runtime in-process. Their process environment equivalents are `MCODE_NO_BUILTIN_TOOLS=1` and `MCODE_SESSION_MCP_ONLY=1`.
 
 ## How does a long conversation fit?
 

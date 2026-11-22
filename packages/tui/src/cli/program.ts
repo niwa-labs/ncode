@@ -188,18 +188,7 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
         const noDaemon = commandOptions.daemon === false;
         const noBuiltinTools = commandOptions.builtinTools === false;
         const sessionMcpOnly = commandOptions.sessionMcpOnly === true;
-        if (systemPromptOverrides)
-          return runAcp(
-            activeLane,
-            systemPromptOverrides,
-            profile,
-            noDaemon,
-            noBuiltinTools,
-            sessionMcpOnly,
-          );
-        return activeLane
-          ? runAcp(activeLane, undefined, profile, noDaemon, noBuiltinTools, sessionMcpOnly)
-          : runAcp(undefined, undefined, profile, noDaemon, noBuiltinTools, sessionMcpOnly);
+        return runAcp(activeLane, systemPromptOverrides, profile, noDaemon, noBuiltinTools, sessionMcpOnly);
       },
     );
 
