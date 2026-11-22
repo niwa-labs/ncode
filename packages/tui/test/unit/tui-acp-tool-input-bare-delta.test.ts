@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from 'vitest';
 
-import { TuiAcpUpdateProjector } from "../../src/acp/updates.js";
+import { TuiAcpUpdateProjector } from '../../src/acp/updates.js';
 
 /**
  * Incident 2026-11-15: the run ring of an ACP integrator (kagero) pinned
@@ -9,93 +9,89 @@ import { TuiAcpUpdateProjector } from "../../src/acp/updates.js";
  * assembled only by execution start — so the wire carried a bare call and the
  * context-carrying correction rode a tool_call_update the ring never reads.
  */
-describe("TuiAcpUpdateProjector — bare streaming deltas", () => {
-  it("suppresses a non-terminal delta without input and emits the start with its input", () => {
+describe('TuiAcpUpdateProjector — bare streaming deltas', () => {
+  it('suppresses a non-terminal delta without input and emits the start with its input', () => {
     const projector = new TuiAcpUpdateProjector();
 
     const bare = projector.project({
-      type: "delta",
-      toolCalls: [{ id: "call-1", name: "bash", status: "preparing" }],
+      type: 'delta',
+      toolCalls: [{ id: 'call-1', name: 'bash', status: 'preparing' }],
     });
     expect(bare).toHaveLength(0);
 
     const started = projector.project({
-      type: "delta",
+      type: 'delta',
       toolCalls: [
         {
-          id: "call-1",
-          name: "bash",
-          status: "started",
-          input: { command: "pnpm test" },
+          id: 'call-1',
+          name: 'bash',
+          status: 'started',
+          input: { command: 'pnpm test' },
         },
       ],
     });
     expect(started).toHaveLength(1);
-    if (started[0]?.sessionUpdate !== "tool_call") {
+    if (started[0]?.sessionUpdate !== 'tool_call') {
       throw new Error(`expected tool_call, got ${started[0]?.sessionUpdate}`);
     }
     expect(started[0]).toMatchObject({
-      rawInput: { command: "pnpm test" },
+      rawInput: { command: 'pnpm test' },
       toolCallId: started[0].toolCallId,
     });
   });
 
-  it("always surfaces terminal outcomes, even without input", () => {
+  it('always surfaces terminal outcomes, even without input', () => {
     const projector = new TuiAcpUpdateProjector();
     const failed = projector.project({
-      type: "delta",
-      toolCalls: [
-        { id: "call-x", name: "bash", status: "failed", error: "boom" },
-      ],
+      type: 'delta',
+      toolCalls: [{ id: 'call-x', name: 'bash', status: 'failed', error: 'boom' }],
     });
     expect(failed).toHaveLength(1);
-    if (failed[0]?.sessionUpdate !== "tool_call") {
+    if (failed[0]?.sessionUpdate !== 'tool_call') {
       throw new Error(`expected tool_call, got ${failed[0]?.sessionUpdate}`);
     }
-    expect(failed[0]).toMatchObject({ status: "failed" });
+    expect(failed[0]).toMatchObject({ status: 'failed' });
   });
 
-  it("does not suppress anonymous (id-less) calls — they cannot be superseded", () => {
+  it('does not suppress anonymous (id-less) calls — they cannot be superseded', () => {
     const projector = new TuiAcpUpdateProjector();
     const anonymous = projector.project({
-      type: "delta",
-      toolCalls: [{ name: "bash", status: "preparing" }],
+      type: 'delta',
+      toolCalls: [{ name: 'bash', status: 'preparing' }],
     });
     expect(anonymous.length).toBeGreaterThan(0);
   });
 });
 
-describe("TuiAcpUpdateProjector — final assistant text", () => {
+describe('TuiAcpUpdateProjector — final assistant text', () => {
   it.each([
-    ["thought only", "", ["hello", " world"]],
-    ["partial text spanning parts", "hello w", ["orld"]],
-    ["fully streamed text", "hello world", []],
-  ] as const)("reconciles a snapshot after %s", (_case, content, expected) => {
+    ['thought only', '', ['hello', ' world']],
+    ['partial text spanning parts', 'hello w', ['orld']],
+    ['fully streamed text', 'hello world', []],
+  ] as const)('reconciles a snapshot after %s', (_case, content, expected) => {
     const projector = new TuiAcpUpdateProjector();
     const message = {
-      id: "B",
-      role: "assistant" as const,
+      id: 'B',
+      role: 'assistant' as const,
       parts: [
-        { type: "thinking" as const, content: "plan" },
-        { type: "text" as const, content: "hello" },
-        { type: "text" as const, content: " world" },
+        { type: 'thinking' as const, content: 'plan' },
+        { type: 'text' as const, content: 'hello' },
+        { type: 'text' as const, content: ' world' },
       ],
     };
     projector.project({
-      type: "delta",
-      messageId: "B",
-      thinking: "plan",
+      type: 'delta',
+      messageId: 'B',
+      thinking: 'plan',
       content,
     });
-    expect(projector.project({ type: "message", message })).toEqual(
+    expect(projector.project({ type: 'message', message })).toEqual(
       expected.map((text) => ({
-        sessionUpdate: "agent_message_chunk",
-        messageId: "B",
-        content: { type: "text", text },
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'B',
+        content: { type: 'text', text },
       })),
     );
-    expect(
-      projector.project({ type: "messages-replaced", messages: [message] }),
-    ).toEqual([]);
+    expect(projector.project({ type: 'messages-replaced', messages: [message] })).toEqual([]);
   });
 });
