@@ -74,7 +74,8 @@ export function releaseManifest(importers, version) {
     target[name] = [...versions][0];
   }
   return {
-    name: identity.packageName, version, private: true, type: 'module', license: 'MIT',
+    name: identity.packageName, version, type: 'module', license: 'MIT',
+    ...(identity.packageName === '@niwa-labs/ncode' ? { publishConfig: { access: 'public' } } : { private: true }),
     description: upstream
       ? 'MiniMax Code CLI built from the tagged public source.'
       : source.description,
@@ -106,7 +107,7 @@ export async function packageCliRelease({ tag, out }) {
 
 ${manifest.description}
 Built locally from source commit ${revision}.
-Install this tar.gz with npm. Node.js must satisfy the package engines requirement.
+${identity.packageName === '@niwa-labs/ncode' ? 'Install with `npm install --global @niwa-labs/ncode`.' : 'Install this tar.gz with npm.'} Node.js must satisfy the package engines requirement.
 Keep optional dependencies enabled and allow better-sqlite3 installation scripts.
 Run \`${identity.command}\` after installation. ${isUpstreamCliSource(source) ? '' : 'The mcode command is also available for existing integrations.'}
 Use a separate npm prefix and profile to keep local testing isolated.

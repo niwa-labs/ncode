@@ -29,7 +29,14 @@ Ncode 是 Niwa Labs 独立维护的终端编程助手，基于 MiniMax Code（MC
 
 ## 快速开始
 
-### 1. 构建 Niwa Labs 分支
+### 1. 安装 Ncode
+
+```sh
+npm install --global @niwa-labs/ncode
+ncode --version
+```
+
+#### 从源码构建
 
 在本分支的工作目录中使用受支持的 Node.js 和 pnpm 9.12.0。
 

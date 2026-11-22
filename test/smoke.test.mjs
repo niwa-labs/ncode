@@ -59,7 +59,7 @@ test("CLI version and command help work outside the source directory", (t) => {
     [["--version"], version],
     [["--help"], "Ncode — terminal coding agent for MiniMax"],
     [["exec", "--help"], "prompt"],
-    [["update"], "Update Ncode by rebuilding a newer Niwa Labs source checkout."],
+    [["update"], "npm install --global @niwa-labs/ncode"],
   ]) {
     const result = spawnSync(process.execPath, [cli, ...args], {
       ...options,

@@ -1,6 +1,6 @@
 # Source status
 
-Niwa Labs distributes Ncode as source. MiniMax publishes the official
+Niwa Labs distributes Ncode as source and as the npm package `@niwa-labs/ncode`. MiniMax publishes the official
 installers and registry packages.
 
 ## Version and evidence baseline

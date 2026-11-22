@@ -1,5 +1,9 @@
 # Installation packages and source builds
 
+## Install Ncode from npm
+
+Run `npm install --global @niwa-labs/ncode`, then open `ncode`. Run the same install command to update.
+
 ## Install Ncode from source
 
 Open your checkout of the Niwa Labs fork and build it below. For MiniMax’s

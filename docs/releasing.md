@@ -3,7 +3,7 @@
 Publish the reviewed source commit on the Ncode fork. Run `pnpm verify`
 from a clean checkout and check the source inventory and licenses in the export.
 The `Source candidate` workflow can build and verify a source archive and
-upload it as a GitHub Actions artifact. The fork builds and updates from source.
+upload it as a GitHub Actions artifact. For npm, build the CLI archive below, verify it, and publish that exact archive with `npm publish ./ncode-X.Y.Z.tar.gz --access public` from its output directory.
 
 ## Check a local CLI archive
 

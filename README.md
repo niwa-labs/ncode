@@ -29,7 +29,14 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 
 ## Quick start
 
-### 1. Build the Niwa Labs fork
+### 1. Install Ncode
+
+```sh
+npm install --global @niwa-labs/ncode
+ncode --version
+```
+
+#### Build from source
 
 From your checkout, run the following with a supported Node.js version and pnpm 9.12.0.
 
