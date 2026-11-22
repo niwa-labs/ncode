@@ -73,9 +73,10 @@
 //            prepare must stay O(delta) at the memoized per-entry stage and
 //            hold the RSS budget at the largest text window the gate prices).
 import { registerHooks } from 'node:module';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -191,7 +192,9 @@ function imageBase64(index) {
 
 // ── Circuit state ────────────────────────────────────────────────────────────
 const casDir = mkdtempSync(join(tmpdir(), 'bench-prepare-cas-'));
-const storeDir = mkdtempSync(join(tmpdir(), 'bench-prepare-store-'));
+const seedStoreDir = process.env.NCODE_BENCH_PREP_SEED_STORE;
+const storeDir = seedStoreDir ?? mkdtempSync(join(tmpdir(), 'bench-prepare-store-'));
+const seedMetadata = join(storeDir, 'bench-seed.json');
 const cas = await openCas(casDir);
 const mmu = createMMU(cas, { maxResidentBytes: mmuResidentBytes });
 
@@ -199,11 +202,9 @@ const mmu = createMMU(cas, { maxResidentBytes: mmuResidentBytes });
 const imageHandleByEntry = new Map();
 /** First bytes of every image's base64 payload; the leak check samples them. */
 const imageLeakSamples = [];
-let imagesInWindow = 0;
-
-let rssMaxMb = 0;
-const sampleRss = () => {
-  rssMaxMb = Math.max(rssMaxMb, rssMiB());
+const rssByPhase = new Map();
+const sampleRss = (phase) => {
+  rssByPhase.set(phase, Math.max(rssByPhase.get(phase) ?? 0, rssMiB()));
 };
 
 function draftOf(index, base64) {
@@ -226,110 +227,160 @@ function draftOf(index, base64) {
 
 // ── Phase 1: corpus → storage-worker → backend → incremental projection ─────
 const backendOptions = heavyImages ? { maxBatchUncompressedBytes: 4 * 1048576 } : {};
-const backend = openSqliteZstdBackend(storeDir, backendOptions);
-const worker = createStorageWorker(sqliteZstdStorageBackend(backend), {
-  windowBytes: backend.maxBatchUncompressedBytes,
-  maxBatchUncompressedBytes: backend.maxBatchUncompressedBytes,
-});
-
-const service = new ProjectionService();
-let appliedSeq = 0; // SEQ_AT_START
-let commitsApplied = 0;
-let foldMs = 0;
-let lastApplyResult = null;
-const gateFailures = [];
-
-/** Applies one backend batch (a readback group) to the projection. */
-function applyGroup(entries) {
-  const seq = entries[0].seq;
-  const started = performance.now();
-  // The projection reads only head === seq, entryCount, the successor order
-  // and the per-entry seq; batchId === seq is a backend invariant
-  // (durable-backend types.ts), uncompressedBytes is exact, compressedBytes
-  // and codec are commit metadata the fold never reads.
-  lastApplyResult = service.apply({
-    seq,
-    batchId: seq,
-    head: seq,
-    entryCount: entries.length,
-    codec: isZstdSupported() ? 'zstd' : 'gzip',
-    compressedBytes: 0,
-    uncompressedBytes: entries.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry.payload), 'utf8'), 0),
-    entries,
+async function seedStore() {
+  const backend = openSqliteZstdBackend(storeDir, backendOptions);
+  const worker = createStorageWorker(sqliteZstdStorageBackend(backend), {
+    windowBytes: backend.maxBatchUncompressedBytes,
+    maxBatchUncompressedBytes: backend.maxBatchUncompressedBytes,
   });
-  foldMs += performance.now() - started;
-  appliedSeq = seq;
-  commitsApplied += 1;
-}
 
-/** Enqueues the batch, flushes it through the worker, reads it back, folds it. */
-async function commitBatch(batch) {
-  if (batch.length === 0) return;
-  for (const entry of batch) await worker.enqueue(entry);
-  await worker.flush();
-  await worker.checkpoint(); // fail-closed durability barrier per batch
-  const readback = backend.readDelta(appliedSeq, readBudgetBytes);
-  let group = [];
-  for (const entry of readback) {
-    if (group.length > 0 && group[0].seq !== entry.seq) {
-      applyGroup(group);
-      group = [];
-    }
-    group.push(entry);
+  const service = new ProjectionService();
+  let appliedSeq = 0; // SEQ_AT_START
+  let commitsApplied = 0;
+  let foldMs = 0;
+  let lastApplyResult = null;
+
+  /** Applies one backend batch (a readback group) to the projection. */
+  function applyGroup(entries) {
+    const seq = entries[0].seq;
+    const started = performance.now();
+    // The projection reads only head === seq, entryCount, the successor order
+    // and the per-entry seq; batchId === seq is a backend invariant
+    // (durable-backend types.ts), uncompressedBytes is exact, compressedBytes
+    // and codec are commit metadata the fold never reads.
+    lastApplyResult = service.apply({
+      seq,
+      batchId: seq,
+      head: seq,
+      entryCount: entries.length,
+      codec: isZstdSupported() ? 'zstd' : 'gzip',
+      compressedBytes: 0,
+      uncompressedBytes: entries.reduce((sum, entry) => sum + Buffer.byteLength(JSON.stringify(entry.payload), 'utf8'), 0),
+      entries,
+    });
+    foldMs += performance.now() - started;
+    appliedSeq = seq;
+    commitsApplied += 1;
   }
-  if (group.length > 0) applyGroup(group);
+
+  /** Enqueues the batch, flushes it through the worker, reads it back, folds it. */
+  async function commitBatch(batch) {
+    if (batch.length === 0) return;
+    for (const entry of batch) await worker.enqueue(entry);
+    await worker.flush();
+    await worker.checkpoint(); // fail-closed durability barrier per batch
+    const readback = backend.readDelta(appliedSeq, readBudgetBytes);
+    let group = [];
+    for (const entry of readback) {
+      if (group.length > 0 && group[0].seq !== entry.seq) {
+        applyGroup(group);
+        group = [];
+      }
+      group.push(entry);
+    }
+    if (group.length > 0) applyGroup(group);
+  }
+
+  try {
+    let batch = [];
+    for (let index = 1; index <= nEntries; index += 1) {
+      let base64;
+      if (imageStep > 0 && index % imageStep === 0) {
+        base64 = imageBase64(index);
+        // Publish the page into the CAS through the MMU now (admit decides
+        // residency, fault publishes the bytes and drops the RAM copy).
+        const bytes = Buffer.from(base64, 'utf8');
+        const sha256 = createHash('sha256').update(bytes).digest('hex');
+        const handle = mmu.page({ sha256, mime: 'image/png', bytes });
+        mmu.admit(handle);
+        await mmu.fault(handle); // CAS round-trip; pendingBytes released
+        imageHandleByEntry.set(`e${index}`, handle);
+        imageLeakSamples.push({ entryId: `e${index}`, sample: base64.slice(0, 48) });
+      }
+      batch.push(draftOf(index, base64));
+      if (batch.length >= chunkEntries) {
+        await commitBatch(batch);
+        batch = [];
+      }
+    }
+    await commitBatch(batch);
+
+    // Window bound: one real compaction control entry through the same
+    // worker → backend → fold path when history exceeds the window.
+    if (nEntries > windowSize) {
+      const firstKeptEntryId = `e${nEntries - windowSize + 1}`;
+      const payload = {
+        summary: `Synthetic compaction of the ${profileLabel} corpus: entries 1..${nEntries - windowSize} replaced by this summary.`,
+        firstKeptEntryId,
+      };
+      await commitBatch([
+        {
+          entryId: 'mcode.compaction#bench',
+          parentId: `e${nEntries}`,
+          kind: COMPACTION_KIND,
+          payload,
+          bytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+        },
+      ]);
+      if (lastApplyResult?.rebuilt !== true) fail('compaction commit did not rewrite the derived view');
+    }
+
+    const windowEntries = service.manifest().segments.length;
+    const expectedWindow = Math.min(windowSize, nEntries);
+    if (windowEntries !== expectedWindow) {
+      fail(`window has ${windowEntries} segments after the fold, expected ${expectedWindow}`);
+    }
+    const windowEntryIds = new Set(service.manifest().segments.map((segment) => segment.entryId));
+    return { capsule: service.capsule(), windowEntries, windowEntryIds, commitsApplied, foldMs };
+  } finally {
+    try {
+      await worker.dispose();
+    } finally {
+      await backend.close();
+    }
+  }
 }
 
+if (seedStoreDir !== undefined) {
+  try {
+    const seed = await seedStore();
+    gc();
+    writeFileSync(seedMetadata, JSON.stringify({
+      ...seed,
+      windowEntryIds: [...seed.windowEntryIds],
+      writerClosedRssMb: rssMiB(),
+    }));
+  } finally {
+    mmu.close();
+    rmSync(casDir, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
+
+async function prepareStore() {
+  if (heavyImages) {
+    // This profile needs its live, process-local MMU handles when reopening.
+    const seed = await seedStore();
+    gc();
+    sampleRss('writerClosed');
+    return seed;
+  }
+  // Open the text fixture from disk after its writer exits. Keep measuring
+  // the closed writer, but its fixture setup heap cannot inflate reader RSS.
+  const writer = spawnSync(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url)], {
+    env: { ...process.env, NCODE_BENCH_PREP_SEED_STORE: storeDir },
+    stdio: 'inherit',
+  });
+  if (writer.error !== undefined) throw writer.error;
+  if (writer.status !== 0) throw new Error(`fixture writer ended with ${writer.signal ?? writer.status}`);
+  const { writerClosedRssMb, windowEntryIds, ...seed } = JSON.parse(readFileSync(seedMetadata, 'utf8'));
+  rssByPhase.set('writerClosed', writerClosedRssMb);
+  return { ...seed, windowEntryIds: new Set(windowEntryIds) };
+}
+
+const gateFailures = [];
 try {
-  let batch = [];
-  for (let index = 1; index <= nEntries; index += 1) {
-    let base64;
-    if (imageStep > 0 && index % imageStep === 0) {
-      base64 = imageBase64(index);
-      // Publish the page into the CAS through the MMU now (admit decides
-      // residency, fault publishes the bytes and drops the RAM copy).
-      const bytes = Buffer.from(base64, 'utf8');
-      const sha256 = createHash('sha256').update(bytes).digest('hex');
-      const handle = mmu.page({ sha256, mime: 'image/png', bytes });
-      mmu.admit(handle);
-      await mmu.fault(handle); // CAS round-trip; pendingBytes released
-      imageHandleByEntry.set(`e${index}`, handle);
-      imageLeakSamples.push({ entryId: `e${index}`, sample: base64.slice(0, 48) });
-    }
-    batch.push(draftOf(index, base64));
-    if (batch.length >= chunkEntries) {
-      await commitBatch(batch);
-      batch = [];
-    }
-  }
-  await commitBatch(batch);
-
-  // Window bound: one real compaction control entry through the same
-  // worker → backend → fold path when history exceeds the window.
-  if (nEntries > windowSize) {
-    const firstKeptEntryId = `e${nEntries - windowSize + 1}`;
-    const payload = {
-      summary: `Synthetic compaction of the ${profileLabel} corpus: entries 1..${nEntries - windowSize} replaced by this summary.`,
-      firstKeptEntryId,
-    };
-    await commitBatch([
-      {
-        entryId: 'mcode.compaction#bench',
-        parentId: `e${nEntries}`,
-        kind: COMPACTION_KIND,
-        payload,
-        bytes: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
-      },
-    ]);
-    if (lastApplyResult?.rebuilt !== true) fail('compaction commit did not rewrite the derived view');
-  }
-
-  const windowEntries = service.manifest().segments.length;
-  const expectedWindow = Math.min(windowSize, nEntries);
-  if (windowEntries !== expectedWindow) {
-    fail(`window has ${windowEntries} segments after the fold, expected ${expectedWindow}`);
-  }
-  const windowEntryIds = new Set(service.manifest().segments.map((segment) => segment.entryId));
+  const { capsule, windowEntries, windowEntryIds, commitsApplied, foldMs } = await prepareStore();
   let imagesInWindow = 0;
   for (const id of windowEntryIds) {
     if (imageHandleByEntry.has(id)) imagesInWindow += 1;
@@ -340,16 +391,16 @@ try {
     return imageHandle !== undefined && mmu.statusOf(imageHandle) === 'resident';
   };
 
-  await worker.dispose();
-  backend.close(); // release the writer marker before the measured opens
-  gc();
-  sampleRss();
-
   // ── Phase 2: the measured lazy head open ───────────────────────────────────
-  const capsule = service.capsule();
   const openSamples = [];
   let opened;
   for (let i = 0; i < openIters; i += 1) {
+    if (opened !== undefined) {
+      // These are independent opens. Release the previous window before
+      // loading the next one, keeping only the final open for preparation.
+      opened = undefined;
+      gc();
+    }
     const started = performance.now();
     // Same options as the writer: the decode cap is per-handle, and the
     // images corpus's >256 KiB frames refuse to decode under the default.
@@ -367,7 +418,7 @@ try {
     // Residency policy backed by the Context MMU: text pages are always
     // resident; image pages follow the MMU's LRU decision.
     const segmentsById = new Map(
-      slice.map((entry) => [
+      slice.filter((entry) => imageHandleByEntry.has(entry.id)).map((entry) => [
         entry.id,
         { entryId: entry.id, byteLen: Buffer.byteLength(JSON.stringify(entry.payload), 'utf8'), kind: entry.kind },
       ]),
@@ -390,17 +441,16 @@ try {
     const ms = performance.now() - started;
     openSamples.push(ms);
     opened = { service: openedService, slice, faultsOf: () => faults };
-    handle.close();
+    await handle.close();
     // Between opens, not inside the timed section: each iteration churns a
     // full parsed window slice (32 MiB of text on the big-window profile)
     // plus its range-read copy, and letting five of those age together grew
     // the allocator's high-water mark the warm loop then inherited. The
     // median (headOpenMs) is computed over these same samples.
     gc();
+    sampleRss('open');
   }
   const headOpenMs = percentileMs(openSamples, 0.5);
-  gc();
-  sampleRss();
 
   // ── Phase 3: payload assembly over the MMU-backed projection ──────────────
   const { service: prepService, slice } = opened;
@@ -497,6 +547,8 @@ try {
   const verifiedStats = verifyBody(verified);
   const bodySha256 = createHash('sha256').update(verified.body).digest('hex');
   const payloadBytes = verified.totalBytes;
+  gc();
+  sampleRss('cold');
 
   // Steady state: the warm cache serves segments as-is, no re-hashing, and
   // the memoized per-entry conversion re-converts only the delta — for a
@@ -513,17 +565,21 @@ try {
   let warmDigest = '';
   verified = undefined;
   for (let i = 0; i < iters; i += 1) {
+    // The previous response is no longer live when the next request starts.
+    // Reclaim that body before allocating the next one. The after-prepare
+    // sample below still holds the current response and the full warm cache.
+    gc();
     const iterStarted = performance.now();
     const prepared = await assemble(false);
     prepSamples.push(performance.now() - iterStarted);
-    warmDigest = createHash('sha256').update(prepared.body).digest('hex');
     // RSS is a LIVE-set metric (the run-all convention: readings after a full
     // GC). Sampling mid-churn instead measured this iteration's uncollected
     // conversion garbage — a ~10 MB resident-image payload churns ~10 MB of
     // data-URL strings per prepare, which read as a phantom +150 MB against
     // the 'RSS <= 500 MB' budget while the live set stayed far below it.
     gc();
-    sampleRss();
+    sampleRss('warm');
+    warmDigest = createHash('sha256').update(prepared.body).digest('hex');
   }
   gc();
 
@@ -571,6 +627,8 @@ try {
   metric('payload.bytes', payloadBytes);
   metric('payload.sha256', bodySha256);
   metric('head.openMs', headOpenMs);
+  const rssMaxMb = Math.max(...rssByPhase.values());
+  for (const [phase, maxMb] of rssByPhase) metric(`rss.${phase}MaxMb`, Number(maxMb.toFixed(1)));
   metric('rss.maxMb', Number(rssMaxMb.toFixed(1)));
   metric('rss.budgetMb', rssBudgetMb);
   metric('mmu.residentBytes', residentPages);
@@ -598,12 +656,6 @@ try {
     console.log(`gate=PASS (prep.p95Ms=${prepP95Ms.toFixed(2)} <= ${prepBudgetMs}; payload.bytes=${payloadBytes} <= ${maxPayloadBytes}; rss.maxMb=${rssMaxMb.toFixed(1)} <= ${rssBudgetMb})`);
   }
 } finally {
-  await worker.dispose().catch(() => {});
-  try {
-    backend.close();
-  } catch {
-    // already closed on the success path
-  }
   mmu.close();
   if (!keep) {
     rmSync(casDir, { recursive: true, force: true });
