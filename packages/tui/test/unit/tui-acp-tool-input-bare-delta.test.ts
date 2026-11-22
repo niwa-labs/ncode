@@ -62,3 +62,36 @@ describe('TuiAcpUpdateProjector — bare streaming deltas', () => {
     expect(anonymous.length).toBeGreaterThan(0);
   });
 });
+
+describe('TuiAcpUpdateProjector — final assistant text', () => {
+  it.each([
+    ['thought only', '', ['hello', ' world']],
+    ['partial text spanning parts', 'hello w', ['orld']],
+    ['fully streamed text', 'hello world', []],
+  ] as const)('reconciles a snapshot after %s', (_case, content, expected) => {
+    const projector = new TuiAcpUpdateProjector();
+    const message = {
+      id: 'B',
+      role: 'assistant' as const,
+      parts: [
+        { type: 'thinking' as const, content: 'plan' },
+        { type: 'text' as const, content: 'hello' },
+        { type: 'text' as const, content: ' world' },
+      ],
+    };
+    projector.project({
+      type: 'delta',
+      messageId: 'B',
+      thinking: 'plan',
+      content,
+    });
+    expect(projector.project({ type: 'message', message })).toEqual(
+      expected.map((text) => ({
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'B',
+        content: { type: 'text', text },
+      })),
+    );
+    expect(projector.project({ type: 'messages-replaced', messages: [message] })).toEqual([]);
+  });
+});
