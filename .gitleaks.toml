@@ -116,7 +116,9 @@ paths = [
 regexTarget = "match"
 regexes = [
   '''^qwen\-token\-plan\-cn\.json":"80824536f0c3cd83ab27424df2d664738cbe3f971b4e568a625432288fa53229"$''',
+  '''^qwen\-token\-plan\-cn\.json":"e0baa915644eea7b2c59c525a1660465e55bea51577ff9cc2e0863ad46b70328"$''',
   '''^qwen\-token\-plan\.json":"0630bf7fea9d8579c7ac990e32c40c3685f9db20b6dbfaf745b361fe5203113c"$''',
+  '''^qwen\-token\-plan\.json":"600e61f7dfad9833ea1c2c31018d2bd544297ad3158b96953c8a70f9ed6ec693"$''',
   '''^xiaomi\-token\-plan\-ams\.json":"34fe47b0a79fec7843a01d542cb64b736e651a3e6691cc851183e5ce3eae0118"$''',
   '''^xiaomi\-token\-plan\-cn\.json":"e69f9704b450dbb34b6db61a7b224dab5e5a91a39af3e505ecca4db8bfdc04f0"$''',
   '''^xiaomi\-token\-plan\-sgp\.json":"fd28cc293208617127ff888873772b7b52160538caa07ca3af641f3208d3ad20"$''',

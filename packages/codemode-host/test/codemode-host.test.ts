@@ -320,6 +320,20 @@ describe('U22: deterministic replay (safe/never; zero gateway invocation) — pl
     expect(verdict).toEqual({ kind: 'never', reason: 'declaration-drift' });
   });
 
+  it('reports a timeout to the caller when a worker script never yields', async () => {
+    const { invoker } = makeInvoker();
+    const output = await executeCodemodeScript({
+      code: 'while (true) {}',
+      parentToolCallId: 'w-timeout',
+      callableTools: [ECHO_TOOL],
+      invoker,
+      sandboxMode: 'worker',
+      timeoutMs: 500,
+    });
+    expect(output.isError).toBe(true);
+    expect(output.text).toContain('Script timed out');
+  });
+
   it('the worker sandbox executes the same script surface (off-thread mode)', async () => {
     const { invoker, invoked } = makeInvoker();
     const output = await executeCodemodeScript({
