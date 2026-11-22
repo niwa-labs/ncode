@@ -1,6 +1,6 @@
 {
   "name": "@niwa-labs/ncode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Ncode by Niwa Labs for MiniMax. An independent fork of MiniMax Code (MCode), built with Pi, with durable sessions, a local daemon and ACP.",

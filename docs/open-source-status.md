@@ -7,7 +7,7 @@ installers and registry packages.
 
 | Concern | Version or revision |
 | --- | --- |
-| Ncode CLI and workspace | 0.1.1 |
+| Ncode CLI and workspace | 0.1.2 |
 | Upstream MCode | 0.7.2 |
 | Git fork base | `3c21163c85a9684030cb147bfef48c6284fa3c46` |
 | Earlier upstream source extraction | `9b9885e42a3cf1a3df1cfa52a46e4fdb034cfcee` in `release/extraction.json` |
