@@ -30,11 +30,11 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 
 ## Niwa and Ncode
 
-Niwa coordinates workflows across coding agents. Ncode runs each coding session in its own ACP process. Together they let a workflow decide what the agent can do and when a person needs to take part.
+Niwa coordinates workflows across coding agents. Choose Ncode as its ACP backend when a workflow needs to control exactly which tools a session can call. Ncode extends the MCode 0.7.2 adapter with client-only tool lists, paged history that a client can read without taking over the session, and a way to check the active turn and queue depth after reconnecting.
 
 - **Choose tools per session.** In Niwa’s `niwa-only` mode, a workflow can grant `task.list` so the agent can inspect its assigned work. Built-in tools and MCP servers from the user profile or workspace stay out of the model’s tool list.
-- **Pick up where you left off.** After a restart, Niwa restores the same session and resends its tool list. Niwa can read past messages, tool calls and results from Ncode’s local history. Other ACP clients can page through history with `session/history` or inspect the active turn and queue a follow-up.
-- **Keep a person in control of tool use.** Niwa can select the permission mode when opening or loading a session, show individual tool decisions and ask the operator to allow a call once or deny it.
+- **Pick up where you left off.** After a restart, Niwa restores the same session and resends its tool list. Niwa can read past messages, tool calls and results from Ncode’s local history. ACP clients can use `session/history` to pair earlier tool calls with their results and `mcode/session/turn_status` to see whether work is still running.
+- **Keep a person in control of tool use.** Niwa can select the permission mode when opening or loading a session, show individual tool decisions and ask the operator to allow a call once or deny it. For requests that support saved decisions, Ncode also offers ACP clients an **Always deny** option.
 - **Ask questions in either direction.** When the agent needs a decision, Niwa presents its questionnaire to the operator and sends the answers back. When a workflow needs a structured answer from the agent, `session.ask` validates the JSON returned over ACP.
 
 For session-only tools, configure the adapter to launch `ncode acp --no-builtin-tools --session-mcp-only`. [Niwa workflow example](https://github.com/niwa-labs/niwa#niwa-and-ncode)
