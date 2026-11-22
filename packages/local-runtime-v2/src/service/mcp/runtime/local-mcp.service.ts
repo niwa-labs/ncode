@@ -1,6 +1,7 @@
 import { ProjectMcpRuntime } from '../project-mcp.service.js';
 import { SessionMcpServers } from './session-servers.js';
 import { projectNativeTools, reserveConfiguredServerNames } from './native-tool-projection.js';
+import { noBuiltinToolsFromEnv, sessionMcpOnlyFromEnv } from '@mavis/config';
 import { McpNameRegistry } from '@mavis/mcp';
 import { coerceRuntimeToolInput } from '@mavis/agent-core/tools';
 import type { RuntimeTool, ToolResult } from '@mavis/agent-core/tools';
@@ -995,6 +996,11 @@ export class LocalMcpService {
     config: LocalMcpServerConfig,
     context?: LocalMcpRuntimeContext,
   ): Promise<McpConnectionTokenOverrides | undefined> {
+    if (sessionMcpOnlyFromEnv(process.env)) {
+      if (!context?.sessionId || this.sessionServers.get(context.sessionId)?.[server] !== config)
+        throw new Error('Session MCP configuration changed before connection.');
+      return this.sessionServers.overrides(context.sessionId, server, config);
+    }
     if (context?.sessionId && this.isSessionServer(server, context)) {
       return this.sessionServers.overrides(context.sessionId, server, config);
     }
@@ -1033,7 +1039,12 @@ export class LocalMcpService {
   }
 
   private async readEffectiveFile(context?: LocalMcpRuntimeContext): Promise<LocalMcpFile> {
-    const base = this.withBuiltinServers(await this.readFile(), context);
+    if (sessionMcpOnlyFromEnv(process.env)) {
+      const session = context?.sessionId ? this.sessionServers.get(context.sessionId) : undefined;
+      return { mcpServers: session ?? {} };
+    }
+    const configured = await this.readFile();
+    const base = noBuiltinToolsFromEnv(process.env) ? configured : this.withBuiltinServers(configured, context);
     const project = await this.enqueueMutation(() => this.projectMcp.resolve(context));
     const session = context?.sessionId ? this.sessionServers.get(context.sessionId) : undefined;
     return { mcpServers: { ...base.mcpServers, ...project, ...session } };

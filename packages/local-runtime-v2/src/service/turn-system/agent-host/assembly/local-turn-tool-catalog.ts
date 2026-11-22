@@ -16,7 +16,10 @@ import {
   type McpDisclosureOptions,
   type McpToolEntry,
 } from '@mavis/agent-tools';
-import { AGENT_BUILTIN_MCP_TOOL_IDS, AGENT_BUILTIN_TOOL_IDS } from '@mavis/config';
+import {
+  AGENT_BUILTIN_MCP_TOOL_IDS,
+  AGENT_BUILTIN_TOOL_IDS,
+} from '@mavis/config';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { Type } from '@sinclair/typebox';
@@ -57,6 +60,8 @@ export interface LocalTurnRawToolSources {
   readonly mcpEntries: readonly McpToolEntry[];
   readonly threadGoalTools: readonly RuntimeTool[];
   readonly cuRuntimeAvailable: boolean;
+  /** External-tools-only mode: native sources are off, configured MCP only. */
+  readonly externalToolsOnly?: boolean;
 }
 
 export interface LocalMcpToolSearchConfig {
@@ -195,7 +200,12 @@ export function filterLocalTurnCapabilityInventory(input: {
     nativeTools,
     mcpEntries,
     threadGoalTools,
-    ...(input.desktopCapabilities
+    // Plugin runtime tools ride `desktopCapabilities`, not the native list:
+    // in external-tools-only mode they are host-owned built-ins and stay off
+    // here — the shared filter covers both the final catalog and the task
+    // capture that freezes this inventory, so a captured ceiling can never
+    // regain them on resume.
+    ...(input.desktopCapabilities && input.sources.externalToolsOnly !== true
       ? {
           desktopCapabilities: filterDesktopCapabilities(
             input.desktopCapabilities,
@@ -219,8 +229,12 @@ export function buildLocalTurnToolCatalog(
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const inventory = filterLocalTurnCapabilityInventory(input);
   const { nativeTools, mcpEntries, threadGoalTools } = inventory;
+  // Keep external tools directly callable without adding built-in lookup tools.
+  const externalOnly = input.sources.externalToolsOnly === true;
   const model = input.llmModel;
-  const plan = planMcpDisclosure({ entries: mcpEntries, model, options });
+  const plan = externalOnly
+    ? { deferred: false as const, inlineTools: mcpEntries.map((entry) => entry.tool) }
+    : planMcpDisclosure({ entries: mcpEntries, model, options });
   const tools = plan.deferred
     ? [
         ...nativeTools,
@@ -235,7 +249,9 @@ export function buildLocalTurnToolCatalog(
     : [
         ...nativeTools,
         ...plan.inlineTools,
-        ...(input.hostCapabilityRegistry ? [createMcpInvokeTool(new Map())] : []),
+        ...(input.hostCapabilityRegistry && !externalOnly
+          ? [createMcpInvokeTool(new Map())]
+          : []),
         ...threadGoalTools,
       ];
 
@@ -259,7 +275,7 @@ export function buildLocalTurnToolCatalog(
     options,
     effectivePluginSkills,
     surface: input.agentProfile?.surface ?? 'interactive',
-    ...(input.hostCapabilityRegistry
+    ...(input.hostCapabilityRegistry && !externalOnly
       ? { hostCapabilityRegistry: input.hostCapabilityRegistry }
       : {}),
     ...(input.userText !== undefined ? { userText: input.userText } : {}),
@@ -279,7 +295,7 @@ export function buildLocalTurnToolCatalog(
   // (fresh worker+VM per run); scripts get only the injected tools —
   // no session/store/hidden surfaces, everything routes through ONE invoker.
   const finalTools: RuntimeTool[] = [...merged.tools];
-  if (isRunCodeEnabled(input.beta)) {
+  if (!externalOnly && isRunCodeEnabled(input.beta)) {
     const callable = finalTools.filter((tool) => tool.def.name !== 'run_code');
     const runCode: RuntimeTool = {
       def: {

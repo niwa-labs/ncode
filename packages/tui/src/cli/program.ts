@@ -55,6 +55,8 @@ export interface CreateTuiProgramOptions {
     systemPromptOverrides?: SystemPromptOverrides,
     profile?: string,
     noDaemon?: boolean,
+    noBuiltinTools?: boolean,
+    sessionMcpOnly?: boolean,
   ) => Promise<void>;
   runLogin: (
     region?: MavisRegion,
@@ -157,12 +159,25 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       .option(
         '--no-daemon',
         'host the runtime in this process without the daemon (overrides MCODE_SERVER_MODE)',
+      )
+      .option(
+        '--no-builtin-tools',
+        'disable every built-in tool; configured MCP servers remain (implies --no-daemon)',
+      )
+      .option(
+        '--session-mcp-only',
+        'connect only the MCP servers the client passes to the session (implies --no-daemon)',
       ),
   )
     .allowExcessArguments(false)
     .action(
       (
-        commandOptions: RawSystemPromptOptions & { profile?: string; daemon?: boolean },
+        commandOptions: RawSystemPromptOptions & {
+          profile?: string;
+          daemon?: boolean;
+          builtinTools?: boolean;
+          sessionMcpOnly?: boolean;
+        },
         command: Command,
       ) => {
         const runAcp = requireAcpRunner(options);
@@ -171,11 +186,9 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
         );
         const profile = commandOptions.profile;
         const noDaemon = commandOptions.daemon === false;
-        if (systemPromptOverrides)
-          return runAcp(activeLane, systemPromptOverrides, profile, noDaemon);
-        return activeLane
-          ? runAcp(activeLane, undefined, profile, noDaemon)
-          : runAcp(undefined, undefined, profile, noDaemon);
+        const noBuiltinTools = commandOptions.builtinTools === false;
+        const sessionMcpOnly = commandOptions.sessionMcpOnly === true;
+        return runAcp(activeLane, systemPromptOverrides, profile, noDaemon, noBuiltinTools, sessionMcpOnly);
       },
     );
 

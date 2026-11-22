@@ -212,6 +212,7 @@
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-payload-transform.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-capabilities.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-plugin-hooks.test.ts",
+      "packages/local-runtime-v2/src/service/turn-system/agent-host/assembly/local-turn-tool-catalog-external-only.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/cache-warming/durable-usage-sink.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/cache-warming/session-cache-warming.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/codemode-gate.test.ts",
@@ -251,6 +252,7 @@
       "packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts",
       "packages/local-runtime-v2/test/integration/mcp/local-mcp-public-facade.integration.test.ts",
       "packages/local-runtime-v2/test/integration/mcp/project-mcp.integration.test.ts",
+      "packages/local-runtime-v2/test/integration/mcp/session-mcp-only.integration.test.ts",
       "packages/local-runtime-v2/test/integration/resume-after-owner-death.e2e.test.ts",
       "packages/local-runtime-v2/test/integration/session-stop-cascade.integration.test.ts",
       "packages/local-runtime-v2/test/integration/browser-default-adapter.e2e.test.ts",
@@ -568,6 +570,7 @@
       "packages/tui/test/unit/tui/features/composer/prompt-suggestion.test.ts",
       "packages/local-runtime-v2/src/service/turn-system/agent-host/runner/prompt-suggestion/capture-surface-gate.test.ts",
       "packages/tui/test/unit/checkin-auto-daily.test.ts",
+      "packages/tui/test/unit/no-builtin-tools-cli.test.ts",
       "packages/agent-modules/permission/test/unit/permission/bypass-immune-asks.test.ts",
       "packages/local-runtime-v2/test/unit/turn-system/local-turn-permission-gate-bypass-immune.test.ts",
       "packages/local-runtime-v2/test/unit/turn-system/local-turn-permission-gate-marks.test.ts"

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it, vi } from 'vitest';
-import { resolveAgentCapabilities } from '@mavis/config';
+import { noBuiltinToolsFromEnv, resolveAgentCapabilities } from '@mavis/config';
 import type { IRuntimeEvent } from '@mavis/protocol';
 
 import {
@@ -1270,6 +1270,56 @@ describe('local native turn tools', () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+  it('keeps only configured MCP servers in external-tools-only mode', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'local-native-external-only-'));
+    const runtimeToolsFor = vi.fn(async () => {
+      throw new Error('thread-goal tools must not be assembled in external-tools-only mode');
+    });
+    const entry = (name: string, source: 'builtin' | 'builtin-matrix' | 'configured') => ({
+      tool: { def: { name, description: name, schema: {} } } as never,
+      source,
+      ...(source === 'configured' ? { serverName: 'harness' } : {}),
+    });
+    const mcpService = {
+      listToolEntriesForTurn: vi.fn(async () => [
+        entry('mcp__harness__submit_answer', 'configured'),
+        entry('images_understand', 'builtin-matrix'),
+        entry('web_search', 'builtin'),
+      ]),
+    } as never;
+    try {
+      const sources = await buildLocalTurnToolSources({
+        toolsDisabled: false,
+        noBuiltinTools: true,
+        workspaceRoot: process.cwd(),
+        agentName: 'mavis',
+        dataDir,
+        sessionId: 'external-only-session',
+        mcpService,
+        threadGoal: { runtimeToolsFor } as never,
+        emitBusEvent: () => {},
+      });
+
+      expect(sources.nativeTools).toEqual([]);
+      expect(sources.threadGoalTools).toEqual([]);
+      expect(sources.cuRuntimeAvailable).toBe(false);
+      expect(sources.externalToolsOnly).toBe(true);
+      expect(sources.mcpEntries.map((kept) => kept.tool.def.name)).toEqual([
+        'mcp__harness__submit_answer',
+      ]);
+      expect(runtimeToolsFor).not.toHaveBeenCalled();
+
+      // The env spelling is the harness contract: only an explicit "1" enables it.
+      vi.stubEnv('MCODE_NO_BUILTIN_TOOLS', '1');
+      expect(noBuiltinToolsFromEnv(process.env)).toBe(true);
+      vi.stubEnv('MCODE_NO_BUILTIN_TOOLS', '0');
+      expect(noBuiltinToolsFromEnv(process.env)).toBe(false);
+      vi.unstubAllEnvs();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it('retains only current-session history when the CLI host disables Mavis management', async () => {
     const listMessages = vi.fn(async () => ({ messages: [{ msg_id: 'm1', role: 'user', msg_content: 'Decision' }], hasMore: false }));
     const base = {

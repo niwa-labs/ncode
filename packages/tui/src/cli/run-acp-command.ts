@@ -1,6 +1,13 @@
 import { Console } from 'node:console';
 import type { Readable, Writable } from 'node:stream';
 
+import {
+  NO_BUILTIN_TOOLS_ENV,
+  noBuiltinToolsFromEnv,
+  SESSION_MCP_ONLY_ENV,
+  sessionMcpOnlyFromEnv,
+} from '@mavis/config';
+
 import { serveTuiAcpStdio } from '../acp/stdio.js';
 import { prepareTuiDataDir } from '../runtime/data-dir.js';
 import type { SystemPromptOverrides } from './system-prompt-options.js';
@@ -41,6 +48,8 @@ export async function runTuiAcpCommand(
   systemPromptOverrides?: SystemPromptOverrides,
   profile?: string,
   noDaemon?: boolean,
+  noBuiltinTools?: boolean,
+  sessionMcpOnly?: boolean,
 ): Promise<void> {
   const processRef = dependencies.processRef ?? process;
   const controller = new AbortController();
@@ -62,6 +71,23 @@ export async function runTuiAcpCommand(
     const createRuntime = dependencies.createRuntime ?? lifecycle.createTuiRuntime;
     shutdownRuntime ??= lifecycle.shutdownTuiRuntime;
     const dataDir = await (dependencies.prepareDataDir ?? prepareTuiDataDir)();
+    if (noBuiltinTools) {
+      // The runtime reads the mode from the environment (NO_BUILTIN_TOOLS_ENV),
+      // so the flag's whole job is to publish it before the runtime exists.
+      process.env[NO_BUILTIN_TOOLS_ENV] = '1';
+    }
+    if (sessionMcpOnly) {
+      // Same arrangement for the harness MCP scope (SESSION_MCP_ONLY_ENV).
+      process.env[SESSION_MCP_ONLY_ENV] = '1';
+    }
+    // The environment counts too: an env-only invocation must stay in this
+    // process, because a shared daemon started without the variable would not
+    // honor the request.
+    const externalToolsOnly =
+      noBuiltinTools === true ||
+      sessionMcpOnly === true ||
+      noBuiltinToolsFromEnv(process.env) ||
+      sessionMcpOnlyFromEnv(process.env);
     runtime = await createRuntime({
       dataDir,
       workspaceDir: (dependencies.workspaceDir ?? (() => process.cwd()))(),
@@ -69,7 +95,7 @@ export async function runTuiAcpCommand(
       surface: 'acp',
       ...(lane ? { lane } : {}),
       ...(profile ? { profile } : {}),
-      ...(noDaemon ? { noDaemon: true } : {}),
+      ...(noDaemon || externalToolsOnly ? { noDaemon: true } : {}),
       ...(systemPromptOverrides ? { systemPromptOverrides } : {}),
     });
     await (dependencies.serve ?? serveTuiAcpStdio)({

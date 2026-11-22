@@ -534,5 +534,28 @@ describe('System prompt overrides', () => {
       ),
     ).rejects.toMatchObject({ kind: 'invocation' });
   });
-});
+  it('maps the negated --no-builtin-tools flag onto the resolved invocation', async () => {
+    const restricted = await resolveTuiExecInvocation(
+      'hello',
+      { builtinTools: false },
+      async () => '',
+    );
+    expect(restricted.noBuiltinTools).toBe(true);
+    // The daemon implication is applied by the exec runner, not here: the
+    // invocation only records what the caller asked for.
+    expect(restricted).not.toHaveProperty('noDaemon');
 
+    const plain = await resolveTuiExecInvocation('hello', {}, async () => '');
+    expect(plain).not.toHaveProperty('noBuiltinTools');
+
+    // The review guard only admits built-in inspection tools, so the
+    // combination is rejected instead of producing a review with no tools.
+    await expect(
+      resolveTuiExecInvocation(undefined, { review: true, builtinTools: false }, async () => ''),
+    ).rejects.toMatchObject({
+      kind: 'invocation',
+      message:
+        'exec review needs the built-in inspection tools; --no-builtin-tools is not supported here.',
+    });
+  });
+});

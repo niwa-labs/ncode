@@ -1,5 +1,10 @@
 # Ncode 更新日志
 
+## 0.1.1 · 2026-11-22
+
+- ACP 和 exec 支持通过 `--no-builtin-tools` 禁用内置工具。ACP 客户端还可传入 `--session-mcp-only`，仅加载创建或恢复会话时传入的 MCP 服务器。
+- 基于 MCode 0.7.2，内置 Pi 1.6.0。
+
 ## 0.1.0 · 2026-11-22
 
 - Ncode 基于 MCode 0.7.2，内置 Pi 1.6.0。`ncode --version` 分行显示三个版本，HTTP 请求通过 `ncode/0.1.0` 标识本客户端。
