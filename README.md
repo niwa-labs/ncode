@@ -32,6 +32,8 @@ Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of
 
 [Niwa](https://github.com/niwa-labs/niwa) is a local host for coding agents and workflows. Its Ncode adapter starts a separate ACP process for each session. A workflow can give the model just the tools it needs for a task, such as a single MCP tool for submitting an answer.
 
+In Niwa you can revisit past messages, tool calls and their results, approve a tool once or deny it, and answer an agent’s questionnaire while it waits. Workflows can also ask for a structured answer through `session.ask`: Niwa validates the JSON returned over ACP before using it. Ncode’s ACP extensions let clients page through history, inspect the active turn and steer it or queue a follow-up.
+
 To use that mode, launch `ncode acp --no-builtin-tools --session-mcp-only`. Niwa supplies the tools when it opens the session and supplies them again when it resumes the conversation in a fresh process.
 
 ## Quick start
