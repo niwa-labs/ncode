@@ -281,6 +281,9 @@ importers:
       '@mavis/agent-core':
         specifier: workspace:^
         version: link:../../agent-core
+      '@mavis/shared':
+        specifier: workspace:^
+        version: link:../../shared
     devDependencies:
       '@types/node':
         specifier: ^20

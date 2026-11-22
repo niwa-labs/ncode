@@ -780,7 +780,7 @@ describe('OpenCode Go connection identity', () => {
     const headers = fetchImpl.mock.calls.map((call) => new Headers(call[1]?.headers));
     for (const header of headers) {
       expect(header.get('x-opencode-session')).toMatch(/^[0-9a-f-]{36}$/u);
-      expect(header.get('user-agent')).toBe('MiniMaxCode');
+      expect(header.get('user-agent')).toBe('MiniMaxCode ncode/dev');
     }
     expect(headers[0]?.get('x-opencode-session')).not.toBe(headers[1]?.get('x-opencode-session'));
   });
@@ -823,7 +823,7 @@ describe('Google connection tests through Pi', () => {
       );
       expect(request?.headers.get('x-goog-api-key')).toBe(API_KEY);
       expect(request?.headers.get('x-opencode-session')).toMatch(/^[0-9a-f-]{36}$/u);
-      expect(request?.headers.get('user-agent')).toContain('MiniMaxCode');
+      expect(request?.headers.get('user-agent')).toContain('MiniMaxCode ncode/dev');
       const body = await request?.json();
       expect(body).toMatchObject({
         contents: [{ role: 'user', parts: [{ text: 'ping' }] }],

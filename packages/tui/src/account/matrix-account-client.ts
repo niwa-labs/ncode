@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { createHash } from 'node:crypto';
 
 import type { LocalRuntimeAuthContextSnapshot, MavisBuildEnv, MavisRegion } from '@mavis/config';
@@ -331,7 +332,7 @@ export class TuiMatrixAccountClient {
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
-          'User-Agent': 'MiniMaxCode',
+          'User-Agent': withNcodeUserAgent('MiniMaxCode'),
           Authorization: `Bearer ${accessToken}`,
           ...this.routingHeaders(),
           yy: md5(`${encodeURIComponent(pathWithSearch)}_{}${md5(String(requestTime))}ooui`),
@@ -395,7 +396,7 @@ export class TuiMatrixAccountClient {
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
-          'User-Agent': 'MiniMaxCode',
+          'User-Agent': withNcodeUserAgent('MiniMaxCode'),
           Authorization: `Bearer ${accessToken}`,
           ...this.routingHeaders(),
           yy: md5(`${encodeURIComponent(pathWithSearch)}_${body}${md5(String(requestTime))}ooui`),
@@ -433,7 +434,7 @@ export class TuiMatrixAccountClient {
         headers: {
           Accept: 'application/json',
           'Content-Type': 'application/json',
-          'User-Agent': 'MiniMaxCode',
+          'User-Agent': withNcodeUserAgent('MiniMaxCode'),
           Authorization: `Bearer ${accessToken}`,
           ...this.routingHeaders(),
           yy: md5(`${encodeURIComponent(pathWithSearch)}_{}${md5(String(requestTime))}ooui`),

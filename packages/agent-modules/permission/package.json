@@ -11,7 +11,8 @@
     }
   },
   "dependencies": {
-    "@mavis/agent-core": "workspace:^"
+    "@mavis/agent-core": "workspace:^",
+    "@mavis/shared": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^20",

@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { createHash } from 'node:crypto';
 
 import {
@@ -81,7 +82,7 @@ export function createPublicGatewayRequest(input: {
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
-      'User-Agent': 'MiniMaxCode',
+      'User-Agent': withNcodeUserAgent('MiniMaxCode'),
       Authorization: `Bearer ${input.token}`,
       yy: md5(`${encodeURIComponent(pathWithSearch)}_${yyBody}${md5(String(input.nowMs))}ooui`),
       'x-timestamp': String(second),

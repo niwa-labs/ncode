@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import JSZip from 'jszip';
 import yaml from 'js-yaml';
 
@@ -200,7 +201,7 @@ async function downloadRemoteSkillArchive(archiveUrl: string, fetchImpl: typeof 
   try {
     response = await fetchImpl(archiveUrl, {
       method: 'GET',
-      headers: { 'User-Agent': 'MiniMaxAgent' },
+      headers: { 'User-Agent': withNcodeUserAgent('MiniMaxAgent') },
       signal: AbortSignal.timeout(REMOTE_SKILL_ARCHIVE_TIMEOUT_MS),
     });
   } catch (err) {

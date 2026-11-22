@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { createCipheriv, createHash, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -438,7 +439,7 @@ class LocalTuiIncidentReporter implements TuiIncidentReporter {
       const response = await this.fetchImpl(requestUrl, {
         method: 'POST',
         headers: {
-          'User-Agent': 'MiniMaxAgent',
+          'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
         },

@@ -18,6 +18,7 @@
  * client neither inspects nor redacts event contents.
  */
 
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import {
   getRuntimeBuildEnv,
   getRuntimeRegion,
@@ -101,7 +102,7 @@ export async function sendDesktopErrorBatch(params: SendDesktopErrorBatchParams)
     const response = await params.fetchImpl(requestUrl, {
       method: 'POST',
       headers: {
-        'User-Agent': 'MiniMaxAgent',
+        'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
         'Content-Type': 'application/json',
         // Shared OAuth credential header, consistent with model-resolver and content-safety.
         Authorization: `Bearer ${accessToken}`,

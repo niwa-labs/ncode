@@ -66,6 +66,7 @@ describe('TuiDailyCheckinHttpGateway', () => {
         headers: expect.objectContaining({
           Authorization: 'Bearer token-1',
           yy: expect.any(String),
+          'User-Agent': 'MiniMaxCode ncode/dev',
           'x-signature': expect.any(String),
         }),
       }),

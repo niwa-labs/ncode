@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -458,7 +459,7 @@ export class LocalSkillHubStore {
       response = await (this.options.fetch ?? fetch)(requestUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': 'MiniMaxAgent',
+          'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
           ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
           ...managedBackendRoutingHeaders(
             this.options.routingContextGetter?.(),

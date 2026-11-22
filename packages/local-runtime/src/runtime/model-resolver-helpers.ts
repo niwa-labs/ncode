@@ -54,7 +54,10 @@ export function buildLocalProviderHeaders(input: {
   // endpoints cannot receive a managed routing header accidentally.
   for (const key of Object.keys(headers)) {
     const normalized = key.toLowerCase();
-    if (normalized === 'bedrock-lane' || normalized === 'bedrock_lane') delete headers[key];
+    if (normalized === 'bedrock-lane' || normalized === 'bedrock_lane' ||
+        (input.managedProvider && normalized === 'user-agent')) {
+      delete headers[key];
+    }
   }
   if (input.managedProvider) {
     if (!Object.keys(headers).some((key) => key.toLowerCase() === 'accept-encoding')) {

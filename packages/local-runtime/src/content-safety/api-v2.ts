@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import {
   getRuntimeBuildEnv,
   getRuntimeRegion,
@@ -57,7 +58,7 @@ export async function callLocalSafetyCheckV2(input: {
     const result = await postSafetyCheckV2({
       url,
       headers: {
-        'User-Agent': 'MiniMaxAgent',
+        'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...managedBackendRoutingHeaders(
           input.routingContext,

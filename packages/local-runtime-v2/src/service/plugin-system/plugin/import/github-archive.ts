@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -146,7 +147,7 @@ async function fetchArchive(
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      headers: { 'User-Agent': 'MiniMax-Code' },
+      headers: { 'User-Agent': withNcodeUserAgent('MiniMax-Code') },
       signal: requestSignal(signal, DOWNLOAD_TIMEOUT_MS),
     });
   } catch (error) {

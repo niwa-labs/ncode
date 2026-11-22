@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { LocalSkillHubInstallError } from '../hub-errors.js';
 import type { LocalSkillPreviewRepoInfo } from './archive.js';
 
@@ -162,7 +163,7 @@ async function fetchGithubCommitSha(
       )}`,
       {
         method: 'GET',
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MiniMaxAgent' },
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': withNcodeUserAgent('MiniMaxAgent') },
         signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
       },
     );
@@ -186,7 +187,7 @@ async function fetchGithubDefaultBranch(
   try {
     response = await fetchImpl(`https://api.github.com/repos/${github.owner}/${github.repo}`, {
       method: 'GET',
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MiniMaxAgent' },
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': withNcodeUserAgent('MiniMaxAgent') },
       signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
     });
   } catch {

@@ -188,6 +188,7 @@ interface RecordedRequest {
   readonly ordinal: number;
   readonly url: string;
   readonly method: string;
+  readonly userAgent: string | null;
   readonly rawBody: string;
   readonly body: WireBody;
 }
@@ -228,6 +229,7 @@ class WireFixture {
       ordinal: this.requests.length + 1,
       url,
       method: init?.method ?? 'POST',
+      userAgent: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)).get('user-agent'),
       rawBody,
       body: (parsed ?? {}) as WireBody,
     };
@@ -445,6 +447,7 @@ describe('wire body at the real anthropic-messages serializer boundary', () => {
     expect(fixture.requests).toHaveLength(1);
     const request = fixture.requests[0]!;
     assertRequestShape(request);
+    expect(request.userAgent).toMatch(/^pi\/\S+ .* ncode\/dev$/);
     assertSystemOnce(request);
     // The user text is one text block in one user message — not merged into
     // anything, not repeated.

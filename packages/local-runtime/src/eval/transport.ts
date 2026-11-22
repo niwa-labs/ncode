@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import type { EvalMetaInfo } from '@mavis/shared/eval-meta-info';
 import { logger } from '../common/logger.js';
 import type {
@@ -22,7 +23,7 @@ export async function uploadLocalEvalRequest(input: {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${input.accessToken}`,
-        'User-Agent': 'MiniMaxAgent',
+        'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
         'X-Mavis-Desktop-Channel': 'desktop',
         'Content-Type': 'application/json',
       },

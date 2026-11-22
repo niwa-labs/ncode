@@ -191,6 +191,7 @@ describe('LocalModelResolver', () => {
           options: {
             authMode: 'managed-login',
             apiKey: 'sk-xxx',
+            headers: { 'uSeR-aGeNt': 'stale-agent' },
             baseURL: 'https://agent.minimax.io/mavis/api/v1/llm/v1',
           },
         },
@@ -216,10 +217,11 @@ describe('LocalModelResolver', () => {
     expect(resolved.model.compat?.supportsLongCacheRetention).toBe(false);
     expect(resolved.headers).toMatchObject({
       Authorization: 'Bearer managed-token',
-      'User-Agent': 'MiniMaxAgent',
+      'User-Agent': 'MiniMaxAgent ncode/dev',
       'Accept-Encoding': 'gzip',
       'X-Mavis-Session-Id': 'session-managed',
     });
+    expect(new Headers(resolved.headers).get('user-agent')).toBe('MiniMaxAgent ncode/dev');
     expect(resolved.fileApiGatewayAuth).toMatchObject({
       gatewayHeaders: { Authorization: 'Bearer managed-token' },
       callerIdentityHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -1284,7 +1286,7 @@ describe('OpenCode Go conversation identity', () => {
         });
         const headers = new Headers(resolved.headers);
         expect(headers.get('x-opencode-session')).toBe(sessionId);
-        expect(headers.get('user-agent')).toBe('MiniMaxCode');
+        expect(headers.get('user-agent')).toBe('MiniMaxCode ncode/dev');
         expect(resolved.model.provider).toBe('custom_provider:renamed');
       }
     },

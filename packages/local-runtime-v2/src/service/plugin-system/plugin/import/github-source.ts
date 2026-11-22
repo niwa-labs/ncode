@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { PluginSystemError } from '../../errors.js';
 
 export interface GithubPluginSource {
@@ -331,7 +332,7 @@ async function loadAdvertisedRefs(
     response = await context.fetchImpl(url, {
       headers: {
         Accept: 'application/x-git-upload-pack-advertisement',
-        'User-Agent': 'MiniMax-Code',
+        'User-Agent': withNcodeUserAgent('MiniMax-Code'),
       },
       signal: requestSignal(context.signal, TIMEOUT_MS),
     });
@@ -426,7 +427,7 @@ async function githubGet(url: string, context: GithubRequestContext): Promise<un
   let response: Response;
   try {
     response = await context.fetchImpl(url, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MiniMax-Code' },
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': withNcodeUserAgent('MiniMax-Code') },
       signal: requestSignal(context.signal, TIMEOUT_MS),
     });
   } catch (error) {

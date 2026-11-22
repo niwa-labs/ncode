@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { ThinkingLevel, type IAgentConfig, type IModelRef } from '@mavis/protocol';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel as PiThinkingLevel } from '@earendil-works/pi-agent-core';
@@ -57,7 +58,7 @@ export { lookupLocalModelLimits } from './model-catalog.js';
 
 export const DEFAULT_LOCAL_PI_API: Api = 'anthropic-messages';
 export const MANAGED_PROVIDER_API_KEY_PLACEHOLDER = 'sk-xxx';
-export const MANAGED_PROVIDER_USER_AGENT = 'MiniMaxAgent';
+export const MANAGED_PROVIDER_USER_AGENT = withNcodeUserAgent('MiniMaxAgent');
 const OPENAI_CODEX_PROVIDER = 'openai-codex';
 
 const THINKING_LEVEL_TO_PI: Record<ThinkingLevel, PiThinkingLevel> = {

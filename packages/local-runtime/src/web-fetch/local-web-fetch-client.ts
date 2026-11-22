@@ -1,10 +1,11 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import type {
   LocalWebFetchAdapter,
   LocalWebFetchRetrievalOutcome,
   LocalWebFetchToolInput,
 } from '@mavis/agent-tools/desktop';
 
-const WEB_FETCH_USER_AGENT = 'MiniMaxAgent';
+const WEB_FETCH_USER_AGENT = withNcodeUserAgent('MiniMaxAgent');
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const TEXT_CONTENT_TYPE_PATTERNS = [

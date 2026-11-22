@@ -19,6 +19,7 @@
  * helper so a single PERMISSION_API_BASE table stays the source of truth.
  */
 
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { getPermissionCheckApiUrl } from './classifier/cloud-classify-client.js';
 import { logger, backgroundCtx, getPermissionManagedAuthToken } from './host-utils.js';
 import type {
@@ -77,7 +78,7 @@ export class HttpCloudGatewayClient implements CloudGatewayClient {
       const resp = await fetch(url, {
         method: 'POST',
         headers: {
-          'User-Agent': 'MiniMaxAgent',
+          'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.authTokenProvider() ?? ''}`,
         },

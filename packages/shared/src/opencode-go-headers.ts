@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from './product-build-identity.js';
 /** Go routes inference by conversation, independently of prompt cache settings. */
 export function withOpenCodeGoHeaders(
   baseUrl: string | undefined,
@@ -15,7 +16,7 @@ export function withOpenCodeGoHeaders(
   // Runtime identity wins case-insensitively over stale, static config headers.
   // Connectivity requests have no conversation and receive their own identity.
   merged['x-opencode-session'] = sessionId || crypto.randomUUID();
-  merged['user-agent'] = 'MiniMaxCode';
+  merged['user-agent'] = withNcodeUserAgent('MiniMaxCode');
   return merged;
 }
 

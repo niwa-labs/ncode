@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from "@mavis/shared/product-build-identity";
 import {
   classifySafetyTransportError,
   isSafetyCheckV2Record,
@@ -136,7 +137,7 @@ export async function callSafetyApi(input: {
     response = await input.fetchImpl(url, {
       method: "POST",
       headers: {
-        "User-Agent": "MiniMaxAgent",
+        "User-Agent": withNcodeUserAgent('MiniMaxAgent'),
         "Content-Type": "application/json",
         ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...managedBackendRoutingHeaders(

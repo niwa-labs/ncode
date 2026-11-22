@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import { open, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -159,7 +160,7 @@ export async function uploadTuiFeedbackDiagnostics(
   const presignResponse = await fetchImpl(`${baseUrl}/matrix/api/v1/log/upload`, {
     method: 'POST',
     headers: {
-      'User-Agent': 'MiniMaxAgent',
+      'User-Agent': withNcodeUserAgent('MiniMaxAgent'),
       Origin: baseUrl,
       Referer: `${baseUrl}/`,
       'Content-Type': 'application/json',

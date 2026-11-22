@@ -1,3 +1,11 @@
+declare const __CLI_VERSION__: string;
+
+const ncodeProduct = typeof __CLI_VERSION__ === 'string' ? `ncode/${__CLI_VERSION__}` : 'ncode/dev';
+
+export function withNcodeUserAgent(upstream: string): string {
+  return `${upstream} ${ncodeProduct}`;
+}
+
 export type ProductBuildEnvironment = 'dev' | 'test' | 'staging' | 'prod';
 export type ProductBuildVariant = 'standard' | 'internal' | 'inside';
 

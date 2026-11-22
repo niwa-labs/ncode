@@ -1,5 +1,6 @@
 import { Agent, type FinishTurn, type runAgentLoop } from '@earendil-works/pi-agent-core';
-import { getCurrentSystemMessage, type UserMessage } from '@earendil-works/pi-ai';
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
+import { formatUserAgent, getCurrentSystemMessage, type UserMessage } from '@earendil-works/pi-ai';
 import { diffSystemPromptSections } from '@earendil-works/pi-coding-agent';
 import type { TurnTerminationReason } from '../event-bridge/types.js';
 import { contextWireRequestMessages } from './context-wire.js';
@@ -51,7 +52,7 @@ export function newAgent(turn: turnState, runLoop?: typeof runAgentLoop): Agent 
   return new Agent({
     ...(runLoop ? { runLoop } : {}),
     // Product transports own attribution; do not adopt Pi CLI branding.
-    identity: { attribution: null },
+    identity: { attribution: null, userAgent: { custom: withNcodeUserAgent(formatUserAgent()) } },
     initialState: {
       ...(turn.input.systemPromptSections ? {} : { systemPrompt: turn.input.systemPrompt }),
       model: turn.llm.model,

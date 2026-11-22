@@ -1,3 +1,4 @@
+import { withNcodeUserAgent } from '@mavis/shared/product-build-identity';
 import type { IAgentConfig } from '@mavis/protocol';
 import {
   managedBackendRoutingHeaders,
@@ -8,7 +9,7 @@ import type { LLMModelConfig } from '@mavis/agent-core/pi-turn-runner';
 
 import type { LocalRuntimeAuthContext } from '../contracts.js';
 
-const MANAGED_PROVIDER_USER_AGENT = 'MiniMaxAgent';
+const MANAGED_PROVIDER_USER_AGENT = withNcodeUserAgent('MiniMaxAgent');
 
 export function buildLocalProviderHeaders(input: {
   readonly headers?: Record<string, string>;
@@ -25,7 +26,8 @@ export function buildLocalProviderHeaders(input: {
   };
   if (input.managedProvider) {
     for (const key of Object.keys(headers)) {
-      if (key.toLowerCase() === 'bedrock-lane') delete headers[key];
+      const normalized = key.toLowerCase();
+      if (normalized === 'bedrock-lane' || normalized === 'user-agent') delete headers[key];
     }
     if (!Object.keys(headers).some((key) => key.toLowerCase() === 'accept-encoding')) {
       headers['Accept-Encoding'] = 'gzip';
