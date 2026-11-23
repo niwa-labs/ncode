@@ -1,7 +1,5 @@
 name: Ncode package verification
 on:
-  push:
-    tags: ['v*']
   pull_request:
     paths:
       - '.github/workflows/cli-release.yml'
@@ -23,7 +21,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: cli-release-${{ inputs.tag || github.ref }}
+  group: cli-release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   build:
@@ -47,6 +45,15 @@ jobs:
         id: release
         shell: bash
         run: |
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REF_TYPE" = tag ]; then
+            if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "$REF_NAME" ]; then
+              echo "The verification input must match the dispatched release tag." >&2
+              exit 1
+            fi
+            export REQUESTED_TAG="$REF_NAME"
+            test "$(git rev-parse "refs/tags/$REF_NAME^{commit}")" = "$(git rev-parse HEAD)"
+            git merge-base --is-ancestor HEAD refs/remotes/origin/main
+          fi
           node --input-type=module <<'JS'
           import { appendFileSync } from "node:fs";
           import { cliBuildVersion, cliReleaseArchiveName, cliReleaseTargets } from "./scripts/lib/cli-release.mjs";
@@ -57,12 +64,11 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\narchive=${archive}\nmatrix=${matrix}\n`);
           appendFileSync(process.env.GITHUB_ENV, `MCODE_RELEASE_TAG=${tag}\n`);
           JS
-          if [ "$EVENT_NAME" = push ]; then
-            test "$(git rev-parse "refs/tags/$REQUESTED_TAG^{commit}")" = "$(git rev-parse HEAD)"
-          fi
         env:
           EVENT_NAME: ${{ github.event_name }}
-          REQUESTED_TAG: ${{ inputs.tag || (github.event_name == 'push' && github.ref_name) || '' }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.tag || '' }}
       - run: pnpm install --frozen-lockfile
       - uses: ./.github/actions/setup-gitleaks
       - name: Scan source history
@@ -120,3 +126,60 @@ jobs:
           name: cli-install-${{ matrix.os }}-${{ matrix.node }}
           path: ${{ runner.temp }}/install-report/
           retention-days: 14
+  publish:
+    needs: [build, install]
+    # Publish only from a dispatch selecting the release tag validated by build.
+    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Minimal OIDC grant for npm trusted publishing. The npm trusted publisher
+    # for @niwa-labs/ncode must be registered for niwa-labs/ncode and the
+    # cli-release.yml workflow file without a GitHub environment.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org/'
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cli-package
+          path: ${{ runner.temp }}/package
+      - name: Check the tested archive against the release tag
+        shell: bash
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+        run: |
+          cd "$RUNNER_TEMP/package"
+          test "$ARCHIVE" = "ncode-${GITHUB_REF_NAME#v}.tar.gz"
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          const { ARCHIVE: archive } = process.env;
+          const sha256 = createHash("sha256").update(readFileSync(archive)).digest("hex");
+          assert.equal(readFileSync(`${archive}.sha256`, "utf8"), `${sha256}  ${archive}\n`, "Release archive checksum mismatch");
+          JS
+      # No npm token is configured: npm >= 11.5.1 authenticates with the
+      # workflow OIDC token and publishes the exact tarball every install
+      # job verified.
+      - name: Publish to npm with OIDC trusted publishing
+        shell: bash
+        env:
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from "node:child_process";
+          const version = execFileSync("npm", ["--version"], { encoding: "utf8" }).trim();
+          const [major, minor, patch] = version.split(".").map(Number);
+          if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+            throw new Error(`npm ${version} is too old for OIDC trusted publishing; npm >= 11.5.1 is required.`);
+          }
+          JS
+          case "$GITHUB_REF_NAME" in
+            *-*) distTag=next ;;
+            *) distTag=latest ;;
+          esac
+          npm publish --provenance --access public --tag "$distTag" "$RUNNER_TEMP/package/$ARCHIVE"

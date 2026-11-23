@@ -3,7 +3,32 @@
 Publish the reviewed source commit on the Ncode fork. Run `pnpm verify`
 from a clean checkout and check the source inventory and licenses in the export.
 The `Source candidate` workflow can build and verify a source archive and
-upload it as a GitHub Actions artifact. For npm, build the CLI archive below, verify it, and publish that exact archive with `npm publish ./ncode-X.Y.Z.tar.gz --access public` from its output directory.
+upload it as a GitHub Actions artifact.
+
+## Publish the CLI to npm
+
+Configure the GitHub Actions trusted publisher for `@niwa-labs/ncode` in the
+npm package settings. Set the organization to `niwa-labs`, the repository to
+`ncode`, and the workflow filename to `cli-release.yml`. Leave the environment
+name blank. The publish job authenticates with GitHub OIDC using Node 24 and
+npm 11.5.1 or later.
+
+Prepare a reviewed commit on `main` with matching versions in the root and TUI
+package manifests and entries in both TUI changelogs. Push a protected release
+tag matching that version, such as `v0.4.13` or `v0.4.13-rc.1`. Dispatch
+`cli-release.yml` with the release tag as the workflow ref. The workflow checks
+the tag, version, and ancestry on `main`, builds the archive, and tests isolated
+installations across the Linux and macOS matrix.
+After every installation check passes, the publish job downloads the same
+`cli-package` artifact from the run, checks the archive name and SHA-256, and
+publishes that archive with provenance and public access. Stable versions use
+the `latest` dist-tag and prereleases use `next`.
+
+Pull requests and workflow dispatches on branches perform build and
+installation verification. Pushing the tag alone starts no release run. After a
+tagged run succeeds, check the registry with
+`npm view @niwa-labs/ncode@latest version bin` or use `@next` for a prerelease.
+The package installs one command, `ncode`.
 
 ## Check a local CLI archive
 
@@ -23,4 +48,5 @@ CLI. Check the SHA-256 checksum and source revision when sharing an archive.
 
 ## What Actions verifies
 
-Pushes to `main` run source verification and the release audit. The `Ncode package verification` workflow builds an archive and tests isolated installations on Linux and macOS. The separate `Python SDK package verification` workflow checks the Python build artifacts. To publish Ncode, use the verified archive and the Niwa Labs npm scope. Check the registry after publication with `npm view @niwa-labs/ncode@latest version bin`. The package installs one command, `ncode`.
+Pushes to `main` run source verification and the release audit. The separate
+`Python SDK package verification` workflow checks the Python build artifacts.

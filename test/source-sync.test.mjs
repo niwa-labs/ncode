@@ -434,14 +434,14 @@ test('npm release manifests require native SQLite and pin installed external dep
   assert.throws(() => releaseManifest([f.root, f.source], '0.4.13'), /Expected one installed version/);
 });
 
-test('Ncode package verification builds and installs the same archive with read-only permissions', t => {
+test('Ncode package verification builds, installs and publishes the same archive', t => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/cli-release.yml', import.meta.url), 'utf8'));
   assert.equal(workflow.name, 'Ncode package verification');
-  assert.deepEqual(workflow.on.push, { tags: ['v*'] });
+  assert.equal(workflow.on.push, undefined);
   assert.equal(workflow.on.workflow_dispatch.inputs.tag.required, false);
   assert.equal(workflow.on.pull_request_target, undefined);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
-  assert.deepEqual(Object.keys(workflow.jobs), ['build', 'install']);
+  assert.deepEqual(Object.keys(workflow.jobs), ['build', 'install', 'publish']);
   assert.equal(workflow.concurrency['cancel-in-progress'], false);
 
   const { build, install } = workflow.jobs;
@@ -458,9 +458,14 @@ test('Ncode package verification builds and installs the same archive with read-
   const download = install.steps.find(step => step.with?.name === 'cli-package');
   assert.match(upload?.uses, /^actions\/upload-artifact@/);
   assert.match(download?.uses, /^actions\/download-artifact@/);
+  assert.equal(upload.with.path, '${{ runner.temp }}/package/');
+  assert.deepEqual(download.with, { name: upload.with.name, path: '${{ runner.temp }}/package' });
 
   const metadata = build.steps.find(step => step.id === 'release');
-  assert.match(metadata?.run, /refs\/tags\/\$REQUESTED_TAG\^\{commit\}/);
+  assert.match(metadata?.run, /refs\/tags\/\$REF_NAME\^\{commit\}/);
+  assert.match(metadata?.run, /git merge-base --is-ancestor HEAD refs\/remotes\/origin\/main/);
+  assert.equal(metadata.env.REF_TYPE, '${{ github.ref_type }}');
+  assert.equal(metadata.env.REF_NAME, '${{ github.ref_name }}');
   const script = metadata.run.match(/<<'JS'\r?\n([\s\S]*?)\r?\nJS\r?\n/)?.[1];
   assert.ok(script);
   const f = fixture(t);
@@ -482,8 +487,36 @@ test('Ncode package verification builds and installs the same archive with read-
   assert.equal(mismatch.status, 1);
   assert.match(mismatch.stderr, /Release tag must match/);
 
-  for (const job of Object.values(workflow.jobs)) {
-    assert.equal(job.permissions, undefined);
+  if (process.platform !== 'win32') {
+    const tag = `v${version}`;
+    f.git('tag', tag);
+    const manifests = ['package.json', 'packages/tui/package.json'];
+    mkdirSync(path.join(f.source, 'packages/tui'), { recursive: true });
+    for (const file of manifests) copyFileSync(path.join(root, file), path.join(f.source, file));
+    mkdirSync(path.join(f.source, 'scripts/lib'), { recursive: true });
+    copyFileSync(path.join(root, 'scripts/lib/cli-release.mjs'), path.join(f.source, 'scripts/lib/cli-release.mjs'));
+    f.git('add', ...manifests, 'scripts/lib/cli-release.mjs');
+    f.git('-c', 'core.hooksPath=', 'commit', '-m', 'Prepare fixture release');
+    const head = f.git('rev-parse', 'HEAD');
+    const runDispatch = (requestedTag = '') => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', metadata.run], {
+      cwd: f.source, encoding: 'utf8', env: {
+        ...env, EVENT_NAME: 'workflow_dispatch', REF_TYPE: 'tag', REF_NAME: tag, REQUESTED_TAG: requestedTag,
+      },
+    });
+    assert.equal(runDispatch().status, 1, 'Reject a tag pointing to a different commit');
+    f.git('tag', '-f', tag, head);
+    f.git('update-ref', 'refs/remotes/origin/main', 'HEAD^');
+    assert.equal(runDispatch().status, 1, 'Reject a tagged commit outside main');
+    f.git('update-ref', 'refs/remotes/origin/main', head);
+    const conflictingInput = runDispatch('v999999.0.0');
+    assert.equal(conflictingInput.status, 1);
+    assert.match(conflictingInput.stderr, /input must match the dispatched release tag/);
+    const dispatch = runDispatch();
+    assert.equal(dispatch.status, 0, dispatch.stderr);
+  }
+
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    if (jobName !== 'publish') assert.equal(job.permissions, undefined);
     assert.equal(job.environment, undefined);
     for (const step of job.steps) {
       if (step.uses && !step.uses.startsWith('./')) assert.match(step.uses, /@[a-f0-9]{40}$/);
@@ -491,7 +524,87 @@ test('Ncode package verification builds and installs the same archive with read-
       if (step.run) assert.doesNotMatch(step.run, /\$\{\{/);
     }
   }
-  assert.doesNotMatch(JSON.stringify(workflow), /npm publish|gh release|MiniMax-AI\/minimax-code|secrets\.|id-token/);
+  // Verification jobs stay read-only and never publish.
+  assert.doesNotMatch(JSON.stringify({ build: workflow.jobs.build, install: workflow.jobs.install }),
+    /npm publish|gh release|MiniMax-AI\/minimax-code|secrets\.|id-token/);
+
+  const publish = workflow.jobs.publish;
+  assert.deepEqual(publish.needs, ['build', 'install']);
+  assert.equal(publish.if, "github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'");
+  assert.deepEqual(publish.permissions, { 'id-token': 'write' });
+  assert.ok(publish.steps.every(step => !step.uses?.startsWith('actions/checkout@')));
+  const publishDownload = publish.steps.find(step => step.uses?.startsWith('actions/download-artifact@'));
+  assert.deepEqual(publishDownload, download);
+  const [checksum, release] = publish.steps.filter(step => step.env?.ARCHIVE);
+  assert.equal(checksum?.env.ARCHIVE, '${{ needs.build.outputs.archive }}');
+  assert.equal(release?.env.ARCHIVE, '${{ needs.build.outputs.archive }}');
+  assert.deepEqual(publish.steps.slice(-3), [publishDownload, checksum, release]);
+  assert.doesNotMatch(JSON.stringify(publish), /NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.|gh release/);
+  assert.doesNotMatch(JSON.stringify(workflow), /gh release|MiniMax-AI\/minimax-code|secrets\./);
+});
+
+test('Ncode publish steps send the verified archive to npm and reject mismatches', { skip: process.platform === 'win32' }, t => {
+  const workflow = parseYaml(readFileSync(new URL('../.github/workflows/cli-release.yml', import.meta.url), 'utf8'));
+  const [checksum, release] = workflow.jobs.publish.steps.filter(step => step.env?.ARCHIVE);
+  const { root } = fixture(t);
+  const packageDir = path.join(root, 'package');
+  const bin = path.join(root, 'bin');
+  mkdirSync(packageDir);
+  mkdirSync(bin);
+  const npmLog = path.join(root, 'npm-arguments.json');
+  writeFileSync(path.join(bin, 'npm'), [
+    '#!/usr/bin/env node',
+    'const args = process.argv.slice(2);',
+    'if (args[0] === "--version") console.log(process.env.TEST_NPM_VERSION);',
+    'else import("node:fs").then(({ writeFileSync }) => {',
+    '  writeFileSync(process.env.TEST_NPM_LOG, JSON.stringify(args));',
+    '});',
+  ].join('\n'), { mode: 0o755 });
+
+  function run(tag, { ref = tag, npmVersion = '11.5.1', contents = 'verified bytes', receiptArchive } = {}) {
+    const archive = `ncode-${tag.slice(1)}.tar.gz`;
+    const archivePath = path.join(packageDir, archive);
+    const digest = createHash('sha256').update('verified bytes').digest('hex');
+    writeFileSync(archivePath, contents);
+    writeFileSync(`${archivePath}.sha256`, `${digest}  ${receiptArchive ?? archive}\n`);
+    rmSync(npmLog, { force: true });
+    const options = {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        PATH: [bin, path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter),
+        RUNNER_TEMP: root,
+        ARCHIVE: archive,
+        GITHUB_REF_NAME: ref,
+        TEST_NPM_VERSION: npmVersion,
+        TEST_NPM_LOG: npmLog,
+      },
+    };
+    const runStep = step => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], options);
+    const checked = runStep(checksum);
+    return checked.status === 0 ? runStep(release) : checked;
+  }
+
+  for (const [tag, distTag] of [['v1.2.3', 'latest'], ['v1.2.3-rc.1', 'next']]) {
+    const result = run(tag);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(npmLog, 'utf8')), [
+      'publish', '--provenance', '--access', 'public', '--tag', distTag,
+      path.join(packageDir, `ncode-${tag.slice(1)}.tar.gz`),
+    ]);
+  }
+
+  writeFileSync(path.join(packageDir, 'different.tar.gz'), 'verified bytes');
+  for (const failure of [
+    { ref: 'v9.9.9' },
+    { contents: 'changed after verification' },
+    { receiptArchive: 'different.tar.gz' },
+    { npmVersion: '11.5.0' },
+  ]) {
+    const result = run('v1.2.3', failure);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(existsSync(npmLog), false);
+  }
 });
 
 test('Python SDK package verification builds and smokes the wheel without a publishing job', () => {
