@@ -1,11 +1,11 @@
 {
-  "name": "@minimax-ai/code",
-  "version": "0.7.0",
+  "name": "@niwa-labs/ncode",
+  "version": "0.1.2",
   "private": true,
-  "description": "Test double for the optional @minimax-ai/code peer dependency; never published.",
+  "description": "Test double for the optional @niwa-labs/ncode peer dependency; never published.",
   "type": "module",
   "bin": {
-    "mcode": "mcode.mjs"
+    "ncode": "ncode.mjs"
   },
   "exports": {
     "./package.json": "./package.json"

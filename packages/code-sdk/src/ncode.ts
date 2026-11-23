@@ -2,17 +2,17 @@ import { resolve } from 'node:path';
 
 import { validateThreadOptions } from './args.js';
 import { resolveCli, type ResolvedCli } from './cli-resolver.js';
-import { MCodeInvocationError } from './errors.js';
+import { NcodeInvocationError } from './errors.js';
 import { Thread, type ThreadHost } from './thread.js';
-import type { MCodeOptions, ThreadOptions } from './types.js';
+import type { NcodeOptions, ThreadOptions } from './types.js';
 import { checkCliVersion } from './version.js';
 
 /** Entry point of the SDK. One instance resolves and version-checks the CLI once. */
-export class MCode {
+export class Ncode {
   private cli: Promise<ResolvedCli> | undefined;
   private readonly host: ThreadHost;
 
-  constructor(private readonly options: MCodeOptions = {}) {
+  constructor(private readonly options: NcodeOptions = {}) {
     this.host = {
       ...(options.configPath === undefined ? {} : { configPath: resolve(options.configPath) }),
       childEnv: () => this.childEnv(),
@@ -29,7 +29,7 @@ export class MCode {
   /** Continues an existing Session, for example one persisted from `thread.id`. */
   resumeThread(id: string, options: ThreadOptions = {}): Thread {
     if (typeof id !== 'string' || !id.trim()) {
-      throw new MCodeInvocationError('resumeThread requires a non-empty Session id.');
+      throw new NcodeInvocationError('resumeThread requires a non-empty Session id.');
     }
     validateThreadOptions(options, true);
     return new Thread(this.host, options, id.trim());

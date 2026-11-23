@@ -3,9 +3,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
-  MCodeAbortError,
-  MCodeProtocolError,
-  MCodeVersionError,
+  NcodeAbortError,
+  NcodeProtocolError,
+  NcodeVersionError,
   type ThreadEvent,
 } from '../src/index.js';
 import { fakeClient, fixture, fixtureEvents, tempDir } from './helpers.js';
@@ -20,8 +20,8 @@ async function collect(events: AsyncIterable<ThreadEvent>): Promise<ThreadEvent[
 
 describe('thread.runStreamed', () => {
   it('yields CLI events in order and drops identical repeated snapshot updates', async () => {
-    const mcode = fakeClient({ FAKE_MCODE_FIXTURE: fixture('success-tools') });
-    const thread = mcode.startThread();
+    const ncode = fakeClient({ FAKE_NCODE_FIXTURE: fixture('success-tools') });
+    const thread = ncode.startThread();
 
     const { events } = await thread.runStreamed('go');
     const received = await collect(events);
@@ -66,19 +66,19 @@ describe('thread.runStreamed', () => {
     const path = `${dir}/deltas.jsonl`;
     writeFileSync(path, lines.map((line) => JSON.stringify(line)).join('\n'));
 
-    const { events } = await fakeClient({ FAKE_MCODE_FIXTURE: path })
+    const { events } = await fakeClient({ FAKE_NCODE_FIXTURE: path })
       .startThread()
       .runStreamed('x');
     expect((await collect(events)).map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it('delivers turn.failed as an ordinary event without throwing', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('failed-upstream'),
-      FAKE_MCODE_EXIT: '4',
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('failed-upstream'),
+      FAKE_NCODE_EXIT: '4',
     });
 
-    const { events } = await mcode.startThread().runStreamed('go');
+    const { events } = await ncode.startThread().runStreamed('go');
     const types = (await collect(events)).map((event) => event.type);
 
     expect(types).toEqual([
@@ -90,7 +90,7 @@ describe('thread.runStreamed', () => {
     ]);
   });
 
-  it('throws MCodeProtocolError for a non-JSON stdout line after delivering earlier events', async () => {
+  it('throws NcodeProtocolError for a non-JSON stdout line after delivering earlier events', async () => {
     const path = `${tempDir()}/broken.jsonl`;
     const lines = readFileSync(fixture('success-tools'), 'utf8').split('\n');
     writeFileSync(
@@ -98,20 +98,20 @@ describe('thread.runStreamed', () => {
       [...lines.slice(0, 2), 'Update available: run npm i -g', ...lines.slice(2)].join('\n'),
     );
 
-    const thread = fakeClient({ FAKE_MCODE_FIXTURE: path }).startThread();
+    const thread = fakeClient({ FAKE_NCODE_FIXTURE: path }).startThread();
     const { events } = await thread.runStreamed('go');
     const received: ThreadEvent[] = [];
     const error = await (async () => {
       for await (const event of events) received.push(event);
     })().catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(MCodeProtocolError);
+    expect(error).toBeInstanceOf(NcodeProtocolError);
     expect((error as Error).message).toContain('stdout line 3');
     expect(received.map((event) => event.type)).toEqual(['exec.started', 'session.started']);
     expect(thread.id).toBe('mvs_2bab54bd1f17409e968db62f8ed2784a');
   });
 
-  it('throws MCodeVersionError for an unsupported schemaVersion', async () => {
+  it('throws NcodeVersionError for an unsupported schemaVersion', async () => {
     const dir = tempDir();
     const path = `${dir}/v2.jsonl`;
     writeFileSync(
@@ -119,11 +119,11 @@ describe('thread.runStreamed', () => {
       `${JSON.stringify({ schemaVersion: 2, sequence: 1, type: 'exec.started', sessionId: 's' })}\n`,
     );
 
-    const { events } = await fakeClient({ FAKE_MCODE_FIXTURE: path })
+    const { events } = await fakeClient({ FAKE_NCODE_FIXTURE: path })
       .startThread()
       .runStreamed('go');
 
-    await expect(collect(events)).rejects.toBeInstanceOf(MCodeVersionError);
+    await expect(collect(events)).rejects.toBeInstanceOf(NcodeVersionError);
   });
 
   it('passes unknown event types through unchanged', async () => {
@@ -142,7 +142,7 @@ describe('thread.runStreamed', () => {
     });
     writeFileSync(path, [lines[0], extra, ...lines.slice(1)].join('\n'));
 
-    const { events } = await fakeClient({ FAKE_MCODE_FIXTURE: path })
+    const { events } = await fakeClient({ FAKE_NCODE_FIXTURE: path })
       .startThread()
       .runStreamed('go');
     const received = await collect(events);
@@ -151,13 +151,13 @@ describe('thread.runStreamed', () => {
   });
 
   posixOnly('delivers a cancelled Turn as events when the CLI exits gracefully', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('cancelled'),
-      FAKE_MCODE_MODE: 'wait-sigint',
-      FAKE_MCODE_SPLIT: '9',
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('cancelled'),
+      FAKE_NCODE_MODE: 'wait-sigint',
+      FAKE_NCODE_SPLIT: '9',
     });
     const controller = new AbortController();
-    const { events } = await mcode
+    const { events } = await ncode
       .startThread()
       .runStreamed('sleep', { signal: controller.signal });
 
@@ -171,12 +171,12 @@ describe('thread.runStreamed', () => {
   });
 
   posixOnly('cancels the CLI when the consumer stops iterating early', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('cancelled'),
-      FAKE_MCODE_MODE: 'wait-sigint',
-      FAKE_MCODE_SPLIT: '3',
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('cancelled'),
+      FAKE_NCODE_MODE: 'wait-sigint',
+      FAKE_NCODE_SPLIT: '3',
     });
-    const thread = mcode.startThread();
+    const thread = ncode.startThread();
     const { events } = await thread.runStreamed('sleep');
 
     for await (const event of events) {
@@ -191,13 +191,13 @@ describe('thread.runStreamed', () => {
   });
 
   posixOnly('throws AbortError when the CLI is killed before reporting a result', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('cancelled'),
-      FAKE_MCODE_MODE: 'hang',
-      FAKE_MCODE_SPLIT: '3',
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('cancelled'),
+      FAKE_NCODE_MODE: 'hang',
+      FAKE_NCODE_SPLIT: '3',
     });
     const controller = new AbortController();
-    const { events } = await mcode
+    const { events } = await ncode
       .startThread()
       .runStreamed('sleep', { signal: controller.signal });
 
@@ -207,7 +207,7 @@ describe('thread.runStreamed', () => {
       }
     })().catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(MCodeAbortError);
-    expect((error as MCodeAbortError).signal).toBe('SIGTERM');
+    expect(error).toBeInstanceOf(NcodeAbortError);
+    expect((error as NcodeAbortError).signal).toBe('SIGTERM');
   });
 });

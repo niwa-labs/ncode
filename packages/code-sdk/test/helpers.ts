@@ -4,12 +4,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach } from 'vitest';
 
-import { MCode } from '../src/index.js';
-import type { MCodeOptions } from '../src/index.js';
+import { Ncode } from '../src/index.js';
+import type { NcodeOptions } from '../src/index.js';
 
 const fixtures = fileURLToPath(new URL('./fixtures/', import.meta.url));
 
-export const FAKE_MCODE = join(fixtures, 'cli-package', 'mcode.mjs');
+export const FAKE_NCODE = join(fixtures, 'cli-package', 'ncode.mjs');
 
 export type Fixture = 'success-tools' | 'failed-upstream' | 'resumed' | 'cancelled';
 
@@ -37,22 +37,22 @@ export function tempDir(): string {
 }
 
 export interface FakeEnv {
-  readonly FAKE_MCODE_FIXTURE?: string;
-  readonly FAKE_MCODE_EXIT?: string;
-  readonly FAKE_MCODE_STDERR?: string;
-  readonly FAKE_MCODE_MODE?: 'normal' | 'wait-sigint' | 'ignore-signals' | 'hang';
-  readonly FAKE_MCODE_SPLIT?: string;
-  readonly FAKE_MCODE_PREFIX?: string;
-  readonly FAKE_MCODE_VERSION?: string;
-  readonly FAKE_MCODE_VERSION_LOG?: string;
-  readonly FAKE_MCODE_RECORD?: string;
-  readonly FAKE_MCODE_GRANDCHILD_PID?: string;
-  readonly FAKE_MCODE_SIGNAL_LOG?: string;
+  readonly FAKE_NCODE_FIXTURE?: string;
+  readonly FAKE_NCODE_EXIT?: string;
+  readonly FAKE_NCODE_STDERR?: string;
+  readonly FAKE_NCODE_MODE?: 'normal' | 'wait-sigint' | 'ignore-signals' | 'hang';
+  readonly FAKE_NCODE_SPLIT?: string;
+  readonly FAKE_NCODE_PREFIX?: string;
+  readonly FAKE_NCODE_VERSION?: string;
+  readonly FAKE_NCODE_VERSION_LOG?: string;
+  readonly FAKE_NCODE_RECORD?: string;
+  readonly FAKE_NCODE_GRANDCHILD_PID?: string;
+  readonly FAKE_NCODE_SIGNAL_LOG?: string;
 }
 
-export function fakeClient(fake: FakeEnv, options: Omit<MCodeOptions, 'env'> = {}): MCode {
-  return new MCode({
-    bin: FAKE_MCODE,
+export function fakeClient(fake: FakeEnv, options: Omit<NcodeOptions, 'env'> = {}): Ncode {
+  return new Ncode({
+    bin: FAKE_NCODE,
     ...options,
     env: { PATH: process.env.PATH, ...fake },
   });

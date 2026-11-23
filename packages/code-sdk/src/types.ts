@@ -1,5 +1,5 @@
 /**
- * Public types for the `mcode exec --output-format stream-json` contract (schemaVersion 1).
+ * Public types for the `ncode exec --output-format stream-json` contract (schemaVersion 1).
  *
  * The SDK owns these types so the published package does not depend on CLI internals. A
  * repository contract test keeps them aligned with the events the CLI actually emits.
@@ -40,7 +40,7 @@ export interface Usage {
 
 export type UsageSource = 'completed_responses' | 'analytics_fallback' | 'unavailable';
 
-/** Final result of one `mcode exec` run (`exec.completed.result`). */
+/** Final result of one `ncode exec` run (`exec.completed.result`). */
 export interface ExecResult {
   readonly schemaVersion: 1;
   readonly type: 'exec.result';
@@ -183,12 +183,12 @@ export type PermissionPolicy = 'smart' | 'full' | 'off';
 export type ContextMode = 'standard' | 'lightweight';
 export type PromptMode = 'tui' | 'coding' | 'work';
 
-export interface MCodeOptions {
-  /** Explicit `mcode` executable or JS entry. Skips package and PATH lookup. */
+export interface NcodeOptions {
+  /** Explicit `ncode` executable or JS entry. Skips package and PATH lookup. */
   readonly bin?: string;
   /**
-   * Search `process.cwd()` for the CLI: `@minimax-ai/code` from that directory's `package.json`,
-   * then `node_modules/.bin/mcode` walking up through parent directories. Both steps run before
+   * Search `process.cwd()` for the CLI: `@niwa-labs/ncode` from that directory's `package.json`,
+   * then `node_modules/.bin/ncode` walking up through parent directories. Both steps run before
    * `PATH`. Default `false`. Leave this off when the working directory is an untrusted checkout
    * (for example CI); pass `bin` or use a CLI installed next to the SDK or on `PATH`.
    */

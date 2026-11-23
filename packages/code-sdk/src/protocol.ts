@@ -1,4 +1,4 @@
-import { MCodeProtocolError, MCodeVersionError } from './errors.js';
+import { NcodeProtocolError, NcodeVersionError } from './errors.js';
 import type { ThreadEvent } from './types.js';
 
 export const SUPPORTED_SCHEMA_VERSION = 1;
@@ -16,26 +16,26 @@ export function parseEventLine(line: string): ThreadEvent | undefined {
   try {
     value = JSON.parse(text);
   } catch (error) {
-    throw new MCodeProtocolError(`mcode stdout is not JSON: ${truncate(text)}`, { cause: error });
+    throw new NcodeProtocolError(`ncode stdout is not JSON: ${truncate(text)}`, { cause: error });
   }
   if (!isRecord(value)) {
-    throw new MCodeProtocolError(`mcode stdout line is not a JSON object: ${truncate(text)}`);
+    throw new NcodeProtocolError(`ncode stdout line is not a JSON object: ${truncate(text)}`);
   }
   if (value.schemaVersion !== SUPPORTED_SCHEMA_VERSION) {
-    throw new MCodeVersionError(
-      `Unsupported mcode event schemaVersion ${JSON.stringify(value.schemaVersion)}; this SDK supports ${String(SUPPORTED_SCHEMA_VERSION)}.`,
+    throw new NcodeVersionError(
+      `Unsupported ncode event schemaVersion ${JSON.stringify(value.schemaVersion)}; this SDK supports ${String(SUPPORTED_SCHEMA_VERSION)}.`,
     );
   }
   if (typeof value.type !== 'string' || typeof value.sessionId !== 'string') {
-    throw new MCodeProtocolError(`mcode event is missing type or sessionId: ${truncate(text)}`);
+    throw new NcodeProtocolError(`ncode event is missing type or sessionId: ${truncate(text)}`);
   }
   if (value.type.startsWith('item.') && !isItem(value.item)) {
-    throw new MCodeProtocolError(
-      `mcode ${value.type} event has an invalid item: ${truncate(text)}`,
+    throw new NcodeProtocolError(
+      `ncode ${value.type} event has an invalid item: ${truncate(text)}`,
     );
   }
   if (value.type === 'exec.completed' && !isResult(value.result)) {
-    throw new MCodeProtocolError(`mcode exec.completed has an invalid result: ${truncate(text)}`);
+    throw new NcodeProtocolError(`ncode exec.completed has an invalid result: ${truncate(text)}`);
   }
   return value as unknown as ThreadEvent;
 }

@@ -511,7 +511,7 @@ importers:
 
   packages/code-sdk:
     devDependencies:
-      '@minimax-ai/code':
+      '@niwa-labs/ncode':
         specifier: link:test/fixtures/cli-package
         version: link:test/fixtures/cli-package
 
