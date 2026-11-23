@@ -224,6 +224,8 @@ export interface LocalMcpServiceOptions {
 export interface LocalMcpSessionServer {
   readonly name: string;
   readonly config: LocalMcpServerConfig;
+  /** Absolute stdio cwd supplied by the local host. ACP clients do not set this field. */
+  readonly cwd?: string;
 }
 
 type Emit = (type: string, payload: Record<string, unknown>) => void;

@@ -2039,6 +2039,7 @@
     "packages/local-runtime-v2/test/integration/compaction-openai-transport.integration.test.ts",
     "packages/local-runtime-v2/test/integration/mcp/local-mcp-public-facade.integration.test.ts",
     "packages/local-runtime-v2/test/integration/mcp/project-mcp.integration.test.ts",
+    "packages/local-runtime-v2/test/integration/mcp/session-mcp-cwd.integration.test.ts",
     "packages/local-runtime-v2/test/integration/mcp/session-mcp-only.integration.test.ts",
     "packages/local-runtime-v2/test/integration/reactive-task-batch-recovery.e2e.test.ts",
     "packages/local-runtime-v2/test/integration/reactive-task-burst-delivery.e2e.test.ts",

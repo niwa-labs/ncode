@@ -136,12 +136,15 @@ export class CliService {
     return this.options.applications.session.lifecycle.createSession(ctx, req);
   }
 
-  configureSessionMcpServers(
-    req: Parameters<
-      NonNullable<LocalRuntimeApplication["mcp"]>["configureSessionServers"]
-    >[0],
+  async configureSessionMcpServers(
+    req: Omit<
+      Parameters<NonNullable<LocalRuntimeApplication["mcp"]>["configureSessionServers"]>[0],
+      "sessionCwd"
+    >,
   ): Promise<void> {
-    return this.requireCapability("mcp", "MCP").configureSessionServers(req);
+    const mcp = this.requireCapability("mcp", "MCP");
+    const { session } = await this.getSession({ id: req.sessionId });
+    return mcp.configureSessionServers({ ...req, sessionCwd: session.workspaceDir });
   }
 
   async inspectProjectMcp(sessionId: string) {

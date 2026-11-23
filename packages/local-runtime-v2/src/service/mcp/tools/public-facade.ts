@@ -101,8 +101,9 @@ export class LocalMcpPublicFacade {
   configureSessionServers(input: {
     sessionId: string;
     servers: readonly LocalMcpSessionServer[];
+    sessionCwd?: string;
   }): Promise<void> {
-    return this.owner.configureSessionServers(input.sessionId, input.servers);
+    return this.owner.configureSessionServers(input.sessionId, input.servers, input.sessionCwd);
   }
 
   clearSessionServers(sessionId: string): Promise<void> {

@@ -182,9 +182,10 @@ export class LocalMcpService {
   async configureSessionServers(
     sessionId: string,
     servers: readonly LocalMcpSessionServer[],
+    sessionCwd?: string,
   ): Promise<void> {
     this.assertOpen();
-    return this.enqueueMutation(() => this.sessionServers.configure(sessionId, servers));
+    return this.enqueueMutation(() => this.sessionServers.configure(sessionId, servers, sessionCwd));
   }
 
   async clearSessionServers(sessionId: string): Promise<void> {
@@ -996,13 +997,10 @@ export class LocalMcpService {
     config: LocalMcpServerConfig,
     context?: LocalMcpRuntimeContext,
   ): Promise<McpConnectionTokenOverrides | undefined> {
+    const session = this.sessionServers.overrides(server, config, context?.sessionId);
+    if (session) return session;
     if (sessionMcpOnlyFromEnv(process.env)) {
-      if (!context?.sessionId || this.sessionServers.get(context.sessionId)?.[server] !== config)
-        throw new Error('Session MCP configuration changed before connection.');
-      return this.sessionServers.overrides(context.sessionId, server, config);
-    }
-    if (context?.sessionId && this.isSessionServer(server, context)) {
-      return this.sessionServers.overrides(context.sessionId, server, config);
+      throw new Error('Session MCP configuration changed before connection.');
     }
     const project = this.projectMcp.overrides(config);
     if (project) return project;
@@ -1016,10 +1014,12 @@ export class LocalMcpService {
 
   private connectionSignal(config: LocalMcpServerConfig, signal?: AbortSignal): AbortSignal {
     const project = this.projectMcp.signal(config);
+    const session = this.sessionServers.signal(config);
     return AbortSignal.any([
       this.shutdownSignal.signal,
       ...(signal ? [signal] : []),
       ...(project ? [project] : []),
+      ...(session ? [session] : []),
     ]);
   }
 
@@ -1140,7 +1140,7 @@ export class LocalMcpService {
     context?: LocalMcpRuntimeContext,
     config?: LocalMcpServerConfig,
   ): void {
-    if (this.isSessionServer(serverName, context)) return;
+    if ((config && this.sessionServers.signal(config)) || this.isSessionServer(serverName, context)) return;
     if (this.projectMcp.record(config)) return;
     const normalized = normalizeServerName(serverName);
     this.publicRuntimeErrors.delete(normalized);
@@ -1153,7 +1153,7 @@ export class LocalMcpService {
     error: string,
     config?: LocalMcpServerConfig,
   ): void {
-    if (this.isSessionServer(serverName, context)) return;
+    if ((config && this.sessionServers.signal(config)) || this.isSessionServer(serverName, context)) return;
     if (this.projectMcp.record(config, error)) return;
     const normalized = normalizeServerName(serverName);
     this.publiclyAvailableServers.delete(normalized);

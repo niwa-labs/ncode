@@ -81,7 +81,7 @@ it("session-MCP-only mode connects only the session's own servers", async () => 
         env: { CHECK_MARKER: join(workspace, '..', 'harness-started') },
       },
     },
-  ]);
+  ], workspace);
 
   const entries = await service.listToolEntriesForTurn({
     sessionId: "ses_harness",
