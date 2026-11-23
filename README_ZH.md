@@ -151,7 +151,7 @@ ncode "Find a failing test, fix the implementation, and run the relevant tests."
 | 交互式 TUI | `ncode [prompt]` | 探索代码、持续对话、审阅修改与权限确认。 |
 | Headless | `ncode exec [prompt]` | Shell、CI、批处理与评测。 |
 | ACP | `ncode acp` | 支持 Agent Client Protocol 的编辑器与客户端。 |
-| TypeScript SDK | [`@minimax-ai/code-sdk`](packages/code-sdk/README.md) | 在 Node.js 代码中驱动 `ncode exec`：启动、流式读取和续跑对话。 |
+| TypeScript SDK | [`@niwa-labs/ncode-sdk`](packages/code-sdk/README.md) | 在 Node.js 代码中驱动 `ncode exec`：启动、流式读取和续跑对话。 |
 
 ### 轻量对话
 

@@ -1,8 +1,8 @@
-# `@minimax-ai/code-sdk`
+# `@niwa-labs/ncode-sdk`
 
-A TypeScript SDK for driving the local MiniMax Code (`mcode`) agent programmatically from Node.js,
+A TypeScript SDK for driving the local Ncode agent programmatically from Node.js,
 modeled after the [Codex TypeScript SDK](https://learn.chatgpt.com/docs/codex-sdk). Use it to run
-MiniMax Code in CI/CD (fixes, reviews, code generation), embed it in internal tools or your own
+Ncode in CI/CD (fixes, reviews, code generation), embed it in internal tools or your own
 agents, or orchestrate multi-turn conversations from code.
 
 > [!NOTE]
@@ -13,12 +13,12 @@ agents, or orchestrate multi-turn conversations from code.
 ## How it works
 
 - Each `run()` / `runStreamed()` starts one
-  `mcode exec --output-format stream-json --input - --input-format json` process, writes the prompt
+  `ncode exec --output-format stream-json --input - --input-format json` process, writes the prompt
   to its stdin as `{"prompt": "..."}`, and closes stdin. **One run = one CLI process = one Turn.**
 - A `Thread` only holds the Session id inside the SDK; later Turns continue the Session with
   `--session <id>`. The CLI's embedded runtime persists Sessions in its data directory, so a
   crashed host can resume a Thread from its id with `resumeThread`.
-- The SDK consumes only the public `mcode exec` contract (stdout JSONL plus exit code) and never
+- The SDK consumes only the public `ncode exec` contract (stdout JSONL plus exit code) and never
   reads runtime-internal data.
 - No runtime dependencies. The package is ESM; its `exports` have `import` and `default`
   conditions and no separate CommonJS build. CommonJS callers can still `require()` it, because
@@ -27,21 +27,27 @@ agents, or orchestrate multi-turn conversations from code.
 ## Installation and CLI resolution
 
 The SDK does not hard-depend on the CLI, which is large and ships native dependencies.
-`@minimax-ai/code` is an optional peer dependency:
+`@niwa-labs/ncode` is an optional peer dependency. Build the SDK from this checkout:
 
 ```bash
-npm install @minimax-ai/code-sdk
-npm install @minimax-ai/code   # optional; a globally installed mcode works too
+pnpm install --frozen-lockfile
+pnpm --filter @niwa-labs/ncode-sdk build
 ```
 
-`@minimax-ai/code` runs install scripts for its native dependencies. npm 11 rejects
+In the consuming project, run `npm install /absolute/path/to/ncode/packages/code-sdk` to
+add a `file:` dependency. When linking directly to a development checkout, pass the real
+CLI as `bin` (for example `new Ncode({ bin: "/path/to/bin/ncode" })`) because the SDK's
+workspace dependencies include a CLI test fixture. The consumer may install the optional CLI
+peer with `npm install @niwa-labs/ncode`.
+
+`@niwa-labs/ncode` runs install scripts for its native dependencies. npm 11 rejects
 `--allow-scripts` for project-scoped installs (`EALLOWSCRIPTS`), so approve them in the project's
 `package.json` before installing the CLI into the project:
 
 ```json
 {
   "allowScripts": {
-    "@minimax-ai/code": true,
+    "@niwa-labs/ncode": true,
     "better-sqlite3": true
   }
 }
@@ -53,47 +59,45 @@ packages.
 The SDK looks for the CLI in this order:
 
 1. The `bin` constructor option (an executable, a JS entry, or a command name on `PATH`).
-2. An installed `@minimax-ai/code` resolved from the SDK's own location (where the optional peer
-   dependency is installed). The SDK reads `bin.mcode` from that `package.json` and runs the JS
+2. An installed `@niwa-labs/ncode` resolved from the SDK's own location (where the optional peer
+   dependency is installed). The SDK reads `bin.ncode` from that `package.json` and runs the JS
    entry with `process.execPath`.
-3. `mcode` on `PATH`.
+3. `ncode` on `PATH`.
 
 Set `resolveFromCwd: true` to also search the host's working directory, after the SDK-local package
 and before `PATH`:
 
-- `@minimax-ai/code` resolved from `process.cwd()/package.json`.
-- The nearest `node_modules/.bin/mcode` (`mcode.cmd` / `mcode.ps1` on Windows) found walking up from
+- `@niwa-labs/ncode` resolved from `process.cwd()/package.json`.
+- The nearest `node_modules/.bin/ncode` (`ncode.cmd` / `ncode.ps1` on Windows) found walking up from
   `process.cwd()`. The SDK prefers the JS entry behind the symlink or npm/pnpm shim and runs it with
   `process.execPath`, so the CLI package name does not matter.
 
 Leave `resolveFromCwd` off (the default) when the working directory may be untrusted, for example a
-CI job checking out a pull request. A checkout can contain `node_modules/.bin/mcode`, and the SDK
+CI job checking out a pull request. A checkout can contain `node_modules/.bin/ncode`, and the SDK
 would execute it with the host environment. Pass `bin`, or install the CLI next to the SDK or on
 `PATH`, instead.
 
-The SDK never starts the CLI through a shell. On Windows, `mcode.cmd` is followed to the JS entry it
+The SDK never starts the CLI through a shell. On Windows, `ncode.cmd` is followed to the JS entry it
 runs, which the SDK then starts with `process.execPath`. Supported Windows installations:
 
-- the official installer (`install.ps1`): `mcode.cmd` reads the `current` release pointer and calls
+- versioned launchers using the inherited layout: `ncode.cmd` reads the `current` release pointer and calls
   `releases\<release>\.mcode-launcher.cmd`. The pointer is read again before every run, so a CLI
   self-update between Turns is picked up;
 - npm and pnpm installs, global or project-local, through their generated `.cmd` / `.ps1` shims.
 
 If a `.cmd` launcher is found but its JS entry cannot be determined, resolution fails with
-`MCodeNotFoundError`; pass the CLI's JS entry as `bin`.
+`NcodeNotFoundError`; pass the CLI's JS entry as `bin`.
 
-Before the first run, each `MCode` instance runs `mcode --version` once and caches the result. A
-CLI older than `MIN_CLI_VERSION` (currently `0.6.3`) fails with `MCodeVersionError`. Only
-`major.minor.patch` is compared, so `0.6.3-preview.N` satisfies `0.6.3`. `0.6.3` is the first CLI
-release that includes every `mcode exec` flag the SDK passes (`--system-prompt-file`,
-`--append-system-prompt-file` and `--mode` landed there; `stream-json` was already present). A
-source build of this repository reports `0.6.5` and meets the minimum.
+Before the first run, each `Ncode` instance runs `ncode --version` once and caches the result. A
+CLI older than `MIN_CLI_VERSION` (currently `0.1.2`) fails with `NcodeVersionError`. The SDK
+reads the `Ncode` line in the version banner and compares `major.minor.patch`, so
+`0.1.2-preview.N` satisfies `0.1.2`.
 
 ### Compatibility
 
-| `@minimax-ai/code-sdk` | MiniMax Code CLI (`mcode`)    | Node.js                       | Event `schemaVersion` |
+| `@niwa-labs/ncode-sdk` | Ncode CLI (`ncode`)           | Node.js                       | Event `schemaVersion` |
 | ---------------------- | ----------------------------- | ----------------------------- | --------------------- |
-| `0.1.x`                | `>=0.6.3` (`MIN_CLI_VERSION`) | `>=22.19 <23 \|\| >=24.2 <27` | `1`                   |
+| `0.1.x`                | `>=0.1.2` (`MIN_CLI_VERSION`) | `>=22.19 <23 \|\| >=24.2 <27` | `1`                   |
 
 The SDK and the CLI are released separately. Upgrading the SDK does not require upgrading the CLI
 as long as the CLI meets `MIN_CLI_VERSION`. If the CLI ever emits a new event `schemaVersion`,
@@ -102,10 +106,10 @@ upgrade to an SDK release that supports it. The Node.js range matches the CLI's.
 ## Quick start
 
 ```ts
-import { MCode } from "@minimax-ai/code-sdk";
+import { Ncode } from "@niwa-labs/ncode-sdk";
 
-const mcode = new MCode({ dataDir: "/srv/mcode-data" });
-const thread = mcode.startThread({
+const ncode = new Ncode({ dataDir: "/srv/ncode-data" });
+const thread = ncode.startThread({
   cwd: "/path/to/repo",
   model: "minimax/MiniMax-M3",
   permission: "smart",
@@ -121,7 +125,7 @@ console.log(thread.id, turn.finalResponse, turn.usage);
 await thread.run("Add unit tests for the fix");
 
 // Resume an earlier Session
-const resumed = mcode.resumeThread("mvs_xxx", { cwd: "/path/to/repo" });
+const resumed = ncode.resumeThread("mvs_xxx", { cwd: "/path/to/repo" });
 await resumed.run("Continue where you left off");
 ```
 
@@ -146,12 +150,12 @@ for await (const event of events) {
 
 ## API
 
-### `new MCode(options?)`
+### `new Ncode(options?)`
 
 | Option           | Description                                                                                                                                                                      |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bin`            | Explicit `mcode` path or command name; skips package and `PATH` lookup                                                                                                          |
-| `resolveFromCwd` | Also search `process.cwd()` for `@minimax-ai/code` and for `node_modules/.bin/mcode` in parent directories. Default `false`. See [CLI resolution](#installation-and-cli-resolution) |
+| `bin`            | Explicit `ncode` path or command name; skips package and `PATH` lookup                                                                                                          |
+| `resolveFromCwd` | Also search `process.cwd()` for `@niwa-labs/ncode` and for `node_modules/.bin/ncode` in parent directories. Default `false`. See [CLI resolution](#installation-and-cli-resolution) |
 | `dataDir`        | Data directory, passed to the CLI as the `MINIMAX_DATA_DIR` environment variable                                                                                                |
 | `env`            | Child process environment. **Replaces** `process.env` when set (no merge); defaults to `process.env`                                                                            |
 | `configPath`     | Runtime config file, passed as `--config`                                                                                                                                        |
@@ -161,7 +165,7 @@ on, so the CLI may fail to find Node.js or tools, or to read its credentials. To
 spread `process.env`:
 
 ```ts
-const mcode = new MCode({ env: { ...process.env, FOO: "bar" } });
+const ncode = new Ncode({ env: { ...process.env, FOO: "bar" } });
 ```
 
 ### `startThread(options?)` / `resumeThread(id, options?)`
@@ -179,8 +183,8 @@ Thread options are passed to the CLI on every Turn of the Thread:
 | `appendSystemPrompt` | `--append-system-prompt-file` (the SDK writes a temporary file)                 |
 
 - `mode: 'lightweight'` is only valid for a new Thread; passing it to `resumeThread` throws
-  `MCodeInvocationError` immediately.
-- There is no `ask` permission: headless runs cannot ask for approval. MiniMax Code's
+  `NcodeInvocationError` immediately.
+- There is no `ask` permission: headless runs cannot ask for approval. Ncode's
   `smart` / `full` / `off` policies are not equivalent to Codex's OS-level sandbox modes, and the
   SDK does not map between them.
 - `thread.id` becomes available once the first Turn emits its first event, even if that Turn fails.
@@ -191,7 +195,7 @@ Thread options are passed to the CLI on every Turn of the Thread:
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `files`     | Attachments, `--file` (repeatable); relative paths resolve against `cwd`                                                                                                                                |
 | `signal`    | `AbortSignal`; see [Cancellation](#cancellation-timeouts-and-process-cleanup)                                                                                                                           |
-| `timeoutMs` | Passed to the CLI as `--timeout <n>ms`; the SDK force-stops the CLI at `timeoutMs + 90s` (60s CLI shutdown plus 30s startup slack). At most `MAX_TIMEOUT_MS` (about 24.8 days, a Node.js timer limit); larger values throw `MCodeInvocationError` |
+| `timeoutMs` | Passed to the CLI as `--timeout <n>ms`; the SDK force-stops the CLI at `timeoutMs + 90s` (60s CLI shutdown plus 30s startup slack). At most `MAX_TIMEOUT_MS` (about 24.8 days, a Node.js timer limit); larger values throw `NcodeInvocationError` |
 | `maxSteps`  | `--max-steps`                                                                                                                                                                                           |
 
 - `run()` resolves only when the status is `succeeded`, with a `Turn` (`finalResponse`, normalized
@@ -234,49 +238,49 @@ protocol error.
 
 ## Errors
 
-Every error extends `MCodeError` and carries `exitCode`, `signal` and the last 64 KiB of the CLI
+Every error extends `NcodeError` and carries `exitCode`, `signal` and the last 64 KiB of the CLI
 stderr (`stderr`, for diagnostics only).
 
 When the CLI emits `exec.completed`, its `result.status` decides the error:
 
 | `result.status`  | Error                                                                               |
 | ---------------- | ----------------------------------------------------------------------------------- |
-| `failed`         | `MCodeRunError` with `category` from the result (`config` / `runtime` / `internal`) |
-| `timeout`        | `MCodeRunError` with `status === 'timeout'`                                         |
-| `limit_exceeded` | `MCodeRunError` with `status === 'limit_exceeded'`                                  |
-| `cancelled`      | `MCodeAbortError` with `name === 'AbortError'`                                      |
+| `failed`         | `NcodeRunError` with `category` from the result (`config` / `runtime` / `internal`) |
+| `timeout`        | `NcodeRunError` with `status === 'timeout'`                                         |
+| `limit_exceeded` | `NcodeRunError` with `status === 'limit_exceeded'`                                  |
+| `cancelled`      | `NcodeAbortError` with `name === 'AbortError'`                                      |
 
 When the CLI exits without `exec.completed`, the exit code decides:
 
 | Exit code                              | Error                                                       |
 | -------------------------------------- | ----------------------------------------------------------- |
-| `2` (invalid invocation)               | `MCodeInvocationError`                                      |
-| `3`                                    | `MCodeRunError`, `status: 'failed'`, `category: 'config'`   |
-| `4`                                    | `MCodeRunError`, `status: 'failed'`, `category: 'runtime'`  |
-| `6`                                    | `MCodeRunError`, `status: 'timeout'`                        |
-| `7`                                    | `MCodeRunError`, `status: 'limit_exceeded'`                 |
-| `70`                                   | `MCodeRunError`, `status: 'failed'`, `category: 'internal'` |
-| `130`                                  | `MCodeAbortError`                                           |
-| `141` (broken pipe)                    | `MCodeProtocolError`                                        |
-| `0` (success without a result)         | `MCodeProtocolError`                                        |
-| Any other code (e.g. `1`), or a signal | `MCodeRunError`, `status: 'failed'`, `category: 'internal'` |
+| `2` (invalid invocation)               | `NcodeInvocationError`                                      |
+| `3`                                    | `NcodeRunError`, `status: 'failed'`, `category: 'config'`   |
+| `4`                                    | `NcodeRunError`, `status: 'failed'`, `category: 'runtime'`  |
+| `6`                                    | `NcodeRunError`, `status: 'timeout'`                        |
+| `7`                                    | `NcodeRunError`, `status: 'limit_exceeded'`                 |
+| `70`                                   | `NcodeRunError`, `status: 'failed'`, `category: 'internal'` |
+| `130`                                  | `NcodeAbortError`                                           |
+| `141` (broken pipe)                    | `NcodeProtocolError`                                        |
+| `0` (success without a result)         | `NcodeProtocolError`                                        |
+| Any other code (e.g. `1`), or a signal | `NcodeRunError`, `status: 'failed'`, `category: 'internal'` |
 
 If the SDK itself cancelled the run (`signal`, or breaking out of `runStreamed()`), a missing
-result is reported as `MCodeAbortError` unless the CLI exited with `2`. If the SDK force-stopped the
-CLI after `timeoutMs + 90s`, it is `MCodeRunError` with `status === 'timeout'`.
+result is reported as `NcodeAbortError` unless the CLI exited with `2`. If the SDK force-stopped the
+CLI after `timeoutMs + 90s`, it is `NcodeRunError` with `status === 'timeout'`.
 
 Errors raised by the SDK itself:
 
 | Source                                                                                                                | Error                  |
 | --------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| An option the SDK rejects before starting the CLI                                                                     | `MCodeInvocationError` |
-| Non-JSON stdout or an event missing required fields                                                                   | `MCodeProtocolError`   |
-| No CLI found (includes the install command), or a found launcher whose JS entry cannot be determined (asks for `bin`) | `MCodeNotFoundError`   |
-| CLI older than `MIN_CLI_VERSION`, or an unsupported event `schemaVersion`                                             | `MCodeVersionError`    |
+| An option the SDK rejects before starting the CLI                                                                     | `NcodeInvocationError` |
+| Non-JSON stdout or an event missing required fields                                                                   | `NcodeProtocolError`   |
+| No CLI found (includes the install command), or a found launcher whose JS entry cannot be determined (asks for `bin`) | `NcodeNotFoundError`   |
+| CLI older than `MIN_CLI_VERSION`, or an unsupported event `schemaVersion`                                             | `NcodeVersionError`    |
 | Concurrent Turn on the same Thread                                                                                    | `ThreadBusyError`      |
 
-`MCodeRunError` carries `result` (the full `ExecResult` when `exec.completed` was received),
-`items`, `retryable` (from `result.error.retryable`) and `sessionId`; `MCodeAbortError` also carries
+`NcodeRunError` carries `result` (the full `ExecResult` when `exec.completed` was received),
+`items`, `retryable` (from `result.error.retryable`) and `sessionId`; `NcodeAbortError` also carries
 `sessionId`. `sessionId` is set whenever the CLI emitted at least one event (or the Thread came from
 `resumeThread`), even without `exec.completed`. The SDK never retries automatically, to avoid
 replaying writes with unknown outcomes; call `resumeThread(error.sessionId)` to continue.
@@ -339,19 +343,19 @@ directory beforehand.
 
 ## 中文
 
-SDK 在 Node.js 里驱动本机 MiniMax Code（`mcode`）。下面只覆盖本次行为；完整说明见上文英文。
+SDK 在 Node.js 里驱动本机 Ncode（`ncode`）。下面只覆盖本次行为；完整说明见上文英文。
 
 ### CLI 查找
 
 默认顺序：
 
 1. 构造参数 `bin`（可执行文件、JS 入口，或 `PATH` 上的命令名）。
-2. 安装在 SDK 旁边的 `@minimax-ai/code`（可选 peer dependency）。SDK 读取其 `bin.mcode`，并用 `process.execPath` 运行该 JS 入口。
-3. `PATH` 上的 `mcode`。
+2. 安装在 SDK 旁边的 `@niwa-labs/ncode`（可选 peer dependency）。SDK 读取其 `bin.ncode`，并用 `process.execPath` 运行该 JS 入口。
+3. `PATH` 上的 `ncode`。
 
-`resolveFromCwd` 默认为 `false`。设为 `true` 后，还会在 SDK 本地安装之后、`PATH` 之前搜索宿主的工作目录：先从 `process.cwd()/package.json` 解析 `@minimax-ai/code`，再从 `process.cwd()` 向上查找最近的 `node_modules/.bin/mcode`（Windows 上为 `mcode.cmd` / `mcode.ps1`）。工作目录不可信时（例如 CI 检出的拉取请求）请保持关闭：检出内容可以自带 `node_modules/.bin/mcode`，SDK 会带着宿主环境执行它。此时应传入 `bin`，或把 CLI 装在 SDK 旁边 / `PATH` 上。
+`resolveFromCwd` 默认为 `false`。设为 `true` 后，还会在 SDK 本地安装之后、`PATH` 之前搜索宿主的工作目录：先从 `process.cwd()/package.json` 解析 `@niwa-labs/ncode`，再从 `process.cwd()` 向上查找最近的 `node_modules/.bin/ncode`（Windows 上为 `ncode.cmd` / `ncode.ps1`）。工作目录不可信时（例如 CI 检出的拉取请求）请保持关闭：检出内容可以自带 `node_modules/.bin/ncode`，SDK 会带着宿主环境执行它。此时应传入 `bin`，或把 CLI 装在 SDK 旁边 / `PATH` 上。
 
-SDK 从不通过 shell 启动 CLI。要求的最低 CLI 版本是 `0.6.3`（`MIN_CLI_VERSION`）：该版本起具备 SDK 传入的全部 `mcode exec` 参数。本仓库源码构建的 CLI 是 `0.6.5`，满足该下限。只比较 `major.minor.patch`，因此 `0.6.3-preview.N` 视为满足 `0.6.3`。
+SDK 从不通过 shell 启动 CLI。SDK 从版本输出的 `Ncode` 行读取版本，最低版本是 `0.1.2`（`MIN_CLI_VERSION`）。只比较 `major.minor.patch`，因此 `0.1.2-preview.N` 视为满足 `0.1.2`。
 
 ### 取消、超时和退出
 
@@ -362,4 +366,4 @@ SDK 从不通过 shell 启动 CLI。要求的最低 CLI 版本是 `0.6.3`（`MIN
 
 ### 发布
 
-`@minimax-ai/code-sdk` 是本仓库里第一个非 `private` 的工作区包。不要在包目录里直接 `npm publish`：`prepublishOnly` 会拒绝。在最新的 `main` 上运行 `pnpm --filter @minimax-ai/code-sdk run release:check`，再发布它打印出的、已经检查过的 tarball。见 `RELEASING.md`。
+`@niwa-labs/ncode-sdk` 是本仓库里第一个非 `private` 的工作区包。不要在包目录里直接 `npm publish`：`prepublishOnly` 会拒绝。在最新的 `main` 上运行 `pnpm --filter @niwa-labs/ncode-sdk run release:check`，再发布它打印出的、已经检查过的 tarball。见 `RELEASING.md`。
