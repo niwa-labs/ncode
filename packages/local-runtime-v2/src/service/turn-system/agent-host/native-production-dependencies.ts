@@ -30,6 +30,10 @@ import {
 } from './execution/executor.js';
 import type { LocalTurnToolPolicyGuard } from './runner/contracts.js';
 import {
+  sessionToolPolicyAllowsTool,
+  type SessionToolPolicyEntry,
+} from '../../permission/session-tool-policy.js';
+import {
   LocalAgentConfigBuilder,
   LocalAgentPreparationService,
   type LocalAgentConfigBuilderOptions,
@@ -71,6 +75,14 @@ export interface NativeLocalTurnToolCatalogOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly emitDiagnostic?: (type: string, payload: Readonly<Record<string, unknown>>) => void;
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
+  /**
+   * Per-session built-in tool policy, read at each catalog build so a policy
+   * bound after the Session existed applies from the next Turn. Absent in
+   * embeddings/tests: the legacy all-tools mode.
+   */
+  readonly sessionToolPolicy?: {
+    get(sessionId: string): SessionToolPolicyEntry | undefined;
+  };
 }
 
 export interface NativeAgentPreparationOptions {
@@ -295,6 +307,8 @@ async function buildToolCatalog(
   options: NativeLocalTurnToolCatalogOptions,
   input: LocalTurnToolCatalogBuildInput,
 ) {
+  const policyReader = options.sessionToolPolicy;
+  const policy = policyReader?.get(input.sessionId);
   return buildLocalTurnToolCatalog({
     sessionId: input.sessionId,
     sources: await options.resolveSources(toolCatalogSourceInput(input)),
@@ -303,6 +317,18 @@ async function buildToolCatalog(
     userText: input.userText,
     ...(options.beta ? { beta: options.beta() } : {}),
     ...toolCatalogBuildOptions(options, input),
+    ...(policy ? { builtinToolAllowlist: policy.allow } : {}),
+    ...(policy ? { builtinToolServers: policy.servers } : {}),
+    // LIVE reader for composite paths (the run_code nested invoker): the
+    // snapshots above are Turn-stable, the ceiling is not.
+    ...(policyReader
+      ? {
+          liveSessionToolPolicy: (tool: import('@mavis/agent-core/tools').RuntimeTool) => {
+            const live = policyReader.get(input.sessionId);
+            return live === undefined || sessionToolPolicyAllowsTool(live, tool);
+          },
+        }
+      : {}),
   });
 }
 

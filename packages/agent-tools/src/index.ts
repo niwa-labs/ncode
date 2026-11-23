@@ -10,6 +10,7 @@ export {
   createToolSearchTool,
   authorizeMcpInvokeReference,
   createMcpInvokeTool,
+  isMcpInvokeTool,
   revokeMcpInvokeReferenceAuthorization,
   resolveMcpInvokeTarget,
   type McpInvokeReferenceTarget,

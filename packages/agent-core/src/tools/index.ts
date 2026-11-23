@@ -42,6 +42,11 @@ export {
 } from './programmatic.js';
 export { defineRuntimeTool, type RuntimeToolDeclaration } from './define.js';
 export { bindTool, toRuntimeTool } from './bind.js';
+export {
+  attachRuntimeToolMcpServer,
+  runtimeToolMcpServerOf,
+  type RuntimeToolMcpProvenance,
+} from './provenance.js';
 export { prepareEditArguments, type PreparedEditArguments } from './edit-prepare-arguments.js';
 export { coerceRuntimeToolInput, isRuntimeToolInputValid } from './input-validation.js';
 export {

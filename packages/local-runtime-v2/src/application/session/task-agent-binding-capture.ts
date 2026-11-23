@@ -74,6 +74,16 @@ export interface TaskAgentBindingCaptureOptions {
   };
   readonly runtimeOwnerKind?: string;
   readonly capabilityProfile?: 'cli';
+  /**
+   * Per-session built-in tool policy: the parent Session's entry bounds the
+   * frozen child `tools` upper limit. Absent in embeddings/tests.
+   */
+  readonly sessionToolPolicy?: {
+    get(sessionId: string): {
+      readonly allow: ReadonlySet<string>;
+      readonly servers: ReadonlySet<string>;
+    } | undefined;
+  };
 }
 
 export interface TaskAgentCapabilityInventory {
@@ -151,6 +161,10 @@ async function captureDefinition(
     capabilities: freezeSelectorCapabilities(
       profile,
       await options.inventory.capture({ session, profile }),
+      options.sessionToolPolicy,
+      // The CREATING Session's policy bounds the child: the parent when the
+      // capture is a Task, the Session itself for its own Agent definition.
+      input.parent?.sessionId ?? session.sessionId,
     ),
   };
   const selection = resolveCapturedModel({
@@ -483,7 +497,12 @@ async function captureLegacyTaskBinding(
         definitionVersion: 1,
         systemPrompt: profile.agentSystemPrompt ?? '',
         ...(profile.promptSnapshot ? { promptSnapshot: profile.promptSnapshot } : {}),
-        capabilities: freezeSelectorCapabilities(profile, inventory),
+        capabilities: freezeSelectorCapabilities(
+          profile,
+          inventory,
+          options.sessionToolPolicy,
+          session.sessionId,
+        ),
       },
     },
   };
@@ -822,17 +841,46 @@ function taskTargetModelSelection(
 function freezeSelectorCapabilities(
   profile: AgentExecutionProfile,
   ready: TaskAgentReadyCapabilityInventory,
+  sessionToolPolicy?: TaskAgentBindingCaptureOptions['sessionToolPolicy'],
+  parentSessionId?: string,
 ) {
   const filtered = filterLocalTurnCapabilityInventory({
     sources: ready.sources,
     agentProfile: toTurnProfileFacts(profile),
     ...(ready.desktopCapabilities ? { desktopCapabilities: ready.desktopCapabilities } : {}),
   });
+  // A Task child never widens beyond its parent Session's ACP tool policy:
+  // the frozen `tools` upper bound drops every policy-gated built-in (native,
+  // Builtin Matrix, thread-goal) and every tool of a server the Session's
+  // client did not supply, keeping the tools of the Session's own servers.
+  const policy =
+    parentSessionId === undefined ? undefined : sessionToolPolicy?.get(parentSessionId);
+  const policyAllows = (name: string): boolean =>
+    policy === undefined || policy.allow.has(name);
+  const policyAllowsServerTool = (name: string): boolean => {
+    if (policy === undefined) return true;
+    for (const server of policy.servers) {
+      if (name.startsWith(`mcp__${server}__`)) return true;
+    }
+    return false;
+  };
   const tools = uniqueNames([
-    ...filtered.nativeTools.map((tool) => tool.def.name),
-    ...filtered.mcpEntries.map(({ tool }) => tool.def.name),
-    ...filtered.threadGoalTools.map((tool) => tool.def.name),
-    ...(filtered.desktopCapabilities?.runtimeTools.map((tool) => tool.def.name) ?? []),
+    ...filtered.nativeTools
+      .filter((tool) => policyAllows(tool.def.name))
+      .map((tool) => tool.def.name),
+    ...filtered.mcpEntries
+      .filter(({ tool, source }) =>
+        source === 'builtin-matrix'
+          ? policyAllows(tool.def.name)
+          : policyAllowsServerTool(tool.def.name),
+      )
+      .map(({ tool }) => tool.def.name),
+    ...filtered.threadGoalTools
+      .filter((tool) => policyAllows(tool.def.name))
+      .map((tool) => tool.def.name),
+    ...(filtered.desktopCapabilities?.runtimeTools
+      .filter((tool) => policyAllows(tool.def.name) || policyAllowsServerTool(tool.def.name))
+      .map((tool) => tool.def.name) ?? []),
   ]);
   const mcpServers = uniqueNames([
     ...filtered.mcpEntries.flatMap((entry) => (entry.serverName ? [entry.serverName] : [])),

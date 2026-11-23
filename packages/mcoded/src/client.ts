@@ -1498,6 +1498,25 @@ export class RemoteCliService implements RemoteCliSurface {
 	): Promise<Awaited<ReturnType<CliService['getSessionPermissionMode']>>> {
 		return this.invoke('getSessionPermissionMode', ...params);
 	}
+
+	/**
+	 * Per-session built-in tool policy over the daemon bridge. The result is
+	 * the CliService's JSON-safe wire view (arrays, not Sets), so it crosses
+	 * the RPC boundary unchanged; a daemon too old for the allowlist entry
+	 * answers METHOD_NOT_ALLOWED, which the TUI adapter maps to the explicit
+	 * restart advice.
+	 */
+	bindSessionToolPolicy(
+		...params: RemoteCallParams<'bindSessionToolPolicy'>
+	): Promise<Awaited<ReturnType<CliService['bindSessionToolPolicy']>>> {
+		return this.invoke('bindSessionToolPolicy', ...params);
+	}
+
+	getSessionToolPolicy(
+		...params: RemoteCallParams<'getSessionToolPolicy'>
+	): Promise<Awaited<ReturnType<CliService['getSessionToolPolicy']>>> {
+		return this.invoke('getSessionToolPolicy', ...params);
+	}
 	getDangerousCommandGateEnabled(
 		...params: RemoteCallParams<'getDangerousCommandGateEnabled'>
 	): Promise<Awaited<ReturnType<CliService['getDangerousCommandGateEnabled']>>> {

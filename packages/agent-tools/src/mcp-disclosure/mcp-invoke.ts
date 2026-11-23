@@ -53,6 +53,7 @@ interface McpInvokeMetadataCarrier {
 export function createMcpInvokeTool<TCtx extends ToolExecutionContext = ToolExecutionContext>(
   registry: ReadonlyMap<string, RuntimeTool>,
   referenceRegistry: ReadonlyMap<string, McpInvokeReferenceTarget> = new Map(),
+  allowsTarget?: (target: RuntimeTool) => boolean,
 ): RuntimeTool {
   const schema = Type.Object({
     tool_name: Type.Optional(
@@ -96,6 +97,9 @@ export function createMcpInvokeTool<TCtx extends ToolExecutionContext = ToolExec
           'Host-bound tool_ref execution was not admitted by the Host policy pipeline.',
         );
       }
+      if (allowsTarget && !allowsTarget(resolution.target)) {
+        return errorResult(`Tool "${resolution.target.def.name}" is not part of this session's tool policy`);
+      }
       return resolution.target.impl.execute(
         ctx as TCtx,
         resolution.arguments as never,
@@ -113,6 +117,11 @@ export function createMcpInvokeTool<TCtx extends ToolExecutionContext = ToolExec
   });
   METADATA.set(tool, metadata);
   return tool;
+}
+
+/** Identifies the gateway by its private runtime metadata. */
+export function isMcpInvokeTool(tool: RuntimeTool): boolean {
+  return readMetadata(tool) !== undefined;
 }
 
 /** Resolves the real target for Host policy without exposing the hidden registry to the model. */

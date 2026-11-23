@@ -278,6 +278,19 @@ export interface LocalTurnToolPolicyGuard {
     readonly plan?: TurnAssemblyCtx['plan'];
     /** Exact visible user-authored query; empty for autonomous and hidden turns. */
     readonly genuineUserQueryText: string;
+    /** The Session the Turn runs in; absent only in non-production test bags. */
+    readonly sessionId?: string;
+    /**
+     * The Turn's assembled tools. Guards that need provenance (the session
+     * tool policy reads each tool's MCP server stamp) resolve the called name
+     * against this inventory.
+     */
+    readonly tools?: readonly RuntimeTool[];
+    /**
+     * The Host-bound target resolved by the tool-call lifecycle for a
+     * `tool_ref` call. It can be absent from the model-visible inventory.
+     */
+    readonly tool?: RuntimeTool;
     readonly toolContext: BeforeToolCallContext;
     readonly signal?: AbortSignal;
   }): ReturnType<PiBeforeToolCallHook>;

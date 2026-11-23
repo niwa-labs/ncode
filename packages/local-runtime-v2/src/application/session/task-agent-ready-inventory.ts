@@ -29,6 +29,8 @@ interface TaskAgentBindingCaptureRuntimeInput {
     readonly runtimeOwnerKind?: string;
     readonly capabilityProfile?: 'cli';
   };
+  /** Per-session built-in tool policy bounding Task children (services.ts). */
+  readonly sessionToolPolicy?: TaskAgentBindingCaptureOptions['sessionToolPolicy'];
 }
 
 interface TaskAgentBindingCaptureServices {
@@ -62,6 +64,9 @@ export function bindTaskAgentBindingCapture(
         : {}),
       ...(input.options.capabilityProfile
         ? { capabilityProfile: input.options.capabilityProfile }
+        : {}),
+      ...(input.sessionToolPolicy
+        ? { sessionToolPolicy: input.sessionToolPolicy }
         : {}),
     }),
   );

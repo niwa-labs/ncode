@@ -284,4 +284,83 @@ describe('task agent binding capture model group', () => {
     expect(captured.effectiveModelThinking).toBeUndefined();
     expect(captured.effectiveModelContextWindow).toBe(512_000);
   });
+
+  // A Task child never widens beyond its parent Session's ACP tool policy:
+  // the frozen `tools` upper bound drops the policy-gated built-ins and every
+  // tool of a server the Session's client did not supply.
+  it('bounds the frozen tools upper limit by the parent session tool policy', async () => {
+    const runtimeTool = (name: string) => ({
+      def: { name, description: 'Synthetic test tool', schema: { type: 'object' } },
+      impl: {
+        execute: async () => ({
+          tool_name: name,
+          text: 'ok',
+          content: [{ type: 'text' as const, text: 'ok' }],
+        }),
+      },
+    });
+    const profile: AgentExecutionProfile = {
+      requestRef: 'worker',
+      resourceReadRef: 'worker',
+      exactOwnerName: 'worker',
+      canonicalViewName: 'worker',
+      resolvedAgentName: 'worker',
+      agentRole: 'worker',
+      creationSource: 'builtin',
+      surface: 'task-child',
+      memoryReadAgentNames: [],
+      agentSystemPrompt: 'prompt',
+      corePrompt: 'prompt',
+      surfacePrompt: '',
+      capabilityCeiling: {
+        personaEnabled: false,
+        features: { mavis: false, delegation: false, webSearch: false },
+      },
+      provenance: { source: 'builtin', assetAgentName: 'worker', locale: 'en-US' },
+    };
+    const coordinator = createTaskAgentBindingCaptureCoordinator({
+      agentService: { renderProfile: async () => profile } as unknown as LocalAgentService,
+      config: () => config,
+      inventory: {
+        capture: async () => ({
+          sources: {
+            nativeTools: [runtimeTool('read'), runtimeTool('bash'), runtimeTool('todowrite')],
+            mcpEntries: [
+              {
+                tool: runtimeTool('mcp__harness__submit_answer'),
+                source: 'configured' as const,
+                serverName: 'harness',
+              },
+              {
+                tool: runtimeTool('mcp__project__read_file'),
+                source: 'configured' as const,
+                serverName: 'project',
+              },
+              { tool: runtimeTool('images_understand'), source: 'builtin-matrix' as const },
+            ],
+            threadGoalTools: [runtimeTool('update_goal')],
+            cuRuntimeAvailable: false,
+          },
+          skills: [],
+        }),
+      },
+      sessionToolPolicy: {
+        get: (sessionId: string) =>
+          sessionId === 'parent-1'
+            ? { allow: new Set(['read']), servers: new Set(['harness']) }
+            : undefined,
+      },
+    });
+
+    const captured = await coordinator.capture({
+      agentName: 'worker',
+      session: taskSession,
+      parent: parentSession,
+      parentModel,
+    });
+    expect(captured.agentDefinition.definition.capabilities.tools).toEqual([
+      'read',
+      'mcp__harness__submit_answer',
+    ]);
+  });
 });

@@ -80,6 +80,7 @@ export interface MergeAgentHostTurnCapabilitiesInput {
   readonly userText?: string;
   /** PTC Turn: only the tool_search and @Plugin reminder wording change; disclosure is the same. */
   readonly ptc?: boolean;
+  readonly allowsDeferredTool?: (target: RuntimeTool) => boolean;
 }
 
 export interface MergedAgentHostTurnCapabilities {
@@ -309,7 +310,7 @@ function mergeTools(
     preparedHost?.referenceRegistry ?? new Map<string, HostCapabilityReferenceTarget>();
   const hostTools = preparedHost?.publicTools ?? input.tools;
   const tools = withHostSkillContracts(
-    replaceMcpInvoke(hostTools, input.plan, hostReferences),
+    replaceMcpInvoke(hostTools, input.plan, hostReferences, input.allowsDeferredTool),
     hostReferences,
   );
   if (!capabilities) return { tools, plan: input.plan };
@@ -345,10 +346,12 @@ function replaceMcpInvoke(
   tools: readonly RuntimeTool[],
   plan: McpDisclosurePlan,
   hostReferences: ReadonlyMap<string, McpInvokeReferenceTarget>,
+  allowsTarget: MergeAgentHostTurnCapabilitiesInput['allowsDeferredTool'],
 ): readonly RuntimeTool[] {
   const invoke = createMcpInvokeTool(
     plan.deferred ? plan.deferredRegistry : new Map(),
     hostReferences,
+    allowsTarget,
   );
   const hasInvoke = tools.some((tool) => tool.def.name === 'mcp_invoke');
   if (!hasInvoke && hostReferences.size === 0) return tools;
@@ -407,7 +410,7 @@ function mergeSearchableTools(
         topKDefault: input.options.topKDefault,
         topKMax: input.options.topKMax,
       }),
-      createMcpInvokeTool(deferredRegistry, hostReferences),
+      createMcpInvokeTool(deferredRegistry, hostReferences, input.allowsDeferredTool),
       ...selected.inline,
     ],
     plan,

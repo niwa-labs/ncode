@@ -6,6 +6,7 @@ export { createToolSearchTool } from './tool-search.js';
 export {
   authorizeMcpInvokeReference,
   createMcpInvokeTool,
+  isMcpInvokeTool,
   revokeMcpInvokeReferenceAuthorization,
   resolveMcpInvokeTarget,
   type McpInvokeInput,

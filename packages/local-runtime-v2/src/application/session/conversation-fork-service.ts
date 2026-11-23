@@ -68,6 +68,10 @@ interface ForkServiceDependencies {
   readonly sessionPermissionModes?: {
     inherit(childSessionId: string, parentSessionId: string): void;
   };
+  /** A fork child never widens beyond its source Session's tool policy. */
+  readonly sessionToolPolicy?: {
+    inherit(childSessionId: string, parentSessionId: string): void;
+  };
   readonly worktree?: Pick<ForkWorktreePort, 'prepare' | 'probe' | 'cleanup'>;
   readonly sessionDataVersion: number;
 }
@@ -514,10 +518,20 @@ export class ForkService {
       result.child.sessionId,
       input.parentSessionId,
     );
+    this.deps.sessionToolPolicy?.inherit(result.child.sessionId, input.parentSessionId);
     return result.child;
   }
 
   async fork(input: ForkRequest): Promise<ForkResult> {
+    const result = await this.forkOnce(input);
+    // A fork child starts with no policy of its own: inherit the source's.
+    // The registry's inherit is monotonic, so a child the client already
+    // narrowed keeps the narrower set.
+    this.deps.sessionToolPolicy?.inherit(result.child.sessionId, input.sourceSessionId);
+    return result;
+  }
+
+  private async forkOnce(input: ForkRequest): Promise<ForkResult> {
     const prior = await this.deps.operations.get(input.operationId, input);
     if (prior) return { ...prior, status: 'duplicate' };
     const pending = await this.deps.operations.getPending?.(input.operationId);

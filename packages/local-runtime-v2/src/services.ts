@@ -216,6 +216,12 @@ import {
   createSessionPermissionModeRegistry,
   type SessionPermissionModeRegistry,
 } from "./service/permission/session-permission-mode.js";
+import {
+  createSessionToolPolicyFileStore,
+  createSessionToolPolicyRegistry,
+  type SessionToolPolicyRegistry,
+} from "./service/permission/session-tool-policy.js";
+import { createSessionToolPolicyGuard } from "./application/agent/session-tool-policy-guard.js";
 import { resolvePromptSuggestionEnabled } from "@mavis/config";
 import { createLogger } from "@mavis/logging";
 
@@ -258,6 +264,13 @@ export interface RuntimeServices extends RuntimeMiniAppServices {
    * Session creation points (inherit).
    */
   readonly sessionPermissionModes: SessionPermissionModeRegistry;
+  /**
+   * Per-session built-in tool policy registry (`minimax-code/toolPolicy`):
+   * ONE instance per runtime process, shared by the turn tool catalog
+   * (exposure), the dispatch guard, the CliService surface (bind/get) and the
+   * child Session creation points (inherit).
+   */
+  readonly sessionToolPolicy: SessionToolPolicyRegistry;
   readonly canvas: CanvasService;
   /** Electron-only scheduled execution capability; absent on embedded CLI. */
   readonly cron?: CronService;
@@ -494,6 +507,18 @@ export async function createRuntimeServices(
   const sessionPermissionModes = createSessionPermissionModeRegistry({
     isTurnActive: (sessionId) => sessionPermissionTurnProbe.read?.(sessionId) === true,
   });
+  // The ONE per-process built-in tool policy registry (ACP
+  // `minimax-code/toolPolicy`): exposure filter + dispatch guard + CliService
+  // bind/get + child-Session inherit all read this instance. Backed by a
+  // per-Session sidecar store: an embedded runtime (off-mode ACP, one process
+  // per session) restores a Session's ceiling across cold load/resume instead
+  // of widening it to legacy. The Turn probe is the permission-mode one:
+  // a CHANGING bind is refused under a running Turn, so a narrowing lands
+  // between Turns and composite paths re-read the live ceiling per call.
+  const sessionToolPolicy = createSessionToolPolicyRegistry({
+    store: createSessionToolPolicyFileStore(options.dataDir),
+    isTurnActive: (sessionId) => sessionPermissionTurnProbe.read?.(sessionId) === true,
+  });
   // W10: the durable orchestration composition (the ONE pi scheduler over the
   // gated SYSTEM storage + the goal/background/cron/roster bridges), with the
   // fail-closed session→conversation resolver minting one pi conversation per
@@ -606,6 +631,7 @@ export async function createRuntimeServices(
     facts,
     safety,
     sessionPermissionModes,
+    sessionToolPolicy,
     sessionPermissionTurnProbe,
     turnCapabilities,
     agentSessionPorts,
@@ -722,6 +748,7 @@ export async function createRuntimeServices(
     agent: owners.agentApplication,
     safety,
     sessionPermissionModes,
+    sessionToolPolicy,
     canvas,
     cron: owners.cron?.service,
     ...(cronDelivery ? { cronDelivery } : {}),
@@ -1026,6 +1053,8 @@ interface RuntimeServiceOwnerInitializationInput
   readonly facts: ProductionSessionComposition["facts"];
   /** §2.1 registry — shared instance for this runtime process. */
   readonly sessionPermissionModes: SessionPermissionModeRegistry;
+  /** Built-in tool policy registry — the runtime's ONE instance. */
+  readonly sessionToolPolicy: SessionToolPolicyRegistry;
   /** Late-bound Turn probe feeding the registry's `turn_active` refusal. */
   readonly sessionPermissionTurnProbe: { read?: (sessionId: string) => boolean };
   readonly safety: ContentSafetyService;
@@ -1246,7 +1275,9 @@ async function initializeRuntimeTurnSystem(
           goalFinalReply.toolPolicyGuard,
           plan.toolGuard,
           createGoalBudgetToolPolicyGuard(),
+          createSessionToolPolicyGuard(input.sessionToolPolicy),
         ),
+        sessionToolPolicy: input.sessionToolPolicy,
         outputTokenCap: goalVerifierOutputTokenCap,
         resolveLlmRetry: () => ({ observer: llmRetryObserver, subscriptionQuota: input.options.subscriptionQuota }),
         // Reactive subagents §1.7 (wave 3): the sequential executor's
@@ -1361,6 +1392,7 @@ async function initializeRuntimeTurnSystem(
         await requireAgentRuntime(agentRuntime).disposeSession(sessionId);
       } finally {
         input.sessionPermissionModes.release(sessionId);
+        input.sessionToolPolicy.release(sessionId);
         sessionCacheWarming.disposeSession(sessionId);
         await dependencies.disposeMcpSession(sessionId);
       }
@@ -1579,6 +1611,7 @@ async function initializeSessionApplications(
       questionnaires:
         input.options.compatibility.questionnaires.createService(),
       sessionPermissionModes: input.sessionPermissionModes,
+      sessionToolPolicy: input.sessionToolPolicy,
       worktree: input.options.forkWorktree ?? unavailableForkWorktree,
       attachmentRegistration:
         input.options.compatibility.attachmentRegistration,

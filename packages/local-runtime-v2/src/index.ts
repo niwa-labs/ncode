@@ -7,6 +7,15 @@ export {
   type SetModeError,
   type SetModeResult,
 } from './service/permission/session-permission-mode.js';
+export {
+  createSessionToolPolicyFileStore,
+  createSessionToolPolicyRegistry,
+  type SessionToolPolicyEntry,
+  type SessionToolPolicyOrigin,
+  type SessionToolPolicyRegistry,
+  type SessionToolPolicyStore,
+  type SessionToolPolicyWireEntry,
+} from './service/permission/session-tool-policy.js';
 export { switchRootlessV2Generation } from './infra/runtime-owner/rootless-v2-generation.js';
 export {
   disposeHeadlessSessionStorage,

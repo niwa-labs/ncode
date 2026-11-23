@@ -28,6 +28,7 @@ import type {
   ConversationSteerInput,
   ConversationSteerResult,
   SessionPermissionModeEntry,
+  SessionToolPolicyOrigin,
   SetModeResult,
 } from '@mavis/local-runtime-v2/cli-service';
 
@@ -35,6 +36,38 @@ import type {
 export type TuiSessionPermissionMode = AcpPermissionMode;
 export type TuiSessionPermissionModeOrigin = SessionPermissionModeEntry['origin'];
 export type TuiSessionPermissionModeResult = SetModeResult;
+
+export type TuiSessionToolPolicyOrigin = SessionToolPolicyOrigin;
+/** Wire view of a Session's tool policy: the kept built-ins and its own MCP servers. */
+export type TuiSessionToolPolicyEntry = {
+  readonly allow: readonly string[];
+  readonly servers: readonly string[];
+  readonly origin: TuiSessionToolPolicyOrigin;
+};
+/** One validated bind request: absent fields are ABSENT (never null) over JSON. */
+export type TuiSessionToolPolicyBindRequest = {
+  readonly allow?: readonly string[];
+  readonly servers?: readonly string[];
+};
+export type TuiSessionToolPolicyBindResult =
+  | { readonly ok: true; readonly entry?: TuiSessionToolPolicyEntry }
+  | {
+      readonly ok: false;
+      readonly error: { readonly code: 'turn_active'; readonly current: TuiSessionToolPolicyEntry | null };
+    };
+
+/**
+ * The runtime cannot serve per-session tool policies (an outdated daemon
+ * without the new RPC, or a host without the registry). ACP must fail loudly
+ * (-32603) instead of silently falling back to the all-tools mode.
+ */
+export class TuiSessionToolPolicyUnsupportedError extends Error {
+  constructor(cause?: unknown) {
+    super('runtime does not support per-session tool policy; restart mcoded');
+    this.name = 'TuiSessionToolPolicyUnsupportedError';
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
 
 /**
  * The runtime cannot serve per-session permission modes (an outdated daemon
@@ -311,6 +344,22 @@ export interface TuiConfigurationPort extends McodeProviderRuntimePort {
   getSessionPermissionMode?(
     sessionId: string,
   ): Promise<TuiSessionPermissionMode | undefined>;
+  /**
+   * Per-session built-in tool policy (`minimax-code/toolPolicy`): `bind`
+   * rides session/new, load and resume with the client's validated allow
+   * list and the names of the MCP servers the same request supplied (under
+   * an exact policy only those servers' tools stay reachable). Optional so
+   * runtime mocks stay assignable; the ACP layer treats an absent method as
+   * an unsupported runtime (-32603).
+   */
+  bindSessionToolPolicy?(
+    sessionId: string,
+    request: TuiSessionToolPolicyBindRequest,
+    origin: TuiSessionToolPolicyOrigin,
+  ): Promise<TuiSessionToolPolicyBindResult>;
+  getSessionToolPolicy?(
+    sessionId: string,
+  ): Promise<TuiSessionToolPolicyEntry | undefined>;
   /**
    * Whether the destructive-delete guard is enforced. `undefined` means the
    * host does not own this setting, which the UI reports instead of guessing.

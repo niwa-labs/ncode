@@ -242,6 +242,20 @@ export type {
   AgentsConfig,
   ResolvedAgentCapabilities,
 } from './agent-capabilities.js';
+export {
+  ACP_SESSION_TOOL_POLICY_META_KEY,
+  effectiveSessionToolNames,
+  isSessionToolCatalogName,
+  parseSessionToolPolicyMeta,
+  SESSION_EXTRA_TOOL_IDS,
+  SESSION_TOOL_CATALOG,
+} from './session-tool-policy.js';
+export type {
+  SessionToolCatalogEntry,
+  SessionToolCatalogSource,
+  SessionToolPolicyParseError,
+  SessionToolPolicyRequest,
+} from './session-tool-policy.js';
 export type {
   Config,
   TelemetryConfig,

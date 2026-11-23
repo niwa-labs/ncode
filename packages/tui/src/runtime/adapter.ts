@@ -68,6 +68,10 @@ import type {
   TuiSessionPermissionMode,
   TuiSessionPermissionModeOrigin,
   TuiSessionPermissionModeResult,
+  TuiSessionToolPolicyBindRequest,
+  TuiSessionToolPolicyBindResult,
+  TuiSessionToolPolicyEntry,
+  TuiSessionToolPolicyOrigin,
   TuiWorkspaceFileCandidate,
   TuiWorkspaceFileEntry,
   TuiWorkspaceGitMetadata,
@@ -77,7 +81,7 @@ import type {
 } from "./port.js";
 import type { TuiPermissionMode } from "../application/permission-mode.js";
 import type { TuiSandboxFilesystemMode } from "../application/sandbox-mode.js";
-import { TuiSessionPermissionModeUnsupportedError } from "./port.js";
+import { TuiSessionPermissionModeUnsupportedError, TuiSessionToolPolicyUnsupportedError } from "./port.js";
 import { resolveTuiEffortChoice } from "../application/model-effort.js";
 import type { TuiObservability } from "../observability/index.js";
 import type { TuiTokenPlanAccountStatus } from "../account/matrix-account-client.js";
@@ -520,6 +524,32 @@ export class TuiRuntimeAdapter implements TuiRuntime {
       this.cliService.getSessionPermissionMode(sessionId),
     );
   }
+  bindSessionToolPolicy(
+    sessionId: string,
+    request: TuiSessionToolPolicyBindRequest,
+    origin: TuiSessionToolPolicyOrigin,
+  ): Promise<TuiSessionToolPolicyBindResult> {
+    return resolveSessionToolPolicyCall(async () => {
+      const result = await this.cliService.bindSessionToolPolicy(sessionId, request, origin);
+      if (result.ok) {
+        return { ok: true as const, ...(result.entry ? { entry: toToolPolicyView(result.entry)! } : {}) };
+      }
+      return {
+        ok: false as const,
+        error: {
+          code: 'turn_active' as const,
+          current: result.error.current ? toToolPolicyView(result.error.current)! : null,
+        },
+      };
+    });
+  }
+  getSessionToolPolicy(
+    sessionId: string,
+  ): Promise<TuiSessionToolPolicyEntry | undefined> {
+    return resolveSessionToolPolicyCall(() =>
+      this.cliService.getSessionToolPolicy(sessionId).then(toToolPolicyView),
+    );
+  }
   getDangerousCommandGateEnabled(): Promise<boolean | undefined> {
     return this.productAccess.getDangerousCommandGateEnabled();
   }
@@ -887,4 +917,43 @@ async function resolveSessionPermissionModeCall<T>(
     }
     throw error;
   }
+}
+
+async function resolveSessionToolPolicyCall<T>(
+  call: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code === 'METHOD_NOT_ALLOWED'
+    ) {
+      throw new TuiSessionToolPolicyUnsupportedError(error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The registry/CliService entry (Sets) and the daemon RPC's wire view (arrays)
+ * both land here; normalize to the port's wire view.
+ */
+function toToolPolicyView(
+  entry:
+    | {
+        readonly allow: ReadonlySet<string> | readonly string[];
+        readonly servers: ReadonlySet<string> | readonly string[];
+        readonly origin: string;
+      }
+    | undefined,
+): TuiSessionToolPolicyEntry | undefined {
+  return entry === undefined
+    ? undefined
+    : {
+        allow: [...entry.allow],
+        servers: [...entry.servers],
+        origin: entry.origin as TuiSessionToolPolicyOrigin,
+      };
 }

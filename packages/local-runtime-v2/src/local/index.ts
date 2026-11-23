@@ -9,6 +9,7 @@ export type {
   SessionPermissionModeEntry,
   SetModeResult,
 } from "../service/permission/session-permission-mode.js";
+export type { SessionToolPolicyOrigin } from "../service/permission/session-tool-policy.js";
 export {
   PermissionReply,
   QuestionnaireSelectionMode,

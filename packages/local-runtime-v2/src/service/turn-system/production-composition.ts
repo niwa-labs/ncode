@@ -44,6 +44,7 @@ import { readProfileEnv, resolveDurableRoot } from '@mavis/config';
 import type { AppDb } from '../../infra/db/client.js';
 
 import type { ContentSafetyService } from '../content-safety/index.js';
+import type { SessionToolPolicyRegistry } from '../permission/session-tool-policy.js';
 import {
   ArchiveTitleModelAdapter,
   SessionTitleModelAdapter,
@@ -255,6 +256,11 @@ export interface CreateLocalAgentHostOptions<
   readonly publishCompactionProgress?: (event: GlobalEventInput<'session.compaction.progress'>) => void;
   readonly pluginHookSessionOwnership: TurnSystemHostCapabilities['pluginHookSessionOwnership'];
   readonly toolPolicyGuard?: LocalTurnToolPolicyGuard;
+  /**
+   * Per-session built-in tool policy registry slice, read at every catalog
+   * build. Absent in embeddings/tests: the legacy all-tools mode.
+   */
+  readonly sessionToolPolicy?: Pick<SessionToolPolicyRegistry, 'get'>;
   /** Binds the Goal verifier child's opt-in attempt cap to its provider requests. */
   readonly outputTokenCap?: LocalTurnOutputTokenCapResolver;
   readonly normalExtensions?: readonly AgentExtension[];
@@ -550,6 +556,7 @@ export async function createLocalAgentHost<
       },
       config: options.product.preparation.configBuilder.config().mcpToolSearch,
       env: process.env,
+      ...(options.sessionToolPolicy ? { sessionToolPolicy: options.sessionToolPolicy } : {}),
     },
     inputPreparation: options.product.inputPreparation,
     permission: createHostPermissionPolicy(options),

@@ -119,9 +119,13 @@ export function createControlledToolHooks<TAgent extends AgentExecutionSnapshot>
       },
       (context, signal) => {
         const effective = effectiveBeforeToolContext(delegatedToolCalls, context);
+        const target = delegatedToolCalls.get(context.toolCall.id)?.target.target;
         return toolPolicyGuard?.beforeToolCall({
           ...(input.assemblyContext.plan ? { plan: input.assemblyContext.plan } : {}),
           genuineUserQueryText: input.request.genuineUserQueryText,
+          sessionId: input.lease.sessionId,
+          tools: input.assembly.tools,
+          ...(target ? { tool: target } : {}),
           toolContext: effective,
           ...(signal ? { signal } : {}),
         });

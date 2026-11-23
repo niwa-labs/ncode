@@ -50,6 +50,10 @@ import {
 import { modelSupportsVariant } from './model-selection.js';
 import { TuiAcpPromptContinuation } from './prompt-continuation.js';
 import { summarizeSessionHealth } from './session-history-health.js';
+import {
+  bindAcpSessionToolPolicy,
+  parseAcpToolPolicyMeta,
+} from './tool-policy.js';
 import { TuiAcpUpdateProjector } from './updates.js';
 
 const AUTH_METHOD_ID = 'minimax-code-login';
@@ -683,6 +687,9 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
         assertLifecycleActive(context.signal);
         const permissionModeRequest = parseAcpPermissionModeMeta(params._meta);
         assertAcpPermissionModeMetaValid(permissionModeRequest);
+        // Validated before the Session exists: a policy naming an unknown tool
+        // must refuse the whole creation, never create and then restrict.
+        const toolPolicyRequest = parseAcpToolPolicyMeta(params._meta);
         const mcpServers = mapClientMcpServers(params.mcpServers);
         session = await options.runtime.createSession({
           workspaceDir: params.cwd,
@@ -699,6 +706,17 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           session.sessionId,
           requested.mode,
           requested.origin,
+        );
+        // The tool policy binds on the same boundary: an unsupported runtime
+        // refuses the creation (fail closed), an absent key stays legacy. The
+        // MCP server names of this same request ride along — under an exact
+        // policy only those servers stay reachable for the Session.
+        await bindAcpSessionToolPolicy(
+          options.runtime,
+          session.sessionId,
+          toolPolicyRequest,
+          'new-explicit',
+          mcpServers.map((server) => server.name),
         );
         const provisionalToken = Symbol(session.sessionId);
         let resolveProvisional!: () => void;
@@ -974,6 +992,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   app.onRequest(acp.methods.agent.session.load, async (context) => {
     const permissionModeRequest = parseAcpPermissionModeMeta(context.params._meta);
     assertAcpPermissionModeMetaValid(permissionModeRequest);
+    const toolPolicyRequest = parseAcpToolPolicyMeta(context.params._meta);
     return runSessionLifecycle(context.params.sessionId, async (signal) => {
       const requestSignal = AbortSignal.any([signal, context.signal]);
       let active: AcpSession | undefined;
@@ -1029,6 +1048,18 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               permissionModeRequest.mode ?? 'default',
               permissionModeRequest.mode !== undefined ? 'load-explicit' : 'load-default',
             );
+            // A load re-binds the tool policy the same way: an explicit list
+            // narrows monotonically in the registry (never widens), an absent
+            // key keeps the Session's previous mode (restored from the
+            // durable store after a process restart). The servers of this
+            // same request narrow the Session's reachable server set.
+            await bindAcpSessionToolPolicy(
+              options.runtime,
+              runtimeSessionId,
+              toolPolicyRequest,
+              'load-explicit',
+              mapClientMcpServers(context.params.mcpServers ?? []).map((server) => server.name),
+            );
             const attachment = active;
             const messages = await loadCompleteHistory(
               options.runtime,
@@ -1059,6 +1090,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
   app.onRequest(acp.methods.agent.session.resume, async (context) => {
     const permissionModeRequest = parseAcpPermissionModeMeta(context.params._meta);
     assertAcpPermissionModeMetaValid(permissionModeRequest);
+    const toolPolicyRequest = parseAcpToolPolicyMeta(context.params._meta);
     return runSessionLifecycle(context.params.sessionId, async (signal) => {
       const requestSignal = AbortSignal.any([signal, context.signal]);
       let active: AcpSession | undefined;
@@ -1111,6 +1143,15 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
               runtimeSessionId,
               permissionModeRequest.mode ?? 'default',
               permissionModeRequest.mode !== undefined ? 'load-explicit' : 'load-default',
+            );
+            // Resume keeps the tool-policy rules of load: an explicit list can
+            // only narrow, an absent key keeps the previous mode.
+            await bindAcpSessionToolPolicy(
+              options.runtime,
+              runtimeSessionId,
+              toolPolicyRequest,
+              'load-explicit',
+              mapClientMcpServers(context.params.mcpServers ?? []).map((server) => server.name),
             );
             advertiseAvailableCommands(context.client, context.params.sessionId);
             const control = await getTuiAcpSessionControlState(options.runtime, active.session);

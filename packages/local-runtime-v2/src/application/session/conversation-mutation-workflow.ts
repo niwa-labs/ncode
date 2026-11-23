@@ -156,6 +156,10 @@ export interface ConversationMutationWorkflowDependencies {
   readonly sessionPermissionModes?: {
     inherit(childSessionId: string, parentSessionId: string): void;
   };
+  /** A fork child never widens beyond its source Session's tool policy. */
+  readonly sessionToolPolicy?: {
+    inherit(childSessionId: string, parentSessionId: string): void;
+  };
   readonly worktree: ForkWorktreePort;
   readonly attachmentRegistration: LocalAttachmentRegistrationPort;
   readonly publishGlobalEvent: GlobalEventPublisher;
@@ -238,6 +242,7 @@ function createForkService(
     state: input.forkState,
     operations,
     sessionPermissionModes: input.sessionPermissionModes,
+    sessionToolPolicy: input.sessionToolPolicy,
     worktree: input.worktree,
     sessionDataVersion: input.sessionFork.sessionDataVersion,
     history: {

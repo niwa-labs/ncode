@@ -100,6 +100,11 @@ import type {
   SessionPermissionModeRegistry,
   SetModeResult,
 } from "../service/permission/session-permission-mode.js";
+import type {
+  SessionToolPolicyOrigin,
+  SessionToolPolicyRegistry,
+  SessionToolPolicyWireEntry,
+} from "../service/permission/session-tool-policy.js";
 
 export interface CliServiceOptions {
   readonly applications: RuntimeApplications;
@@ -107,10 +112,16 @@ export interface CliServiceOptions {
   readonly conversation: ConversationApplication;
   /** §2.1 per-session permission-mode registry (the runtime's ONE instance). */
   readonly sessionPermissionModes?: SessionPermissionModeRegistry;
+  /** Per-session built-in tool policy registry (the runtime's ONE instance). */
+  readonly sessionToolPolicy?: SessionToolPolicyRegistry;
 }
 
 export type CliSendMessageReq = ConversationSendMessageRequest;
 export type CliSendMessageOptions = ConversationSendOptions;
+export type {
+  SessionToolPolicyOrigin,
+  SessionToolPolicyWireEntry,
+} from "../service/permission/session-tool-policy.js";
 
 /** In-process CLI entry point: call local Application directly, without HTTP or RPC envelopes. */
 export class CliService {
@@ -710,6 +721,60 @@ export class CliService {
     return this.options.sessionPermissionModes;
   }
 
+  /**
+   * ACP surface (and daemon RPC): binds a Session's built-in tool policy
+   * (session/new, load, resume). The request is ONE validated object —
+   * absent fields are absent, never `null` (a positional `undefined`
+   * serializes to `null` over JSON and would read as an explicit empty
+   * list). An absent `allow` keeps the previous ceiling; an explicit list
+   * narrows monotonically; a CHANGING bind under a running Turn is refused
+   * with `turn_active`. `servers` names the MCP servers the request carried.
+   */
+  bindSessionToolPolicy(
+    sessionId: string,
+    request: { allow?: readonly string[]; servers?: readonly string[] },
+    origin: SessionToolPolicyOrigin,
+  ): Promise<
+    | { ok: true; entry?: SessionToolPolicyWireEntry }
+    | { ok: false; error: { code: "turn_active"; current: SessionToolPolicyWireEntry | null } }
+  > {
+    const allow = normalizeToolPolicyNames(request.allow, "allow");
+    const servers = normalizeToolPolicyNames(request.servers, "servers");
+    if (origin !== "new-explicit" && origin !== "load-explicit" && origin !== "inherited") {
+      throw new Error(`Invalid session tool-policy origin: ${String(origin)}`);
+    }
+    const result = this.requireSessionToolPolicy().bind(sessionId, allow, origin, servers);
+    if (!result.ok) {
+      return Promise.resolve({
+        ok: false as const,
+        error: {
+          code: "turn_active" as const,
+          current: result.error.current ? toWireEntry(result.error.current) ?? null : null,
+        },
+      });
+    }
+    return Promise.resolve({
+      ok: true as const,
+      ...(result.entry ? { entry: toWireEntry(result.entry) } : {}),
+    });
+  }
+
+  /** ACP surface: the Session's policy entry (wire view), `undefined` in legacy mode. */
+  getSessionToolPolicy(
+    sessionId: string,
+  ): Promise<SessionToolPolicyWireEntry | undefined> {
+    return Promise.resolve(
+      toWireEntry(this.requireSessionToolPolicy().get(sessionId)),
+    );
+  }
+
+  private requireSessionToolPolicy(): SessionToolPolicyRegistry {
+    if (!this.options.sessionToolPolicy) {
+      throw new Error("Runtime does not expose the session tool-policy registry.");
+    }
+    return this.options.sessionToolPolicy;
+  }
+
   setPermissionMode(
     input: Parameters<
       NonNullable<LocalRuntimeApplication["configuration"]>["setPermissionMode"]
@@ -1116,4 +1181,32 @@ function toQuestionnaireStatus(
     case "dismissed":
       return QuestionnaireStatus.Dismissed;
   }
+}
+
+/** The registry's Set entry as the JSON-safe wire view. */
+function toWireEntry(
+  entry:
+    | {
+        readonly allow: ReadonlySet<string>;
+        readonly servers: ReadonlySet<string>;
+        readonly origin: SessionToolPolicyOrigin;
+      }
+    | undefined,
+): SessionToolPolicyWireEntry | undefined {
+  return entry === undefined
+    ? undefined
+    : { allow: [...entry.allow], servers: [...entry.servers], origin: entry.origin };
+}
+
+/**
+ * One bind-request field over the wire: `undefined`/`null` mean ABSENT (the
+ * JSON encoding of a positional `undefined`), anything but an array of
+ * non-empty strings is refused.
+ */
+function normalizeToolPolicyNames(value: unknown, label: string): readonly string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((name) => typeof name !== "string" || !name)) {
+    throw new Error(`Invalid session tool-policy ${label}: expected an array of tool names`);
+  }
+  return value as readonly string[];
 }

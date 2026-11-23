@@ -1,4 +1,5 @@
 import type { RuntimeTool, RuntimeToolSource } from '@mavis/agent-core/tools';
+import { attachRuntimeToolMcpServer } from '@mavis/agent-core/tools';
 import {
   createLocalBashToolDefinition,
   isSessionHistoryOnlyTool,
@@ -7,6 +8,7 @@ import {
 import {
   filterCanonicalNativeToolCeiling,
   createMcpInvokeTool,
+  isMcpInvokeTool,
   createToolSearchTool,
   getSuppressedToolNamesForModelCapabilities,
   isCanonicalBuiltinTurn,
@@ -121,6 +123,27 @@ export interface BuildLocalTurnToolCatalogInput {
     readonly name: string;
   }[];
   readonly userText?: string;
+  /**
+   * Exposure-side session tool policy: the exact built-in tool names the
+   * Session's ACP policy keeps. `undefined` = legacy mode (no filtering).
+   * Native built-ins, thread-goal tools, Builtin Matrix MCP tools and the
+   * `run_code` gate are dropped unless named; the tools of configured MCP
+   * servers and the disclosure tools that reach them stay.
+   */
+  readonly builtinToolAllowlist?: ReadonlySet<string>;
+  /**
+   * The MCP server names the Session's client supplied (session/new|load
+   * `mcpServers`). Under an exact policy only those servers' tools stay
+   * reachable — ambient project/data-dir servers and unprovenanced plugin
+   * host tools are dropped. `undefined` = legacy mode (no server filtering).
+   */
+  readonly builtinToolServers?: ReadonlySet<string>;
+  /**
+   * LIVE policy check for composite execution paths that outlive the catalog
+   * snapshot. The code runner and deferred gateway re-read it immediately
+   * before executing each concrete target.
+   */
+  readonly liveSessionToolPolicy?: (tool: RuntimeTool) => boolean;
 }
 
 /** The already-gated inventory shared by Turn assembly and Task capture. */
@@ -143,6 +166,8 @@ export function filterLocalTurnCapabilityInventory(input: {
   readonly agentProfile?: LocalTurnAgentProfileFacts;
   readonly desktopCapabilities?: AgentHostTurnCapabilityView;
   readonly hostCapabilityRegistry?: HostCapabilityResolver;
+  readonly builtinToolAllowlist?: ReadonlySet<string>;
+  readonly builtinToolServers?: ReadonlySet<string>;
 }): FilteredLocalTurnCapabilityInventory {
   const excludedNames = getSuppressedToolNamesForModelCapabilities(input.modelCapabilities);
   const profile = input.agentProfile;
@@ -176,24 +201,47 @@ export function filterLocalTurnCapabilityInventory(input: {
       profile,
     });
   const nativeTools = filterCanonicalNativeToolCeiling(
-    input.sources.nativeTools.filter((tool) =>
-      keep(
-        tool,
-        'builtin',
-        hasBrowserHostAlias && tool.def.name === 'browser' ? { selectorAlias: 'mcp_browser' } : {},
-      ),
+    input.sources.nativeTools.filter(
+      (tool) =>
+        sessionPolicyAllows(input.builtinToolAllowlist, tool.def.name) &&
+        keep(
+          tool,
+          'builtin',
+          hasBrowserHostAlias && tool.def.name === 'browser'
+            ? { selectorAlias: 'mcp_browser' }
+            : {},
+        ),
     ),
     profile?.canonicalRole,
     profile?.trustedBuiltin === true,
   );
   // THEIR 0.7.2 canonical-MCP filter belongs to the deferred tool_search
   // family; until that lands, the kept entries pass through unfiltered.
-  const mcpEntries = input.sources.mcpEntries.filter(({ tool, source, serverName }) =>
-    keep(tool, source, { mcp: true, ...(serverName ? { serverName } : {}) }),
+  // A session tool policy gates the bundled Builtin Matrix tools by catalog
+  // name, and every configured server by provenance: only the servers the
+  // Session's client supplied stay — ambient project/data-dir servers are
+  // dropped for restricted Sessions only (legacy keeps today's behavior).
+  const mcpEntries = input.sources.mcpEntries.filter(
+    ({ tool, source, serverName }) =>
+      (source === 'builtin-matrix'
+        ? sessionPolicyAllows(input.builtinToolAllowlist, tool.def.name)
+        : sessionPolicyServerAllows(input.builtinToolServers, serverName)) &&
+      keep(tool, source, { mcp: true, ...(serverName ? { serverName } : {}) }),
   );
+  // Stamp the trusted server identity onto the kept entries' tools: the
+  // model-visible name is a projection (normalized, shortened,
+  // collision-disambiguated) and can never prove provenance by itself. The
+  // stamps ride the tool OBJECT references into the inline list, the deferred
+  // registry and the plugin-host merge, where dispatch reads them.
+  for (const { tool, source, serverName } of mcpEntries) {
+    if (source !== 'builtin-matrix' && serverName) attachRuntimeToolMcpServer(tool, serverName);
+  }
   const threadGoalTools = resolveThreadGoalTools(
     profile,
-    input.sources.threadGoalTools.filter((tool) => keep(tool, 'builtin')),
+    input.sources.threadGoalTools.filter(
+      (tool) =>
+        sessionPolicyAllows(input.builtinToolAllowlist, tool.def.name) && keep(tool, 'builtin'),
+    ),
   );
   return {
     selector,
@@ -211,6 +259,7 @@ export function filterLocalTurnCapabilityInventory(input: {
             input.desktopCapabilities,
             keep,
             profile?.configSelection?.mcpServers !== undefined,
+            input.builtinToolServers,
           ),
         }
       : {}),
@@ -231,6 +280,8 @@ export function buildLocalTurnToolCatalog(
   const { nativeTools, mcpEntries, threadGoalTools } = inventory;
   // Keep external tools directly callable without adding built-in lookup tools.
   const externalOnly = input.sources.externalToolsOnly === true;
+  // Composite callers pass a LIVE reader; the snapshots above stay Turn-stable.
+  const liveSessionToolPolicy = input.liveSessionToolPolicy;
   const model = input.llmModel;
   const plan = externalOnly
     ? { deferred: false as const, inlineTools: mcpEntries.map((entry) => entry.tool) }
@@ -274,6 +325,7 @@ export function buildLocalTurnToolCatalog(
     model,
     options,
     effectivePluginSkills,
+    ...(liveSessionToolPolicy ? { allowsDeferredTool: liveSessionToolPolicy } : {}),
     surface: input.agentProfile?.surface ?? 'interactive',
     ...(input.hostCapabilityRegistry && !externalOnly
       ? { hostCapabilityRegistry: input.hostCapabilityRegistry }
@@ -294,8 +346,13 @@ export function buildLocalTurnToolCatalog(
   // other tool in this catalog. Worker sandbox per the accepted decision
   // (fresh worker+VM per run); scripts get only the injected tools —
   // no session/store/hidden surfaces, everything routes through ONE invoker.
+  // A session tool policy gates it like any other built-in.
   const finalTools: RuntimeTool[] = [...merged.tools];
-  if (!externalOnly && isRunCodeEnabled(input.beta)) {
+  if (
+    !externalOnly &&
+    sessionPolicyAllows(input.builtinToolAllowlist, 'run_code') &&
+    isRunCodeEnabled(input.beta)
+  ) {
     const callable = finalTools.filter((tool) => tool.def.name !== 'run_code');
     const runCode: RuntimeTool = {
       def: {
@@ -323,6 +380,20 @@ export function buildLocalTurnToolCatalog(
               nestedIndex += 1;
               const target = callable.find((tool) => tool.def.name === name);
               if (!target) throw new Error(`Tool "${name}" is not available to run_code`);
+              // The catalog snapshot is per-Turn; the policy is not. Every
+              // nested target re-reads the LIVE ceiling, so a narrowing that
+              // landed after this Turn's assembly still binds the script.
+              // The assembled gateway checks its resolved operation at dispatch.
+              // All other children are checked here against the actual tool object.
+              if (
+                !isMcpInvokeTool(target) &&
+                liveSessionToolPolicy &&
+                !liveSessionToolPolicy(target)
+              ) {
+                throw new Error(
+                  `Tool "${name}" is not part of this session's tool policy`,
+                );
+              }
               const nestedCtx = {
                 sessionId: ctx.sessionId,
                 turnId: ctx.turnId,
@@ -552,13 +623,27 @@ function filterDesktopCapabilities(
     options?: { readonly mcp?: boolean; readonly serverName?: string },
   ) => boolean,
   requireMcpServerProvenance: boolean,
+  sessionToolServers?: ReadonlySet<string>,
 ): AgentHostTurnCapabilityView | undefined {
   if (!capabilities) return undefined;
-  const bindings = capabilities.runtimeToolBindings.filter((binding) =>
-    keep(binding.tool, 'configured', {
-      ...(binding.kind === 'mcp' ? { mcp: true, serverName: binding.source } : {}),
-    }),
-  );
+  // Under a session tool policy the plugin host surface needs provenance an
+  // app/native binding cannot give: only bindings of the Session's own MCP
+  // servers survive; unbound direct tools are dropped (fail closed).
+  const policyAllowsBinding = (binding: AgentHostTurnCapabilityView['runtimeToolBindings'][number]): boolean =>
+    sessionToolServers === undefined ||
+    (binding.kind === 'mcp' && sessionToolServers.has(binding.source));
+  const bindings = capabilities.runtimeToolBindings
+    .filter(policyAllowsBinding)
+    .filter((binding) =>
+      keep(binding.tool, 'configured', {
+        ...(binding.kind === 'mcp' ? { mcp: true, serverName: binding.source } : {}),
+      }),
+    );
+  // Same provenance stamp as the ready MCP entries: a plugin-host MCP binding
+  // carries its configured server identity on the tool object.
+  for (const binding of bindings) {
+    if (binding.kind === 'mcp') attachRuntimeToolMcpServer(binding.tool, binding.source);
+  }
   const allowedBindingTools = new Set(bindings.map((binding) => binding.tool));
   const allBindingTools = new Set(capabilities.runtimeToolBindings.map((binding) => binding.tool));
   return {
@@ -566,6 +651,7 @@ function filterDesktopCapabilities(
     runtimeToolBindings: bindings,
     runtimeTools: capabilities.runtimeTools.filter((tool) => {
       if (allBindingTools.has(tool)) return allowedBindingTools.has(tool);
+      if (sessionToolServers !== undefined) return false;
       // Older/third-party capability providers can expose a direct RuntimeTool
       // without an owner binding. Keep that existing inventory under normal
       // gates. A declared MCP server selector is different: without server
@@ -579,6 +665,27 @@ function filterDesktopCapabilities(
 
 function isMcpRuntimeTool(tool: RuntimeTool): boolean {
   return normalizedSelectorName(tool.def.name).startsWith('mcp__');
+}
+
+/** A session policy keeps only the names it holds; `undefined` = legacy mode keeps all. */
+function sessionPolicyAllows(
+  allowlist: ReadonlySet<string> | undefined,
+  name: string,
+): boolean {
+  return allowlist === undefined || allowlist.has(name);
+}
+
+/**
+ * A session policy keeps only the servers its client supplied — an entry
+ * without a server name has no provenance and is dropped (fail closed).
+ * `undefined` = legacy mode keeps every server.
+ */
+function sessionPolicyServerAllows(
+  servers: ReadonlySet<string> | undefined,
+  serverName: string | undefined,
+): boolean {
+  if (servers === undefined) return true;
+  return serverName !== undefined && servers.has(serverName);
 }
 
 function filterExtensionSkills(

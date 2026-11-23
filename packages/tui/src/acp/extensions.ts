@@ -5,6 +5,7 @@ import * as acp from '@agentclientprotocol/sdk';
 import { pendingQuestionnaireForTurn } from '../application/pending-questionnaire.js';
 import type { TuiSession } from '../runtime/port.js';
 import type { TuiAcpRuntime } from './runtime.js';
+import { readTuiAcpSessionTools } from './tool-policy.js';
 
 export const TUI_ACP_EXTENSION_VERSION = 1;
 
@@ -27,6 +28,7 @@ export const TUI_ACP_EXTENSION_METHODS = [
   'mcode/session/queue/steer',
   'mcode/session/turn_status',
   'mcode/session/turn_result',
+  'mcode/session/tools',
   ...TUI_ACP_GOAL_METHODS,
   'mcode/session/delegation/get',
   'mcode/session/delegation/stop',
@@ -282,6 +284,14 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
     }
     const answer = await readCommittedTurnAnswer(options.runtime, params.sessionId, params.turnId);
     return { status: 'completed', answer };
+  });
+
+  // The built-in tool surface of one Session: the stable catalog (name +
+  // source) and the effective set its policy keeps. Read-only; the policy
+  // itself rides session/new|load|resume `_meta["minimax-code/toolPolicy"]`.
+  options.app.onRequest('mcode/session/tools', parseSessionRequest, async ({ params }) => {
+    const session = resolve(params.sessionId);
+    return readTuiAcpSessionTools(options.runtime, session.sessionId);
   });
 
   options.app.onRequest('mcode/session/goal/get', parseSessionRequest, async ({ params }) => {
