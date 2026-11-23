@@ -1,19 +1,19 @@
 # Releasing the upstream TypeScript SDK
 
-This document describes MiniMax’s upstream distribution. Niwa Labs distributes this fork as source.
+For consumption directly from source, follow the installation instructions in the README.
 
-The SDK is published manually by a maintainer to the public npm registry as
-`@minimax-ai/code-sdk`, with the `latest` dist-tag only. It is versioned independently of the CLI.
+These steps describe how a maintainer can publish to the public npm registry as
+`@niwa-labs/ncode-sdk`, with the `latest` dist-tag only. It is versioned independently of the CLI.
 This file is not part of the npm package.
 
 ## Rules
 
 - Publish only to `https://registry.npmjs.org/`. `package.json#publishConfig.registry` and
   `--registry` only replace the **default** registry. A scoped setting such as
-  `@minimax-ai:registry=<mirror>` in any npmrc still wins for this `@minimax-ai/*` package, for
+  `@niwa-labs:registry=<mirror>` in any npmrc still wins for this `@niwa-labs/*` package, for
   `npm publish` as well as for `npm view`. Every npm command below therefore passes both
-  `--registry=https://registry.npmjs.org/` and `--@minimax-ai:registry=https://registry.npmjs.org/`,
-  and `release:check` refuses to run while a different `@minimax-ai:registry` is configured.
+  `--registry=https://registry.npmjs.org/` and `--@niwa-labs:registry=https://registry.npmjs.org/`,
+  and `release:check` refuses to run while a different `@niwa-labs:registry` is configured.
 - A published version is immutable. Never try to republish or overwrite an exact version; fix
   problems in a new version. Prefer `npm deprecate` over `npm unpublish` for a broken release.
 - Versions are stable `X.Y.Z`. There is no prerelease channel yet.
@@ -34,14 +34,14 @@ This file is not part of the npm package.
 git switch main
 git pull --ff-only
 pnpm install --frozen-lockfile
-pnpm --filter @minimax-ai/code-sdk run release:check
+pnpm --filter @niwa-labs/ncode-sdk run release:check
 ```
 
 `release:check` never publishes. It:
 
-1. reads the effective npm configuration and fails if `@minimax-ai:registry` points anywhere other
-   than npmjs (check with `npm config get @minimax-ai:registry`; remove it with
-   `npm config delete @minimax-ai:registry` or override it for the release);
+1. reads the effective npm configuration and fails if `@niwa-labs:registry` points anywhere other
+   than npmjs (check with `npm config get @niwa-labs:registry`; remove it with
+   `npm config delete @niwa-labs:registry` or override it for the release);
 2. requires a clean working tree on `main` equal to `origin/main`;
 3. checks that the version is `X.Y.Z`, matches the first CHANGELOG section, and is not on npm yet;
    that the package is not private, pins `publishConfig`, has no runtime dependencies and publishes
@@ -72,8 +72,8 @@ Run the printed command yourself. It publishes the tarball that was just checked
 
 ```bash
 npm login --registry=https://registry.npmjs.org/    # if needed; 2FA is required
-npm publish /tmp/code-sdk-release-XXXX/minimax-ai-code-sdk-X.Y.Z.tgz \
-  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/ \
+npm publish /tmp/code-sdk-release-XXXX/niwa-labs-ncode-sdk-X.Y.Z.tgz \
+  --registry=https://registry.npmjs.org/ --@niwa-labs:registry=https://registry.npmjs.org/ \
   --access public --tag latest
 ```
 
@@ -83,10 +83,10 @@ available.
 ## 4. Read back
 
 ```bash
-npm view @minimax-ai/code-sdk@X.Y.Z version dist.integrity \
-  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
-npm view @minimax-ai/code-sdk dist-tags \
-  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
+npm view @niwa-labs/ncode-sdk@X.Y.Z version dist.integrity \
+  --registry=https://registry.npmjs.org/ --@niwa-labs:registry=https://registry.npmjs.org/
+npm view @niwa-labs/ncode-sdk dist-tags \
+  --registry=https://registry.npmjs.org/ --@niwa-labs:registry=https://registry.npmjs.org/
 ```
 
 The integrity must equal the value printed by `release:check`, and `latest` must point to
@@ -98,10 +98,10 @@ tarball. Investigate and publish a new version; never overwrite.
 ```bash
 smoke="$(mktemp -d)" && cd "$smoke"
 echo '{"name":"code-sdk-smoke","private":true}' > package.json
-npm install @minimax-ai/code-sdk@X.Y.Z --no-package-lock \
-  --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/
-node --input-type=module -e "const sdk = await import('@minimax-ai/code-sdk'); console.log(typeof sdk.MCode)"
-node -e "console.log(typeof require('@minimax-ai/code-sdk').MCode)"
+npm install @niwa-labs/ncode-sdk@X.Y.Z --no-package-lock \
+  --registry=https://registry.npmjs.org/ --@niwa-labs:registry=https://registry.npmjs.org/
+node --input-type=module -e "const sdk = await import('@niwa-labs/ncode-sdk'); console.log(typeof sdk.Ncode)"
+node -e "console.log(typeof require('@niwa-labs/ncode-sdk').Ncode)"
 ```
 
 Both commands must print `function`.
@@ -109,7 +109,7 @@ Both commands must print `function`.
 ## 6. Optional: tag the release
 
 ```bash
-git tag -a code-sdk-vX.Y.Z -m "@minimax-ai/code-sdk X.Y.Z" <published commit>
+git tag -a code-sdk-vX.Y.Z -m "@niwa-labs/ncode-sdk X.Y.Z" <published commit>
 git push origin code-sdk-vX.Y.Z
 ```
 
@@ -125,5 +125,5 @@ move or delete a pushed release tag.
   publish again unless `npm view` confirms the version does not exist.
 - **Read-back shows different integrity, or the smoke test fails**: the version is published and
   cannot be replaced. Release a fixed version; deprecate the broken one with
-  `npm deprecate @minimax-ai/code-sdk@X.Y.Z "<reason>" --registry=https://registry.npmjs.org/ --@minimax-ai:registry=https://registry.npmjs.org/`
+  `npm deprecate @niwa-labs/ncode-sdk@X.Y.Z "<reason>" --registry=https://registry.npmjs.org/ --@niwa-labs:registry=https://registry.npmjs.org/`
   if users should avoid it.

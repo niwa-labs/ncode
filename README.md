@@ -167,7 +167,7 @@ Use `ncode init .` to generate or update project guidance in `AGENTS.md`. Descri
 | Interactive TUI | `ncode [prompt]` | Explore code, continue a conversation, and review changes or permissions. |
 | Headless | `ncode exec [prompt]` | Shell scripts, CI, batch work, and evaluations. |
 | ACP | `ncode acp` | Editors and clients supporting Agent Client Protocol. |
-| TypeScript SDK | [`@minimax-ai/code-sdk`](packages/code-sdk/README.md) | Drive `ncode exec` from Node.js code: start, stream and resume conversations. |
+| TypeScript SDK | [`@niwa-labs/ncode-sdk`](packages/code-sdk/README.md) | Drive `ncode exec` from Node.js code: start, stream and resume conversations. |
 
 ### Lightweight conversations
 
