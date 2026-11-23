@@ -12,15 +12,15 @@ const RELEASE_KEY = /^[0-9A-Za-z][0-9A-Za-z._-]*$/u;
 const SHIM_HEAD_BYTES = 4096;
 
 /**
- * Finds a project-local `mcode` launcher by walking up from `startDir` and checking each
- * `node_modules/.bin`. Any CLI package that provides the `mcode` bin is accepted, so projects
- * can pin whichever MCode distribution they install.
+ * Finds a project-local `ncode` launcher by walking up from `startDir` and checking each
+ * `node_modules/.bin`. Any CLI package that provides the `ncode` bin is accepted, so projects
+ * can pin whichever Ncode distribution they install.
  */
 export function findProjectBin(
   startDir: string,
   platform: NodeJS.Platform = process.platform,
 ): ResolvedCli | undefined {
-  const names = platform === 'win32' ? ['mcode.cmd', 'mcode.ps1'] : ['mcode'];
+  const names = platform === 'win32' ? ['ncode.cmd', 'ncode.ps1'] : ['ncode'];
   let directory = resolve(startDir);
   for (;;) {
     for (const name of names) {
@@ -47,7 +47,7 @@ function resolveLauncher(launcher: string, platform: NodeJS.Platform): ResolvedC
     // Shims are only used through their JS entry; the SDK never starts a shell.
     return resolveCmdLauncher(head, launcher, 'project');
   }
-  // npm links `.bin/mcode` to the package's JS entry; pnpm writes a shell shim.
+  // npm links `.bin/ncode` to the package's JS entry; pnpm writes a shell shim.
   const real = realpathSync(launcher);
   if (JS_EXTENSIONS.has(extname(real).toLowerCase())) {
     return { kind: 'node', path: real, source: 'project' };
@@ -79,7 +79,7 @@ export function resolveCmdLauncher(
 }
 
 /**
- * Follows the installer's versioned layout: `<prefix>\mcode.cmd` reads the release key from
+ * Follows the installer's versioned layout: `<prefix>\ncode.cmd` reads the release key from
  * `<prefix>\current` and calls `<prefix>\releases\<release>\.mcode-launcher.cmd`, which runs the
  * CLI's JS entry. Returns that JS entry, or `undefined` when the layout does not match.
  */

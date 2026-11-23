@@ -1,22 +1,20 @@
 {
-  "name": "@minimax-ai/code-sdk",
+  "name": "@niwa-labs/ncode-sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for driving the local MiniMax Code (mcode) agent from Node.js.",
+  "description": "TypeScript SDK for driving the local Ncode agent from Node.js.",
   "keywords": [
-    "minimax",
-    "minimax-code",
-    "mcode",
+    "ncode",
     "agent",
     "coding-agent",
     "sdk"
   ],
-  "homepage": "https://agent.minimax.io",
+  "homepage": "https://github.com/niwa-labs/ncode/tree/main/packages/code-sdk",
   "bugs": {
-    "url": "https://github.com/MiniMax-AI/minimax-code/issues"
+    "url": "https://github.com/niwa-labs/ncode/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MiniMax-AI/minimax-code.git",
+    "url": "git+https://github.com/niwa-labs/ncode.git",
     "directory": "packages/code-sdk"
   },
   "license": "MIT",
@@ -46,10 +44,10 @@
     "node": ">=22.19 <23 || >=24.2 <27"
   },
   "peerDependencies": {
-    "@minimax-ai/code": ">=0.6.3"
+    "@niwa-labs/ncode": ">=0.1.2"
   },
   "peerDependenciesMeta": {
-    "@minimax-ai/code": {
+    "@niwa-labs/ncode": {
       "optional": true
     }
   },
@@ -63,6 +61,6 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "@minimax-ai/code": "link:test/fixtures/cli-package"
+    "@niwa-labs/ncode": "link:test/fixtures/cli-package"
   }
 }

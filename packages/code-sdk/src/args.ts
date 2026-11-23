@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 
 import { processTimings } from './exec-process.js';
-import { MCodeInvocationError } from './errors.js';
+import { NcodeInvocationError } from './errors.js';
 import type { RunOptions, ThreadOptions } from './types.js';
 
 const PERMISSIONS = new Set(['smart', 'full', 'off']);
@@ -19,7 +19,7 @@ export interface ExecArgsInput {
 }
 
 /**
- * Builds `mcode exec` argv. The prompt travels over stdin and system prompts through temporary
+ * Builds `ncode exec` argv. The prompt travels over stdin and system prompts through temporary
  * files, so argv carries only SDK-generated flags, identifiers and paths. Values use the
  * `--flag=value` form so a value starting with `-` is never parsed as a flag.
  */
@@ -53,22 +53,22 @@ export function buildExecArgs(input: ExecArgsInput): string[] {
 
 export function validateThreadOptions(options: ThreadOptions, resuming: boolean): void {
   if (options.permission !== undefined && !PERMISSIONS.has(options.permission)) {
-    throw new MCodeInvocationError(
+    throw new NcodeInvocationError(
       `permission must be smart, full or off; received ${JSON.stringify(options.permission)}.`,
     );
   }
   if (options.mode !== undefined && !CONTEXT_MODES.has(options.mode)) {
-    throw new MCodeInvocationError(
+    throw new NcodeInvocationError(
       `mode must be standard or lightweight; received ${JSON.stringify(options.mode)}.`,
     );
   }
   if (resuming && options.mode === 'lightweight') {
-    throw new MCodeInvocationError(
+    throw new NcodeInvocationError(
       'mode "lightweight" requires a new Thread; it cannot be resumed.',
     );
   }
   if (options.promptMode !== undefined && !PROMPT_MODES.has(options.promptMode)) {
-    throw new MCodeInvocationError(
+    throw new NcodeInvocationError(
       `promptMode must be tui, coding or work; received ${JSON.stringify(options.promptMode)}.`,
     );
   }
@@ -85,12 +85,12 @@ export function validateRunOptions(options: RunOptions): void {
     options.timeoutMs !== undefined &&
     (!isPositiveInteger(options.timeoutMs) || options.timeoutMs > MAX_TIMEOUT_MS)
   ) {
-    throw new MCodeInvocationError(
+    throw new NcodeInvocationError(
       `timeoutMs must be a positive integer number of milliseconds no greater than ${String(MAX_TIMEOUT_MS)}.`,
     );
   }
   if (options.maxSteps !== undefined && !isPositiveInteger(options.maxSteps)) {
-    throw new MCodeInvocationError('maxSteps must be a positive integer.');
+    throw new NcodeInvocationError('maxSteps must be a positive integer.');
   }
 }
 

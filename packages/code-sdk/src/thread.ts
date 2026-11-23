@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { buildExecArgs, validateRunOptions } from './args.js';
 import { buildSpawnCommand, type ResolvedCli } from './cli-resolver.js';
-import { errorForResult, MCodeAbortError, MCodeProtocolError, ThreadBusyError } from './errors.js';
+import { errorForResult, NcodeAbortError, NcodeProtocolError, ThreadBusyError } from './errors.js';
 import { ExecProcess, trackTempDir, untrackTempDir } from './exec-process.js';
 import { ItemAccumulator } from './items.js';
 import type {
@@ -16,7 +16,7 @@ import type {
   Turn,
 } from './types.js';
 
-/** What a Thread needs from its owning {@link MCode} client. */
+/** What a Thread needs from its owning {@link Ncode} client. */
 export interface ThreadHost {
   readonly configPath?: string;
   childEnv(): Record<string, string | undefined>;
@@ -32,7 +32,7 @@ interface StartedTurn {
 
 /**
  * A conversation with the Agent. The SDK only holds the Session id; every Turn starts a new
- * `mcode exec` process and continues the Session with `--session`.
+ * `ncode exec` process and continues the Session with `--session`.
  */
 export class Thread {
   private sessionId: string | null;
@@ -51,7 +51,7 @@ export class Thread {
     return this.sessionId;
   }
 
-  /** Runs one Turn. Resolves only when it succeeds; otherwise rejects with an `MCodeError`. */
+  /** Runs one Turn. Resolves only when it succeeds; otherwise rejects with an `NcodeError`. */
   async run(input: string, options: RunOptions = {}): Promise<Turn> {
     const started = await this.start(input, options);
     const { process, items } = started;
@@ -59,7 +59,7 @@ export class Thread {
     for await (const event of this.stream(started)) {
       if (event.type === 'exec.completed') result = event.result;
     }
-    if (!result) throw new MCodeProtocolError('mcode finished without exec.completed.');
+    if (!result) throw new NcodeProtocolError('ncode finished without exec.completed.');
     const finalItems = items.items();
     if (result.status !== 'succeeded') {
       throw errorForResult(result, finalItems, {
@@ -119,7 +119,7 @@ export class Thread {
         this.options.systemPrompt !== undefined ||
         this.options.appendSystemPrompt !== undefined
       ) {
-        tempDir = await mkdtemp(join(tmpdir(), 'mcode-sdk-'));
+        tempDir = await mkdtemp(join(tmpdir(), 'ncode-sdk-'));
         trackTempDir(tempDir);
         if (this.options.systemPrompt !== undefined) {
           promptFiles.systemPromptFile = await writePrivate(
@@ -171,7 +171,7 @@ export class Thread {
 
 function throwIfAborted(signal: AbortSignal | undefined, sessionId: string | null): void {
   if (signal?.aborted) {
-    throw new MCodeAbortError('The MCode run was cancelled before it started.', {
+    throw new NcodeAbortError('The Ncode run was cancelled before it started.', {
       cause: signal.reason,
       ...(sessionId === null ? {} : { sessionId }),
     });

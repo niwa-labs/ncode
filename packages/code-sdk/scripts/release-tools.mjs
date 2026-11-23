@@ -7,11 +7,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const NPMJS_REGISTRY = 'https://registry.npmjs.org/';
-export const PACKAGE_SCOPE = '@minimax-ai';
+export const PACKAGE_SCOPE = '@niwa-labs';
 
 /**
  * Every npm command that talks to a registry gets both flags. `publishConfig.registry` and
- * `--registry` only replace the default registry; a configured `@minimax-ai:registry` would still
+ * `--registry` only replace the default registry; a configured `@niwa-labs:registry` would still
  * win for this scoped package, so the scope is pinned explicitly as well.
  */
 export const NPMJS_TARGET_ARGS = Object.freeze([
@@ -84,7 +84,7 @@ export function resolveTool(
       if (exists(execPathEnv)) return runsWith(execPathEnv);
     }
     throw new Error(
-      'On Windows, run release:check through pnpm (pnpm --filter @minimax-ai/code-sdk run release:check).',
+      'On Windows, run release:check through pnpm (pnpm --filter @niwa-labs/ncode-sdk run release:check).',
     );
   }
   if (name === 'npm') {
@@ -130,8 +130,8 @@ export const REQUIRED_TARBALL_ENTRIES = Object.freeze([
 ]);
 
 export const DIRECTORY_PUBLISH_MESSAGE = [
-  'Refusing to publish @minimax-ai/code-sdk from the package directory.',
-  'Run `pnpm --filter @minimax-ai/code-sdk run release:check` on an up-to-date main and publish the checked tarball that command prints.',
+  'Refusing to publish @niwa-labs/ncode-sdk from the package directory.',
+  'Run `pnpm --filter @niwa-labs/ncode-sdk run release:check` on an up-to-date main and publish the checked tarball that command prints.',
   '`npm publish <tarball>` does not run this script. `npm publish` in this directory does, and it would skip release:check.',
 ].join('\n');
 

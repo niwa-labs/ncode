@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { MCodeAbortError, MCodeRunError, ThreadBusyError, type ThreadItem } from '../src/index.js';
+import { NcodeAbortError, NcodeRunError, ThreadBusyError, type ThreadItem } from '../src/index.js';
 import { ExecProcess } from '../src/exec-process.js';
-import { FAKE_MCODE, fakeClient, fixture, readRecord, tempDir } from './helpers.js';
+import { FAKE_NCODE, fakeClient, fixture, readRecord, tempDir } from './helpers.js';
 
 const SUCCESS_SESSION = 'mvs_2bab54bd1f17409e968db62f8ed2784a';
 const posixOnly = process.platform === 'win32' ? it.skip : it;
@@ -19,8 +19,8 @@ async function waitFor(condition: () => boolean, timeoutMs = 10_000): Promise<vo
 
 describe('thread.run', () => {
   it('resolves a successful Turn with items merged by id', async () => {
-    const mcode = fakeClient({ FAKE_MCODE_FIXTURE: fixture('success-tools') });
-    const thread = mcode.startThread({ cwd: tempDir() });
+    const ncode = fakeClient({ FAKE_NCODE_FIXTURE: fixture('success-tools') });
+    const thread = ncode.startThread({ cwd: tempDir() });
     expect(thread.id).toBeNull();
 
     const turn = await thread.run('Read note.txt and write its uppercase content to out.txt.');
@@ -55,18 +55,18 @@ describe('thread.run', () => {
     expect(read).toMatchObject({ toolCall: { status: 2, input: { path: 'note.txt' } } });
   });
 
-  it('rejects with MCodeRunError carrying the full result when the run fails (exit 4)', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('failed-upstream'),
-      FAKE_MCODE_EXIT: '4',
-      FAKE_MCODE_STDERR: 'mcode exec failed: The run failed: upstream error: 429',
+  it('rejects with NcodeRunError carrying the full result when the run fails (exit 4)', async () => {
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('failed-upstream'),
+      FAKE_NCODE_EXIT: '4',
+      FAKE_NCODE_STDERR: 'ncode exec failed: The run failed: upstream error: 429',
     });
-    const thread = mcode.startThread();
+    const thread = ncode.startThread();
 
     const error = await thread.run('hello').catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(MCodeRunError);
-    const runError = error as MCodeRunError;
+    expect(error).toBeInstanceOf(NcodeRunError);
+    const runError = error as NcodeRunError;
     expect(runError.status).toBe('failed');
     expect(runError.category).toBe('runtime');
     expect(runError.retryable).toBe(true);
@@ -81,8 +81,8 @@ describe('thread.run', () => {
 
   it('continues an existing Session with --session', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = fakeClient({ FAKE_MCODE_FIXTURE: fixture('resumed'), FAKE_MCODE_RECORD: record });
-    const thread = mcode.resumeThread(SUCCESS_SESSION, { model: 'minimax/MiniMax-M3' });
+    const ncode = fakeClient({ FAKE_NCODE_FIXTURE: fixture('resumed'), FAKE_NCODE_RECORD: record });
+    const thread = ncode.resumeThread(SUCCESS_SESSION, { model: 'minimax/MiniMax-M3' });
 
     const turn = await thread.run('What exactly did you write?');
 
@@ -96,11 +96,11 @@ describe('thread.run', () => {
 
   it('continues its own Session on the next Turn and keeps the creation-only mode off it', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('success-tools'),
-      FAKE_MCODE_RECORD: record,
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('success-tools'),
+      FAKE_NCODE_RECORD: record,
     });
-    const thread = mcode.startThread({ mode: 'lightweight' });
+    const thread = ncode.startThread({ mode: 'lightweight' });
 
     await thread.run('first');
     const first = readRecord(record).argv;
@@ -115,13 +115,13 @@ describe('thread.run', () => {
 
   posixOnly('cancels with SIGTERM and rejects with an AbortError', async () => {
     const signalLog = `${tempDir()}/signal.txt`;
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('cancelled'),
-      FAKE_MCODE_MODE: 'wait-sigint',
-      FAKE_MCODE_SPLIT: '9',
-      FAKE_MCODE_SIGNAL_LOG: signalLog,
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('cancelled'),
+      FAKE_NCODE_MODE: 'wait-sigint',
+      FAKE_NCODE_SPLIT: '9',
+      FAKE_NCODE_SIGNAL_LOG: signalLog,
     });
-    const thread = mcode.startThread();
+    const thread = ncode.startThread();
     const controller = new AbortController();
 
     const pending = thread.run('sleep 60', { signal: controller.signal });
@@ -129,8 +129,8 @@ describe('thread.run', () => {
     controller.abort();
     const error = await pending.catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(MCodeAbortError);
-    const abort = error as MCodeAbortError;
+    expect(error).toBeInstanceOf(NcodeAbortError);
+    const abort = error as NcodeAbortError;
     expect(abort.name).toBe('AbortError');
     expect(abort.exitCode).toBe(130);
     expect(abort.result?.status).toBe('cancelled');
@@ -145,27 +145,27 @@ describe('thread.run', () => {
 
   it('honors an abort that fires while prompt files are being prepared', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = fakeClient({ FAKE_MCODE_FIXTURE: fixture('resumed'), FAKE_MCODE_RECORD: record });
-    await mcode.startThread().run('warm up the cached CLI check');
+    const ncode = fakeClient({ FAKE_NCODE_FIXTURE: fixture('resumed'), FAKE_NCODE_RECORD: record });
+    await ncode.startThread().run('warm up the cached CLI check');
 
     const controller = new AbortController();
-    const pending = mcode
+    const pending = ncode
       .startThread({ appendSystemPrompt: 'x' })
       .run('go', { signal: controller.signal });
     setImmediate(() => controller.abort());
 
-    await expect(pending).rejects.toBeInstanceOf(MCodeAbortError);
+    await expect(pending).rejects.toBeInstanceOf(NcodeAbortError);
   });
 
   posixOnly('interrupts a process started with an already-aborted signal', async () => {
     const controller = new AbortController();
     controller.abort();
     const exec = new ExecProcess({
-      command: { command: process.execPath, args: [FAKE_MCODE, 'exec'] },
+      command: { command: process.execPath, args: [FAKE_NCODE, 'exec'] },
       env: {
         PATH: process.env.PATH,
-        FAKE_MCODE_FIXTURE: fixture('cancelled'),
-        FAKE_MCODE_MODE: 'hang',
+        FAKE_NCODE_FIXTURE: fixture('cancelled'),
+        FAKE_NCODE_MODE: 'hang',
       },
       prompt: 'x',
       signal: controller.signal,
@@ -174,27 +174,27 @@ describe('thread.run', () => {
     const consume = async (): Promise<void> => {
       for await (const event of exec.events()) void event;
     };
-    await expect(consume()).rejects.toBeInstanceOf(MCodeAbortError);
+    await expect(consume()).rejects.toBeInstanceOf(NcodeAbortError);
   });
 
   it('rejects immediately when the signal is already aborted', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = fakeClient({ FAKE_MCODE_RECORD: record });
+    const ncode = fakeClient({ FAKE_NCODE_RECORD: record });
     const controller = new AbortController();
     controller.abort();
 
     await expect(
-      mcode.startThread().run('never', { signal: controller.signal }),
-    ).rejects.toBeInstanceOf(MCodeAbortError);
+      ncode.startThread().run('never', { signal: controller.signal }),
+    ).rejects.toBeInstanceOf(NcodeAbortError);
   });
 
   posixOnly('rejects a concurrent Turn on the same Thread with ThreadBusyError', async () => {
-    const mcode = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('cancelled'),
-      FAKE_MCODE_MODE: 'wait-sigint',
-      FAKE_MCODE_SPLIT: '4',
+    const ncode = fakeClient({
+      FAKE_NCODE_FIXTURE: fixture('cancelled'),
+      FAKE_NCODE_MODE: 'wait-sigint',
+      FAKE_NCODE_SPLIT: '4',
     });
-    const thread = mcode.startThread();
+    const thread = ncode.startThread();
     const controller = new AbortController();
     const first = thread.run('one', { signal: controller.signal }).catch((error: unknown) => error);
     await waitFor(() => thread.id !== null);
@@ -203,7 +203,7 @@ describe('thread.run', () => {
     await expect(thread.runStreamed('three')).rejects.toBeInstanceOf(ThreadBusyError);
 
     controller.abort();
-    expect(await first).toBeInstanceOf(MCodeAbortError);
+    expect(await first).toBeInstanceOf(NcodeAbortError);
     // The Thread accepts a new Turn once the previous process has exited.
     await waitFor(() => (thread as unknown as { busy: boolean }).busy === false);
   });

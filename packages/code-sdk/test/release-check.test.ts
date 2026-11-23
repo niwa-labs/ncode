@@ -27,11 +27,11 @@ const releaseCheck = fileURLToPath(new URL('../scripts/release-check.mjs', impor
 const NPMJS = 'https://registry.npmjs.org/';
 
 describe('release:check registry safety', () => {
-  it('pins both the default and the @minimax-ai scoped registry on every printed npm command', () => {
-    expect(NPMJS_TARGET_ARGS).toEqual([`--registry=${NPMJS}`, `--@minimax-ai:registry=${NPMJS}`]);
+  it('pins both the default and the @niwa-labs scoped registry on every printed npm command', () => {
+    expect(NPMJS_TARGET_ARGS).toEqual([`--registry=${NPMJS}`, `--@niwa-labs:registry=${NPMJS}`]);
     for (const command of [
-      publishCommand('/tmp/code sdk/minimax-ai-code-sdk-0.1.0.tgz'),
-      ...readBackCommands('@minimax-ai/code-sdk@0.1.0', '@minimax-ai/code-sdk'),
+      publishCommand('/tmp/code sdk/niwa-labs-ncode-sdk-0.1.0.tgz'),
+      ...readBackCommands('@niwa-labs/ncode-sdk@0.1.0', '@niwa-labs/ncode-sdk'),
     ]) {
       expect(command).toEqual(expect.arrayContaining([...NPMJS_TARGET_ARGS]));
     }
@@ -52,16 +52,16 @@ describe('release:check registry safety', () => {
     expect(scopedRegistryProblem('undefined')).toBeUndefined();
     expect(scopedRegistryProblem('https://registry.npmjs.org')).toBeUndefined();
     expect(scopedRegistryProblem('http://127.0.0.1:9/scoped')).toMatch(
-      /@minimax-ai:registry is set to http:\/\/127\.0\.0\.1:9\/scoped\/\. It overrides publishConfig and --registry/u,
+      /@niwa-labs:registry is set to http:\/\/127\.0\.0\.1:9\/scoped\/\. It overrides publishConfig and --registry/u,
     );
   });
 
-  it('fails before any registry access when the effective npm config scopes @minimax-ai elsewhere', () => {
+  it('fails before any registry access when the effective npm config scopes @niwa-labs elsewhere', () => {
     // An isolated user config reproduces a machine whose npmrc points the scope at a mirror.
     const npmrc = join(tempDir(), 'npmrc');
     writeFileSync(
       npmrc,
-      'registry=http://127.0.0.1:9/default/\n@minimax-ai:registry=http://127.0.0.1:9/scoped/\n',
+      'registry=http://127.0.0.1:9/default/\n@niwa-labs:registry=http://127.0.0.1:9/scoped/\n',
     );
 
     const result = spawnSync(process.execPath, [releaseCheck, '--allow-non-main', '--offline'], {
@@ -72,7 +72,7 @@ describe('release:check registry safety', () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(
-      /@minimax-ai:registry is set to http:\/\/127\.0\.0\.1:9\/scoped\//u,
+      /@niwa-labs:registry is set to http:\/\/127\.0\.0\.1:9\/scoped\//u,
     );
     expect(result.stdout).not.toMatch(/Build, type check and tests|npm publish/u);
   });
@@ -178,12 +178,12 @@ describe('release:check private text and tarball allowlist', () => {
     expect(isReleaseRehearsal({ branch: 'main', head, remoteMain: head })).toBe(false);
 
     const shared = {
-      spec: '@minimax-ai/code-sdk@0.1.0',
+      spec: '@niwa-labs/ncode-sdk@0.1.0',
       releaseBranch: 'main',
-      tarball: '/tmp/code-sdk-release-xx/minimax-ai-code-sdk-0.1.0.tgz',
+      tarball: '/tmp/code-sdk-release-xx/niwa-labs-ncode-sdk-0.1.0.tgz',
       integrity: 'sha512-abc',
       version: '0.1.0',
-      name: '@minimax-ai/code-sdk',
+      name: '@niwa-labs/ncode-sdk',
     };
     const rehearsal = releaseClosingLines({ ...shared, rehearsal: true }).join('\n');
     expect(rehearsal).toMatch(/Do not publish/u);
@@ -217,7 +217,7 @@ describe('directory publish guard', () => {
         'publish',
         '--dry-run',
         '--registry=https://registry.npmjs.org/',
-        '--@minimax-ai:registry=https://registry.npmjs.org/',
+        '--@niwa-labs:registry=https://registry.npmjs.org/',
       ],
       { cwd: packageDir, encoding: 'utf8', timeout: 60_000 },
     );

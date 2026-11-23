@@ -1,5 +1,5 @@
 /**
- * Contract between the SDK's self-held types and the mcode CLI source.
+ * Contract between the SDK's self-held types and the ncode CLI source.
  *
  * Imports the CLI's exit-code policy, its real JSONL projector and its exec argument parser from
  * `packages/tui` and checks that the SDK parses, normalizes and maps them as documented. Excluded
@@ -11,7 +11,6 @@ import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { MCODE_BASE_VERSION } from '../../tui/src/application/build-marker.js';
 import { applyExecCliContract } from '../../tui/src/cli/contract.js';
 import { ExecEventProjector } from '../../tui/src/headless/events.js';
 import {
@@ -23,17 +22,16 @@ import {
   type RawTuiExecOptions,
 } from '../../tui/src/headless/invocation.js';
 import { buildExecArgs } from '../src/args.js';
-import { errorForExit, errorForResult, MCODE_EXEC_EXIT_CODES } from '../src/errors.js';
-import { MCodeAbortError, MCodeRunError } from '../src/index.js';
+import { errorForExit, errorForResult, NCODE_EXEC_EXIT_CODES } from '../src/errors.js';
+import { NcodeAbortError, NcodeRunError } from '../src/index.js';
 import { ItemAccumulator } from '../src/items.js';
 import { parseEventLine } from '../src/protocol.js';
 import type { ExecResult } from '../src/types.js';
 import { MIN_CLI_VERSION, parseVersion, satisfiesMinimum } from '../src/version.js';
 import { tempDir } from './helpers.js';
 
-const { Command } = createRequire(new URL('../../tui/package.json', import.meta.url))(
-  'commander',
-) as {
+const requireFromCli = createRequire(new URL('../../tui/package.json', import.meta.url));
+const { Command } = requireFromCli('commander') as {
   Command: new () => {
     name(name: string): void;
     exitOverride(): void;
@@ -44,7 +42,7 @@ const { Command } = createRequire(new URL('../../tui/package.json', import.meta.
 
 async function parseWithCli(args: readonly string[], stdin: string) {
   const program = new Command();
-  program.name('mcode');
+  program.name('ncode');
   program.exitOverride();
   program.configureOutput({ writeOut: () => undefined, writeErr: () => undefined });
   let captured: { prompt: string | undefined; options: RawTuiExecOptions } | undefined;
@@ -54,7 +52,7 @@ async function parseWithCli(args: readonly string[], stdin: string) {
       captured = { prompt, options };
     },
   );
-  await program.parseAsync(['node', 'mcode', ...args], { from: 'node' });
+  await program.parseAsync(['node', 'ncode', ...args], { from: 'node' });
   if (!captured) throw new Error('the CLI exec action did not run');
   return resolveTuiExecInvocation(captured.prompt, captured.options, async () => stdin);
 }
@@ -72,9 +70,9 @@ function result(overrides: Partial<ExecResult>): ExecResult {
   };
 }
 
-describe('mcode exec contract', () => {
+describe('ncode exec contract', () => {
   it('uses the CLI exit codes', () => {
-    expect(MCODE_EXEC_EXIT_CODES).toEqual(MINIMAX_CODE_EXEC_EXIT_CODES);
+    expect(NCODE_EXEC_EXIT_CODES).toEqual(MINIMAX_CODE_EXEC_EXIT_CODES);
   });
 
   it.each([
@@ -94,11 +92,11 @@ describe('mcode exec contract', () => {
       const fromExit = errorForExit({ exitCode: exitCodeForExecResult(cliResult as never) });
 
       expect(fromExit.constructor).toBe(fromResult.constructor);
-      if (fromResult instanceof MCodeRunError && fromExit instanceof MCodeRunError) {
+      if (fromResult instanceof NcodeRunError && fromExit instanceof NcodeRunError) {
         expect(fromExit.status).toBe(fromResult.status);
         expect(fromExit.category).toBe(fromResult.category);
       } else {
-        expect(fromResult).toBeInstanceOf(MCodeAbortError);
+        expect(fromResult).toBeInstanceOf(NcodeAbortError);
       }
     },
   );
@@ -154,8 +152,9 @@ describe('mcode exec contract', () => {
     expect(completed?.type === 'exec.completed' && completed.result).toEqual(finalResult);
   });
 
-  it('accepts the CLI in this repository under the SDK minimum', () => {
-    const repoVersion = parseVersion(MCODE_BASE_VERSION);
+  it('requires a minimum that the Ncode CLI in this repository satisfies', () => {
+    const { version } = requireFromCli('./package.json') as { version: string };
+    const repoVersion = parseVersion(version);
     const minimum = parseVersion(MIN_CLI_VERSION);
     if (!repoVersion || !minimum) throw new Error('unparseable CLI version');
     expect(satisfiesMinimum(repoVersion, minimum)).toBe(true);

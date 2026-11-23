@@ -4,9 +4,9 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { MAX_TIMEOUT_MS, validateRunOptions } from '../src/args.js';
-import { MCode, MCodeInvocationError, MCodeRunError } from '../src/index.js';
+import { Ncode, NcodeInvocationError, NcodeRunError } from '../src/index.js';
 import type { RawToolCall } from '../src/types.js';
-import { FAKE_MCODE, fakeClient, fixture, readRecord, tempDir } from './helpers.js';
+import { FAKE_NCODE, fakeClient, fixture, readRecord, tempDir } from './helpers.js';
 
 describe('tool call status', () => {
   it('accepts the CLI status union of string and number', () => {
@@ -19,11 +19,11 @@ describe('CLI argument mapping', () => {
   it('maps Thread, run and client options to exec flags, stdin and environment', async () => {
     const dir = tempDir();
     const record = `${dir}/record.json`;
-    const mcode = fakeClient(
-      { FAKE_MCODE_FIXTURE: fixture('success-tools'), FAKE_MCODE_RECORD: record },
+    const ncode = fakeClient(
+      { FAKE_NCODE_FIXTURE: fixture('success-tools'), FAKE_NCODE_RECORD: record },
       { dataDir: `${dir}/data`, configPath: `${dir}/config.yaml` },
     );
-    const thread = mcode.startThread({
+    const thread = ncode.startThread({
       cwd: dir,
       model: 'minimax/MiniMax-M3',
       effort: 'high',
@@ -79,18 +79,18 @@ describe('CLI argument mapping', () => {
   it('removes prompt files before a failed run rejects and before a stream ends', async () => {
     const record = `${tempDir()}/record.json`;
     const failing = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('failed-upstream'),
-      FAKE_MCODE_EXIT: '4',
-      FAKE_MCODE_RECORD: record,
+      FAKE_NCODE_FIXTURE: fixture('failed-upstream'),
+      FAKE_NCODE_EXIT: '4',
+      FAKE_NCODE_RECORD: record,
     });
     await expect(failing.startThread({ systemPrompt: 'x' }).run('go')).rejects.toBeInstanceOf(
-      MCodeRunError,
+      NcodeRunError,
     );
     expect(existsSync(promptFileOf(record))).toBe(false);
 
     const streaming = fakeClient({
-      FAKE_MCODE_FIXTURE: fixture('resumed'),
-      FAKE_MCODE_RECORD: record,
+      FAKE_NCODE_FIXTURE: fixture('resumed'),
+      FAKE_NCODE_RECORD: record,
     });
     const { events } = await streaming.startThread({ systemPrompt: 'y' }).runStreamed('go');
     for await (const event of events) void event;
@@ -99,16 +99,16 @@ describe('CLI argument mapping', () => {
 
   it('omits optional flags and the data dir variable when not configured', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = new MCode({
-      bin: FAKE_MCODE,
+    const ncode = new Ncode({
+      bin: FAKE_NCODE,
       env: {
         PATH: process.env.PATH,
-        FAKE_MCODE_FIXTURE: fixture('success-tools'),
-        FAKE_MCODE_RECORD: record,
+        FAKE_NCODE_FIXTURE: fixture('success-tools'),
+        FAKE_NCODE_RECORD: record,
       },
     });
 
-    await mcode.startThread().run('hi');
+    await ncode.startThread().run('hi');
 
     const { argv, env } = readRecord(record);
     expect(argv).toEqual([
@@ -123,21 +123,21 @@ describe('CLI argument mapping', () => {
 
   it('rejects invalid options before starting a process', async () => {
     const record = `${tempDir()}/record.json`;
-    const mcode = fakeClient({ FAKE_MCODE_RECORD: record });
+    const ncode = fakeClient({ FAKE_NCODE_RECORD: record });
 
-    expect(() => mcode.resumeThread('mvs_1', { mode: 'lightweight' })).toThrow(
-      MCodeInvocationError,
+    expect(() => ncode.resumeThread('mvs_1', { mode: 'lightweight' })).toThrow(
+      NcodeInvocationError,
     );
-    expect(() => mcode.resumeThread('  ')).toThrow(MCodeInvocationError);
-    expect(() => mcode.startThread({ permission: 'ask' as unknown as 'smart' })).toThrow(
-      MCodeInvocationError,
+    expect(() => ncode.resumeThread('  ')).toThrow(NcodeInvocationError);
+    expect(() => ncode.startThread({ permission: 'ask' as unknown as 'smart' })).toThrow(
+      NcodeInvocationError,
     );
-    const thread = mcode.startThread();
-    await expect(thread.run('x', { timeoutMs: 0 })).rejects.toBeInstanceOf(MCodeInvocationError);
-    await expect(thread.run('x', { maxSteps: 1.5 })).rejects.toBeInstanceOf(MCodeInvocationError);
+    const thread = ncode.startThread();
+    await expect(thread.run('x', { timeoutMs: 0 })).rejects.toBeInstanceOf(NcodeInvocationError);
+    await expect(thread.run('x', { maxSteps: 1.5 })).rejects.toBeInstanceOf(NcodeInvocationError);
     expect(existsSync(record)).toBe(false);
     // A rejected Turn does not leave the Thread busy.
-    await expect(thread.run('x', { timeoutMs: -1 })).rejects.toBeInstanceOf(MCodeInvocationError);
+    await expect(thread.run('x', { timeoutMs: -1 })).rejects.toBeInstanceOf(NcodeInvocationError);
   });
 
   it('rejects timeoutMs values whose SDK backstop would overflow a Node timer', async () => {
@@ -145,10 +145,10 @@ describe('CLI argument mapping', () => {
     // A backstop past the signed 32-bit timer limit used to fire the force-kill after ~1ms.
     const record = `${tempDir()}/record.json`;
     await expect(
-      fakeClient({ FAKE_MCODE_RECORD: record })
+      fakeClient({ FAKE_NCODE_RECORD: record })
         .startThread()
         .run('x', { timeoutMs: 2_200_000_000 }),
-    ).rejects.toBeInstanceOf(MCodeInvocationError);
+    ).rejects.toBeInstanceOf(NcodeInvocationError);
     expect(existsSync(record)).toBe(false);
   });
 });

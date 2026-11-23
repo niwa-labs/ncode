@@ -2,12 +2,12 @@ import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:
 import { createRequire } from 'node:module';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 
-import { MCodeNotFoundError } from './errors.js';
+import { NcodeNotFoundError } from './errors.js';
 import { findProjectBin, resolveCmdLauncher, resolveVersionedLauncher } from './project-bin.js';
 
 export { parseCmdShim, parseShellShim, resolveVersionedLauncher } from './project-bin.js';
 
-export const CLI_PACKAGE_NAME = '@minimax-ai/code';
+export const CLI_PACKAGE_NAME = '@niwa-labs/ncode';
 
 /** How to start the CLI. The SDK never starts it through a shell. */
 export interface ResolvedCli {
@@ -31,17 +31,17 @@ export interface ResolveCliOptions {
   readonly bin?: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   /**
-   * Also search `cwd` (default `process.cwd()`) for `@minimax-ai/code` and for
-   * `node_modules/.bin/mcode` above that directory. Off unless set: a working directory can
+   * Also search `cwd` (default `process.cwd()`) for `@niwa-labs/ncode` and for
+   * `node_modules/.bin/ncode` above that directory. Off unless set: a working directory can
    * belong to an untrusted checkout.
    */
   readonly resolveFromCwd?: boolean;
   /** Directory used by {@link ResolveCliOptions.resolveFromCwd}. Defaults to `process.cwd()`. */
   readonly cwd?: string;
-  /** Base paths for resolving the optional `@minimax-ai/code` peer dependency. */
+  /** Base paths for resolving the optional `@niwa-labs/ncode` peer dependency. */
   readonly packageSearchFrom?: readonly string[];
   /**
-   * Directory where the upward `node_modules/.bin/mcode` search starts. Set this to search even
+   * Directory where the upward `node_modules/.bin/ncode` search starts. Set this to search even
    * when `resolveFromCwd` is off (tests and callers that already chose a directory).
    */
   readonly projectSearchFrom?: string;
@@ -49,9 +49,9 @@ export interface ResolveCliOptions {
 }
 
 /**
- * Resolution order: explicit `bin` → `@minimax-ai/code` installed next to the SDK →
+ * Resolution order: explicit `bin` → `@niwa-labs/ncode` installed next to the SDK →
  * (only when `resolveFromCwd` is set) the same package from `cwd` and the nearest
- * `node_modules/.bin/mcode` above `cwd` → `mcode` on PATH.
+ * `node_modules/.bin/ncode` above `cwd` → `ncode` on PATH.
  */
 export function resolveCli(options: ResolveCliOptions): ResolvedCli {
   const platform = options.platform ?? process.platform;
@@ -63,7 +63,7 @@ export function resolveCli(options: ResolveCliOptions): ResolvedCli {
         : undefined
       : findOnPath(options.bin, options.env, platform);
     if (!found)
-      throw new MCodeNotFoundError(`The configured mcode bin was not found: ${options.bin}.`);
+      throw new NcodeNotFoundError(`The configured ncode bin was not found: ${options.bin}.`);
     return fromExecutable(found, 'option', platform);
   }
   const fromPackage = resolvePackageEntry(packageSearchBases(options));
@@ -73,13 +73,13 @@ export function resolveCli(options: ResolveCliOptions): ResolvedCli {
     const fromProject = findProjectBin(projectStart, platform);
     if (fromProject) return fromProject;
   }
-  const onPath = findOnPath('mcode', options.env, platform);
+  const onPath = findOnPath('ncode', options.env, platform);
   if (onPath) return fromExecutable(onPath, 'path', platform);
   const searchedCwd = options.resolveFromCwd === true || options.projectSearchFrom !== undefined;
-  throw new MCodeNotFoundError(
+  throw new NcodeNotFoundError(
     searchedCwd
-      ? `Could not find the mcode CLI (${CLI_PACKAGE_NAME} is not installed, no node_modules/.bin/mcode was found above the working directory, and mcode is not on PATH).`
-      : `Could not find the mcode CLI (${CLI_PACKAGE_NAME} is not installed next to the SDK, and mcode is not on PATH). Set \`resolveFromCwd\` to also search the working directory, or pass \`bin\`.`,
+      ? `Could not find the ncode CLI (${CLI_PACKAGE_NAME} is not installed, no node_modules/.bin/ncode was found above the working directory, and ncode is not on PATH).`
+      : `Could not find the ncode CLI (${CLI_PACKAGE_NAME} is not installed next to the SDK, and ncode is not on PATH). Set \`resolveFromCwd\` to also search the working directory, or pass \`bin\`.`,
   );
 }
 
@@ -96,7 +96,7 @@ function projectSearchStart(options: ResolveCliOptions): string | undefined {
   return undefined;
 }
 
-/** Resolves `bin.mcode` of an installed `@minimax-ai/code` package to an existing JS file. */
+/** Resolves `bin.ncode` of an installed `@niwa-labs/ncode` package to an existing JS file. */
 export function resolvePackageEntry(searchFrom: readonly string[]): string | undefined {
   for (const base of searchFrom) {
     let manifestPath: string;
@@ -109,7 +109,7 @@ export function resolvePackageEntry(searchFrom: readonly string[]): string | und
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
         bin?: string | Record<string, string>;
       };
-      const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.mcode;
+      const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.ncode;
       if (!bin) continue;
       const entry = resolve(dirname(manifestPath), bin);
       if (isFile(entry)) return entry;
@@ -156,7 +156,7 @@ function fromExecutable(
     const resolved = resolveCmdLauncher(readFileSync(path, 'utf8'), path, source);
     if (resolved) return resolved;
     // Running a batch file would need cmd.exe and shell quoting; ask for the JS entry instead.
-    throw new MCodeNotFoundError(
+    throw new NcodeNotFoundError(
       `Found ${path}, but could not determine the JS entry it runs. Pass the CLI's JS entry as \`bin\`.`,
       { installHint: false },
     );
@@ -179,7 +179,7 @@ function currentEntry(cli: ResolvedCli): string {
     entry = undefined;
   }
   if (!entry) {
-    throw new MCodeNotFoundError(
+    throw new NcodeNotFoundError(
       `${cli.launcher} no longer points to a usable release. Pass the CLI's JS entry as \`bin\`.`,
       { installHint: false },
     );

@@ -1,15 +1,10 @@
 import { spawn } from 'node:child_process';
 
 import { buildSpawnCommand, type ResolvedCli } from './cli-resolver.js';
-import { MCODE_INSTALL_HINT, MCodeError, MCodeNotFoundError, MCodeVersionError } from './errors.js';
+import { NCODE_INSTALL_HINT, NcodeError, NcodeNotFoundError, NcodeVersionError } from './errors.js';
 
-/**
- * First CLI release whose `mcode exec` flags cover everything the SDK passes.
- * `--system-prompt-file`, `--append-system-prompt-file` and `--mode` landed in CLI 0.6.3;
- * `--output-format stream-json` and the other exec flags were already present. Preview builds such as
- * `0.6.3-preview.N` satisfy `0.6.3`.
- */
-export const MIN_CLI_VERSION = '0.6.3';
+/** Oldest supported Ncode release. Ncode has its own version sequence. */
+export const MIN_CLI_VERSION = '0.1.2';
 
 const VERSION_TIMEOUT_MS = 30_000;
 
@@ -32,7 +27,7 @@ export function parseVersion(text: string): ParsedVersion | undefined {
 }
 
 /**
- * Compares only `major.minor.patch`. Preview builds such as `0.6.3-preview.N` satisfy `0.6.3`
+ * Compares only `major.minor.patch`. Preview builds such as `0.1.2-preview.N` satisfy `0.1.2`
  * because the preview channel ships the same exec contract as its release line.
  */
 export function satisfiesMinimum(version: ParsedVersion, minimum: ParsedVersion): boolean {
@@ -41,30 +36,24 @@ export function satisfiesMinimum(version: ParsedVersion, minimum: ParsedVersion)
   return version.patch >= minimum.patch;
 }
 
-/** Runs `mcode --version` and rejects CLIs older than {@link MIN_CLI_VERSION}. */
+/** Runs `ncode --version` and rejects CLIs older than {@link MIN_CLI_VERSION}. */
 export async function checkCliVersion(
   cli: ResolvedCli,
   env: Readonly<Record<string, string | undefined>>,
   spawnChild: typeof spawn = spawn,
 ): Promise<string> {
   const output = await readVersionOutput(cli, env, spawnChild);
-  // The SDK's minimum follows the MCode exec contract. Ncode versions independently.
-  const compatibilityOutput = /^MCode (\S+)$/mu.exec(output.trim().replaceAll('\r', ''))?.[1] ?? output;
-  const parsed = parseVersion(compatibilityOutput);
+  // The MCode and Pi lines identify the components bundled into Ncode.
+  const version = /^Ncode (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\r?$/mu.exec(output)?.[1];
   const minimum = parseVersion(MIN_CLI_VERSION) as ParsedVersion;
-  if (!parsed) {
-    throw new MCodeVersionError(
-      `Could not read the mcode version from: ${output.trim() || '(empty)'}.`,
+  if (!version) {
+    throw new NcodeVersionError(
+      `Could not read the ncode version from: ${output.trim() || '(empty)'}.`,
     );
   }
-  const version =
-    compatibilityOutput
-      .trim()
-      .split(/\s+/u)
-      .find((part) => parseVersion(part)) ?? output.trim();
-  if (!satisfiesMinimum(parsed, minimum)) {
-    throw new MCodeVersionError(
-      `mcode ${version} is older than the minimum ${MIN_CLI_VERSION} required by @minimax-ai/code-sdk. Upgrade with \`${MCODE_INSTALL_HINT}\`.`,
+  if (!satisfiesMinimum(parseVersion(version) as ParsedVersion, minimum)) {
+    throw new NcodeVersionError(
+      `ncode ${version} is older than the minimum ${MIN_CLI_VERSION} required by @niwa-labs/ncode-sdk. Upgrade with \`${NCODE_INSTALL_HINT}\`.`,
       { version },
     );
   }
@@ -100,7 +89,7 @@ function readVersionOutput(
       finish(() => {
         reject(
           error.code === 'ENOENT' || error.code === 'EACCES'
-            ? new MCodeNotFoundError(`Could not start mcode at ${cli.path}.`, { cause: error })
+            ? new NcodeNotFoundError(`Could not start ncode at ${cli.path}.`, { cause: error })
             : error,
         );
       });
@@ -114,7 +103,7 @@ function readVersionOutput(
     }, VERSION_TIMEOUT_MS);
     if (!child.stdout || !child.stderr) {
       finish(() => {
-        reject(new MCodeError('mcode stdout is unavailable.'));
+        reject(new NcodeError('ncode stdout is unavailable.'));
       });
       return;
     }
@@ -131,8 +120,8 @@ function readVersionOutput(
           return;
         }
         reject(
-          new MCodeVersionError(
-            `\`mcode --version\` failed (${String(code ?? signal)}); cannot verify CLI compatibility.`,
+          new NcodeVersionError(
+            `\`ncode --version\` failed (${String(code ?? signal)}); cannot verify CLI compatibility.`,
             { exitCode: code, signal, stderr: stderr.slice(-4096) },
           ),
         );

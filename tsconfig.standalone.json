@@ -634,12 +634,6 @@
       "@mavis/wire-compiler": [
         "./packages/wire-compiler/src/index.ts"
       ],
-      "@minimax-ai/code-sdk": [
-        "./packages/code-sdk/src/index.ts"
-      ],
-      "@minimax-ai/code-sdk/package.json": [
-        "./packages/code-sdk/package.json"
-      ],
       "@minimax/code/package.json": [
         "./packages/tui/package.json"
       ],
@@ -651,6 +645,12 @@
       ],
       "@minimax/mcode-sandbox-runtime/package.json": [
         "./third_party/sandbox-runtime/package.json"
+      ],
+      "@niwa-labs/ncode-sdk": [
+        "./packages/code-sdk/src/index.ts"
+      ],
+      "@niwa-labs/ncode-sdk/package.json": [
+        "./packages/code-sdk/package.json"
       ]
     },
     "lib": [

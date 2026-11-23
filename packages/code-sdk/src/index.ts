@@ -1,14 +1,14 @@
-export { MCode } from './mcode.js';
+export { Ncode } from './ncode.js';
 export { Thread } from './thread.js';
 export {
-  MCODE_EXEC_EXIT_CODES,
-  MCodeAbortError,
-  MCodeError,
-  MCodeInvocationError,
-  MCodeNotFoundError,
-  MCodeProtocolError,
-  MCodeRunError,
-  MCodeVersionError,
+  NCODE_EXEC_EXIT_CODES,
+  NcodeAbortError,
+  NcodeError,
+  NcodeInvocationError,
+  NcodeNotFoundError,
+  NcodeProtocolError,
+  NcodeRunError,
+  NcodeVersionError,
   ThreadBusyError,
 } from './errors.js';
 export { MAX_TIMEOUT_MS } from './args.js';

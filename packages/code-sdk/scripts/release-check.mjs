@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Pre-publication check for @minimax-ai/code-sdk. It never publishes: on success it prints the
+ * Pre-publication check for @niwa-labs/ncode-sdk. It never publishes: on success it prints the
  * `npm publish` command for a maintainer to run. See ../RELEASING.md.
  *
- *   pnpm --filter @minimax-ai/code-sdk run release:check
- *   pnpm --filter @minimax-ai/code-sdk run release:check -- --allow-non-main   # rehearsal only
- *   pnpm --filter @minimax-ai/code-sdk run release:check -- --offline          # skip npm lookup
+ *   pnpm --filter @niwa-labs/ncode-sdk run release:check
+ *   pnpm --filter @niwa-labs/ncode-sdk run release:check -- --allow-non-main   # rehearsal only
+ *   pnpm --filter @niwa-labs/ncode-sdk run release:check -- --offline          # skip npm lookup
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -238,7 +238,7 @@ const smoke = run(
      const { createRequire } = await import('node:module');
      const cjs = createRequire(process.cwd() + '/package.json')('${name}');
      for (const api of [esm, cjs]) {
-       if (typeof api.MCode !== 'function' || typeof api.MIN_CLI_VERSION !== 'string') process.exit(1);
+       if (typeof api.Ncode !== 'function' || typeof api.MIN_CLI_VERSION !== 'string') process.exit(1);
      }
      console.log('import and require OK');`,
   ],

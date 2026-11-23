@@ -5,12 +5,12 @@ import { createInterface } from 'node:readline';
 import type { SpawnCommand } from './cli-resolver.js';
 import {
   errorForExit,
-  MCodeAbortError,
-  MCodeError,
-  MCodeNotFoundError,
-  MCodeProtocolError,
-  MCodeRunError,
-  MCodeVersionError,
+  NcodeAbortError,
+  NcodeError,
+  NcodeNotFoundError,
+  NcodeProtocolError,
+  NcodeRunError,
+  NcodeVersionError,
 } from './errors.js';
 import { parseEventLine } from './protocol.js';
 import type { ThreadEvent, ThreadItem } from './types.js';
@@ -112,7 +112,7 @@ export interface ExecProcessOptions {
 }
 
 /**
- * One `mcode exec` child process. Starts immediately and buffers parsed events until consumed,
+ * One `ncode exec` child process. Starts immediately and buffers parsed events until consumed,
  * so an unconsumed stream still runs to completion and releases its resources.
  */
 export class ExecProcess {
@@ -213,8 +213,8 @@ export class ExecProcess {
     this.exited = true;
     this.fail(
       error.code === 'ENOENT' || error.code === 'EACCES'
-        ? new MCodeNotFoundError(`Could not start mcode (${error.code}).`, { cause: error })
-        : new MCodeError(`Could not start mcode: ${error.message}`, { cause: error }),
+        ? new NcodeNotFoundError(`Could not start ncode (${error.code}).`, { cause: error })
+        : new NcodeError(`Could not start ncode: ${error.message}`, { cause: error }),
     );
     this.cleanup();
   }
@@ -224,7 +224,7 @@ export class ExecProcess {
     const { stdin, stdout, stderr } = child;
     if (!stdin || !stdout || !stderr) {
       this.exited = true;
-      const error = new MCodeError('mcode stdout is unavailable.');
+      const error = new NcodeError('ncode stdout is unavailable.');
       this.fail(error);
       this.cleanup();
       throw error;
@@ -313,7 +313,7 @@ export class ExecProcess {
     };
     if (this.backstopFired) {
       this.fail(
-        new MCodeRunError('The MCode run exceeded timeoutMs and was force-stopped by the SDK.', {
+        new NcodeRunError('The Ncode run exceeded timeoutMs and was force-stopped by the SDK.', {
           ...details,
           status: 'timeout',
         }),
@@ -321,7 +321,7 @@ export class ExecProcess {
       return;
     }
     if (this.abortRequested && code !== 2) {
-      this.fail(new MCodeAbortError('The MCode run was cancelled.', details));
+      this.fail(new NcodeAbortError('The Ncode run was cancelled.', details));
       return;
     }
     this.fail(errorForExit(details));
@@ -378,6 +378,6 @@ export class ExecProcess {
 function withDiagnostics(error: unknown, stderr: string, line: number): Error {
   const message = `${error instanceof Error ? error.message : String(error)} (stdout line ${String(line)})`;
   const details = { stderr, cause: error instanceof Error ? error.cause : undefined };
-  if (error instanceof MCodeVersionError) return new MCodeVersionError(message, details);
-  return new MCodeProtocolError(message, details);
+  if (error instanceof NcodeVersionError) return new NcodeVersionError(message, details);
+  return new NcodeProtocolError(message, details);
 }
