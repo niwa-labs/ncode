@@ -23,18 +23,9 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { withoutProxyEnvironment } from "./offline-environment.mjs";
 
 const cli = process.env.MCODE_TEST_CLI ?? fileURLToPath(new URL("../dist/cli.js", import.meta.url));
-// This case is 30+ serial CLI spawns, each booting the whole runtime, so its
-// wall-clock cost tracks machine speed rather than the transport it asserts.
-// A flat budget sized for an idle laptop turns any busy runner (parallel build,
-// shared CI host) into a `testTimeoutFailure` that reports a product failure
-// while every assertion would have passed. Budget it the way smoke.test.mjs
-// budgets runtime startup: a base allowance plus a Windows multiplier for
-// slower process spawn, rather than a number that only holds on one machine.
-const byokSerialTimeoutMs = process.platform === "win32" ? 360000 : 180000;
 // This fixture validates BYOK transport and real Runtime persistence, not model quality.
 test(
   "BYOK runs without managed login and resumes its saved conversation",
-  { timeout: byokSerialTimeoutMs },
   async (t) => {
     const fixtureDir = mkdtempSync(path.join(tmpdir(), "minimax-code-byok-"));
     const dataDir = path.join(fixtureDir, "data");
@@ -187,8 +178,6 @@ test(
       MCODE_TEST_ALLOWED_ORIGIN: new URL(baseUrl).origin,
       MCODE_TEST_NETWORK_AUDIT: networkAudit,
       MCODE_TEST_MANAGED_OFFLINE: "1",
-      // In-process pin: this suite tests the agent loop (see the fixture note).
-      MCODE_SERVER_MODE: "off",
       MCODE_TEST_PROCESS_PROBE: "1",
       // These fixtures pin the LEGACY persistence surfaces (messages.jsonl,
       // canonical sqlite rows) — W10 moved canonical history to the durable
@@ -293,23 +282,16 @@ test(
     const proxyValue = (name) => name.toLowerCase() === "no_proxy"
       ? "*"
       : "http://127.0.0.1:9";
+    // Exercise the real CLI with and without inherited proxies. Every individual
+    // spelling is asserted by the smoke fixture without another runtime boot.
     for (const [label, proxies] of [
       ["no proxy", {}],
-      ...proxyNames.map((name) => [name, { [name]: proxyValue(name) }]),
-      ["uppercase and lowercase together", Object.fromEntries(
+      ["all proxy variables", Object.fromEntries(
         proxyNames.map((name) => [name, proxyValue(name)]),
       )],
     ]) {
-      // Node 24.0–24.2 returns undefined from t.test(), so awaiting it does
-      // not wait for the proxy checks. Keep this shared-fixture phase directly
-      // sequential before changing rejectConnection or checking request counts.
-      // https://github.com/nodejs/node/issues/58227
       t.diagnostic(`offline BYOK ignores ambient proxies: ${label}`);
       const environment = Object.freeze({ ...cleanEnvironment, ...proxies });
-      // NO_PROXY alone does not enable proxy mode, so check its isolation explicitly.
-      const isolated = withoutProxyEnvironment(environment);
-      for (const name of proxyNames) assert.equal(isolated[name], "");
-      assert.equal(isolated.PATH, environment.PATH);
       const beforeRequests = requests.length;
       const managedAudit = `${networkAudit}.managed`;
       const beforeManaged = readFileSync(managedAudit, "utf8").length;

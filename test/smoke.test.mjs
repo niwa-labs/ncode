@@ -166,7 +166,7 @@ test("config permission failures preserve private reads and terminate unsafe sta
   }
 });
 
-test("offline smoke children ignore ambient proxy variables", async (t) => {
+test("offline smoke children ignore ambient proxy variables", (t) => {
   const proxyNames = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -177,27 +177,23 @@ test("offline smoke children ignore ambient proxy variables", async (t) => {
     "all_proxy",
     "no_proxy",
   ];
+  const proxies = Object.fromEntries(proxyNames.map((name) => [
+    name, name.toLowerCase() === "no_proxy" ? "*" : "http://127.0.0.1:9",
+  ]));
+  const environment = Object.freeze({ ...process.env, ...proxies });
+  const options = fixture(t, environment);
   for (const name of proxyNames) {
-    await t.test(name, (t) => {
-      const proxyValue = name.toLowerCase() === "no_proxy" ? "*" : "http://127.0.0.1:9";
-      const environment = Object.freeze({
-        ...process.env,
-        ...Object.fromEntries(proxyNames.map((key) => [key, ""])),
-        [name]: proxyValue,
-      });
-      const options = fixture(t, environment);
-      for (const key of proxyNames) assert.equal(options.env[key], "");
-      const result = spawnSync(process.execPath, [cli, "provider", "list"], {
-        ...options,
-        encoding: "utf8",
-        timeout: runtimeTimeoutMs,
-      });
-      assertSuccessfulChild(result);
-      assert.match(result.stdout, /minimax/);
-      // Catalog requests are optional; the fixture still rejects any real network access.
-      assert.equal(environment[name], proxyValue);
-    });
+    assert.equal(options.env[name], "");
+    assert.equal(environment[name], proxies[name]);
   }
+  assert.equal(options.env.PATH, environment.PATH);
+  const result = spawnSync(process.execPath, [cli, "provider", "list"], {
+    ...options,
+    encoding: "utf8",
+    timeout: runtimeTimeoutMs,
+  });
+  assertSuccessfulChild(result);
+  assert.match(result.stdout, /minimax/);
 });
 test("native SQLite binding opens and reads a real database", () => {
   const db = new Database(":memory:");

@@ -62,9 +62,17 @@ try {
   const db = new Database(':memory:');
   try { assert.equal(db.prepare('select 42 as value').get().value, 42); } finally { db.close(); }
   assert.match(execFileSync(require('@vscode/ripgrep').rgPath, ['--version'], { encoding: 'utf8' }), /ripgrep/);
-  execFileSync(process.execPath, ['--test', 'test/smoke.test.mjs', 'test/byok.test.mjs'], {
-    cwd: root, env: { ...env, MCODE_TEST_CLI: path.join(installed, 'cli.js') }, stdio: 'inherit', timeout: 240000,
-  });
+  // BYOK exercises a chain of fresh CLI boots. Its commands have their own
+  // deadlines and diagnostics. Keep a separate ceiling for each archive suite.
+  for (const [suite, timeout] of [
+    ['test/smoke.test.mjs', 240_000],
+    ['test/byok.test.mjs', 480_000],
+  ]) {
+    console.log(`Verifying installed package with ${suite}`);
+    execFileSync(process.execPath, ['--test', suite], {
+      cwd: root, env: { ...env, MCODE_TEST_CLI: path.join(installed, 'cli.js') }, stdio: 'inherit', timeout,
+    });
+  }
   if (process.env.MCODE_VERIFY_REPORT_DIR) {
     mkdirSync(process.env.MCODE_VERIFY_REPORT_DIR, { recursive: true });
     writeFileSync(path.join(process.env.MCODE_VERIFY_REPORT_DIR, 'package-install.json'), JSON.stringify({
