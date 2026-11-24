@@ -671,6 +671,17 @@ describe('TuiRunCoordinator', () => {
     });
   });
 
+  it('preserves an explicit failure when its stream ends without done', async () => {
+    const runtime = createRuntime(async function* () {
+      yield { type: 'error', message: 'terminated' } as const;
+    });
+    const result = await new TuiRunCoordinator(runtime).execute(request('turn-error-no-done'));
+    expect(result.status).toBe('failed');
+    expect(result.outcome.error).toEqual({
+      category: 'runtime', message: 'terminated', retryable: true,
+    });
+  });
+
   it('keeps a real in-band failure when the turn ends with done after an error event', async () => {
     const runtime = createRuntime(async function* () {
       yield { type: 'error', message: 'the provider exploded' } as const;

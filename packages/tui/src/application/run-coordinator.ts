@@ -346,17 +346,14 @@ export class TuiRunCoordinator {
       // ended WITHOUT its terminal `[DONE]` and without our own exits
       // (abort/stop, questionnaire, limits) did not confirm the turn's end —
       // a lost window must never read as success, because the turn may still
-      // be running. Only the listed statuses survive it: cancelled (abort),
-      // awaiting (questionnaire) and limit_exceeded (limits) are set BEFORE
-      // this point by our own logic; a succeeded status here came from
-      // `next.done` with no `done` event ever seen.
+      // be running. Preserve explicit failures and our own exits: a known
+      // provider failure must not become an unconfirmed delivery merely
+      // because its stream omitted done.
       if (
         !sawTerminal &&
         !activeRun.controller.signal.aborted &&
         activeRun.stopReason === undefined &&
-        status !== 'cancelled' &&
-        status !== 'awaiting-user-continuation' &&
-        status !== 'limit_exceeded'
+        status === 'succeeded'
       ) {
         status = 'failed';
         failure = {
