@@ -33,6 +33,7 @@ export const turnIngress = sqliteTable(
     acceptedAtMs: integer('accepted_at_ms').notNull(),
     acceptedSequence: integer('accepted_sequence'),
     completedAtMs: integer('completed_at_ms'),
+    failureReason: text('failure_reason'),
     queueAcknowledgedAtMs: integer('queue_acknowledged_at_ms'),
     inputDigest: text('input_digest'),
     inputMetadataJson: text('input_metadata_json').notNull().default('{}'),

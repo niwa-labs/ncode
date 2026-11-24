@@ -277,6 +277,7 @@ describe('[DONE] inventory: every naturally finished turn ends with the terminal
   it('a runtime-error turn carries the failure to the projection AND still ends with [DONE]', async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'turn-done-inventory-err-'));
     await mkdir(join(dataDir, 'workspace'), { recursive: true });
+    const reason = 'terminated: Response body length does not match content-length header (UND_ERR_RES_CONTENT_LENGTH_MISMATCH)';
     harness.scripts = [
       async (input) => {
         await input.eventWriter.pushRuntime(
@@ -286,7 +287,7 @@ describe('[DONE] inventory: every naturally finished turn ends with the terminal
             content: 'working…',
           }),
         );
-        throw new Error('the runtime fault');
+        throw new Error(`${reason}; Authorization: Bearer synthetic-credential`);
       },
     ];
     host = await createHost(dataDir);
@@ -306,6 +307,7 @@ describe('[DONE] inventory: every naturally finished turn ends with the terminal
     expect((await cli.getTurnStatus(sessionId, turnId)).latestActivity).toMatchObject({
       turnId,
       outcome: 'failed',
+      failureReason: expect.stringContaining(reason),
       completedAtMs: expect.any(Number),
     });
     expect((await cli.getTurnStatus(sessionId, 'another-turn')).latestActivity).toBeNull();
@@ -315,5 +317,18 @@ describe('[DONE] inventory: every naturally finished turn ends with the terminal
       frames.some((frame) => /error|failed/i.test(frame.dataJson)),
       'the turn projected its failure before the terminal marker',
     ).toBe(true);
+
+    await host.apiHost.close();
+    await host.metricsClient.close();
+    host = undefined;
+    closeLocalRuntimeDb(dataDir);
+    host = await createHost(dataDir);
+    const reopened = host.cliService as CliService;
+
+    await sendMessageToCompletion(reopened, sessionId, 'run another turn');
+    expect((await reopened.getTurnStatus(sessionId)).latestActivity?.turnId).not.toBe(turnId);
+    const recovered = (await reopened.getTurnStatus(sessionId, turnId)).latestActivity;
+    expect(recovered).toMatchObject({ turnId, outcome: 'failed', failureReason: expect.stringContaining(reason) });
+    expect(recovered?.failureReason).not.toContain('synthetic-credential');
   }, 240_000);
 });

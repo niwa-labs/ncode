@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { sessionLocks, turnIngress } from '../../../infra/db/schema/turn.js';
 import type { QueueCommittedFact } from '../../session-system/index.js';
@@ -25,7 +25,7 @@ type SettleTurnInput = Parameters<TurnRepository['settle']>[0];
  */
 export type PendingSettlement = Pick<
   SettleTurnInput,
-  'sessionId' | 'turnId' | 'leaseId' | 'queuePauseCause'
+  'sessionId' | 'turnId' | 'leaseId' | 'queuePauseCause' | 'failureReason'
 >;
 
 export function pendingSettlementOf(input: SettleTurnInput): PendingSettlement {
@@ -33,6 +33,7 @@ export function pendingSettlementOf(input: SettleTurnInput): PendingSettlement {
     sessionId: input.sessionId,
     turnId: input.turnId,
     leaseId: input.leaseId,
+    ...(input.failureReason ? { failureReason: input.failureReason } : {}),
     ...(input.queuePauseCause ? { queuePauseCause: input.queuePauseCause } : {}),
   };
 }
@@ -97,7 +98,11 @@ export function recoverPendingSettlementInTransaction(
     .get();
   if (lock?.ownerId !== pending.leaseId || receipt?.status !== 'accepted') return undefined;
   tx.update(turnIngress)
-    .set({ status: 'failed', completedAtMs })
+    .set({
+      status: 'failed',
+      completedAtMs,
+      failureReason: sql`coalesce(${turnIngress.failureReason}, ${pending.failureReason ?? null})`,
+    })
     .where(
       and(
         eq(turnIngress.sessionId, pending.sessionId),

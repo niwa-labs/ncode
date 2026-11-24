@@ -26,6 +26,8 @@ import {
   sessionAgentState,
   sessions,
 } from '../../../../infra/db/schema/sessions.js';
+import { turnIngress } from '../../../../infra/db/schema/turn.js';
+import { normalizeTurnFailureReason } from '../../../../infra/turn-failure-reason.js';
 import {
   assertSessionModelSnapshot,
   normalizeSessionModelUpdate,
@@ -647,6 +649,21 @@ class DrizzleSessionRepository implements SessionRepository {
             set: agentStateRow(current, input, this.nowMs()),
           })
           .run();
+        if (input.terminalOutcome === 'failed') {
+          const reason = normalizeTurnFailureReason(input.failureReason);
+          if (reason) {
+            // Save the terminal error before settlement releases the lease, in case recovery does it.
+            tx.update(turnIngress)
+              .set({ failureReason: reason })
+              .where(and(
+                eq(turnIngress.sessionId, input.sessionId),
+                eq(turnIngress.turnId, input.turnId),
+                eq(turnIngress.status, 'accepted'),
+                isNull(turnIngress.failureReason),
+              ))
+              .run();
+          }
+        }
         return { status: 'applied' };
       },
       { behavior: 'immediate' },

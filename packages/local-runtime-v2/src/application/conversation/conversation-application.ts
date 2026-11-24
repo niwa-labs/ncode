@@ -143,6 +143,7 @@ export interface TurnStatusSnapshot {
     readonly completedAtMs?: number;
     readonly outcome?: 'completed' | 'failed' | 'aborted';
     readonly activityAtMs: number;
+    readonly failureReason?: string;
   } | null;
 }
 

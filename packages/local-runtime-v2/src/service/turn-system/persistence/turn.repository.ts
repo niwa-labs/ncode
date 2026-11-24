@@ -305,6 +305,7 @@ function findLatestTurnActivity(
       acceptedAtMs: turnIngress.acceptedAtMs,
       completedAtMs: turnIngress.completedAtMs,
       outcome: turnIngress.status,
+      failureReason: turnIngress.failureReason,
     })
     .from(turnIngress)
     .where(and(eq(turnIngress.sessionId, sessionId), turnId === undefined ? undefined : eq(turnIngress.turnId, turnId)))
@@ -317,6 +318,9 @@ function findLatestTurnActivity(
   return {
     turnId: latest.turnId,
     ...(completedAtMs !== undefined && (outcome === 'completed' || outcome === 'failed' || outcome === 'aborted') ? { outcome } : {}),
+    ...(turnId !== undefined && outcome === 'failed' && latest.failureReason
+      ? { failureReason: latest.failureReason }
+      : {}),
     acceptedAtMs: latest.acceptedAtMs,
     ...(completedAtMs !== undefined ? { completedAtMs } : {}),
     activityAtMs: Math.max(latest.acceptedAtMs, completedAtMs ?? latest.acceptedAtMs),
@@ -1081,7 +1085,13 @@ function settleInTransaction(tx: Transaction, input: SettleTurnInput, completedA
   }
   const updated = tx
     .update(turnIngress)
-    .set({ status: input.outcome, completedAtMs })
+    .set({
+      status: input.outcome,
+      completedAtMs,
+      failureReason: input.outcome === 'failed'
+        ? sql`coalesce(${turnIngress.failureReason}, ${input.failureReason ?? null})`
+        : null,
+    })
     .where(
       and(
         eq(turnIngress.turnId, input.turnId),

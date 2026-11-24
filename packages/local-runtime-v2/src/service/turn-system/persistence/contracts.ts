@@ -133,6 +133,7 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     readonly turnId: string;
     readonly leaseId: string;
     readonly outcome: TurnTerminalOutcome;
+    readonly failureReason?: string;
     readonly queuePauseCause?: import('../../session-system/index.js').QueuePauseCause;
   }): Promise<
     | {
@@ -173,6 +174,7 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
         readonly acceptedAtMs: number;
         readonly completedAtMs?: number;
         readonly outcome?: 'completed' | 'failed' | 'aborted';
+        readonly failureReason?: string;
         readonly activityAtMs: number;
       }
     | undefined

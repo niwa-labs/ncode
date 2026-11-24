@@ -258,9 +258,9 @@ afterEach(async () => {
 });
 
 describe('resume after the owner died mid-Turn', () => {
-  it(
-    'a recycled owner pid does not fence the recorded Session: the orphan Turn is reconciled and streams open again',
-    async () => {
+  it.each([undefined, 'provider disconnected while streaming'])(
+    'a recycled owner pid releases the orphan Turn and preserves its recorded reason (%s)',
+    async (reason) => {
       dataDir = await mkdtemp(join(tmpdir(), 'resume-owner-death-'));
       await mkdir(join(dataDir, 'workspace'), { recursive: true });
 
@@ -290,6 +290,21 @@ describe('resume after the owner died mid-Turn', () => {
       const orphanLocks = readLockRows(dataDir, session.sessionId);
       expect(orphanLocks).toHaveLength(1);
       expect(orphanLocks[0]?.owner_kind).toBe('turn');
+
+      // Model a terminal projection that committed just before the owner died,
+      // while the ingress receipt was still accepted and the lease held.
+      if (reason) {
+        const Database = loadSqlite3Constructor();
+        const db = new Database(join(dataDir, 'v2', 'sqlite', 'runtime-state.sqlite'), { fileMustExist: true });
+        try {
+          const update = db.prepare(
+            "UPDATE local_runtime_turn_ingress SET failure_reason = ? WHERE turn_id = ? AND status = 'accepted'",
+          ).run(reason, orphanTurn.turnId);
+          expect(update.changes).toBe(1);
+        } finally {
+          db.close();
+        }
+      }
 
       // 2. The kill: no graceful close — the durable lease and the instance
       //    lease file stay exactly like after SIGKILL. The restarted daemon
@@ -323,6 +338,9 @@ describe('resume after the owner died mid-Turn', () => {
         ingress.some((row) => row.turn_id === orphanTurn.turnId && row.status === 'failed'),
         'the orphan Turn must carry a terminal (failed) settlement receipt',
       ).toBe(true);
+      const activity = (await cli.getTurnStatus(session.sessionId, orphanTurn.turnId)).latestActivity;
+      expect(activity).toMatchObject({ turnId: orphanTurn.turnId, outcome: 'failed' });
+      expect(activity?.failureReason).toBe(reason);
 
       // 4. The incident surface: a follow-up stream.open on the recorded
       //    Session must be ACCEPTED (pre-fix: 409 local_session_busy → hub

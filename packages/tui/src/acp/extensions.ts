@@ -273,7 +273,10 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
     const activity = status?.latestActivity;
     if (activity?.turnId !== params.turnId) return { status: 'missing' };
     if (!activity.outcome) return { status: 'pending' };
-    if (activity.outcome !== 'completed') return { status: activity.outcome };
+    if (activity.outcome === 'failed') {
+      return { status: 'failed', reason: activity.failureReason ?? null };
+    }
+    if (activity.outcome === 'aborted') return { status: 'aborted' };
     if (await pendingQuestionnaireForTurn(options.runtime, params.sessionId, params.turnId, session.agentName)) {
       return { status: 'pending' };
     }

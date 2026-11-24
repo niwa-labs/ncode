@@ -1492,6 +1492,16 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           }`,
         );
       }
+      const status = await options.runtime.getTurnStatus?.(context.params.sessionId, turnId)
+        .catch(() => undefined);
+      const activity = status?.latestActivity;
+      if (activity?.turnId === turnId && activity.outcome === 'failed') {
+        const reason = activity.failureReason ?? null;
+        throw acp.RequestError.internalError(
+          { code: 'turn_failed', turnId, reason },
+          reason ?? 'MiniMax Code Runtime failed.',
+        );
+      }
       // Structured reason (incident 2026-11-05): an admission-class refusal
       // (e.g. a busy session, `code: 'local_session_busy'`) is NOT a runtime
       // failure — surface its code in `data` and say "refused", keeping the

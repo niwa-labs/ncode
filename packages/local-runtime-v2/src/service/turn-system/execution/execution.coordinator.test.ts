@@ -12,7 +12,9 @@ import {
 describe('ExecutionCoordinator durable Queue pause terminal policy', () => {
   it('commits a final Foreground Turn failure and QueuePaused through one repository settlement', async () => {
     const harness = fixture();
-    harness.host.run.mockResolvedValueOnce({ status: 'failed', error: new Error('model failed') });
+    harness.host.run.mockRejectedValueOnce(new AggregateError([
+      new Error('model failed'), new Error('cleanup failed'),
+    ], 'Agent terminal finalization failed'));
 
     const started = await harness.coordinator.startTurn({
       turn: agentTurn(),
@@ -29,6 +31,7 @@ describe('ExecutionCoordinator durable Queue pause terminal policy', () => {
       turnId: 'turn-1',
       leaseId: 'lease-1',
       outcome: 'failed',
+      failureReason: 'model failed',
       queuePauseCause: 'turn-final-failure',
     });
   });
@@ -49,11 +52,11 @@ describe('ExecutionCoordinator durable Queue pause terminal policy', () => {
 
     expect(harness.repository.settle).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ queuePauseCause: 'turn-final-failure' }),
+      expect.objectContaining({ queuePauseCause: 'turn-final-failure', failureReason: 'pre-host failed' }),
     );
     expect(harness.repository.settle).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ queuePauseCause: 'turn-final-failure' }),
+      expect.objectContaining({ queuePauseCause: 'turn-final-failure', failureReason: 'controller registration failed' }),
     );
   });
 

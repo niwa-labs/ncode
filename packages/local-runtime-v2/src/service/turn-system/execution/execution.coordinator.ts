@@ -1,3 +1,5 @@
+import { normalizeTurnFailureReason } from '../../../infra/turn-failure-reason.js';
+
 import type {
   AgentHost,
   AgentHostTurnOutcome,
@@ -148,6 +150,7 @@ async function settleAgentTurn(
   const settlementError = await settleAndRelease(options, {
     turn,
     outcome: outcome.status,
+    failure: outcome.status === 'failed' ? outcome.error : undefined,
     controllerTurn: turn,
     wakeQueue:
       outcome.status === 'completed' &&
@@ -165,6 +168,7 @@ async function settlePreHostFailure(
   const settlementError = await settleAndRelease(options, {
     turn,
     outcome: 'failed',
+    failure: error,
     controllerTurn: turn,
     wakeQueue: true,
   });
@@ -184,6 +188,7 @@ async function settleFailedAdmission(
   const settlementError = await settleAndRelease(options, {
     turn: admission,
     outcome: 'failed',
+    failure: error,
     wakeQueue: true,
   });
   return {
@@ -200,6 +205,7 @@ async function settleCompaction(
   const settlementError = await settleAndRelease(options, {
     turn,
     outcome: compactionTerminal(outcome),
+    failure: outcome.status === 'failed' ? outcome.error : undefined,
     controllerTurn: turn,
     wakeQueue: true,
   });
@@ -241,6 +247,7 @@ async function settleAndRelease(
       'sessionId' | 'turnId' | 'leaseId' | 'busyReason' | 'acceptedAtMs'
     >;
     readonly outcome: TurnTerminalOutcome;
+    readonly failure?: unknown;
     readonly controllerTurn?: AcceptedAgentTurn | AcceptedCompactionTurn;
     readonly wakeQueue: boolean;
   },
@@ -271,11 +278,13 @@ async function settleAndRelease(
     }
   }
   const queuePauseCause = terminalQueuePauseCause(input);
+  const failureReason = turnFailureReason(input.failure);
   const settlement = await settleRepository(options.repository, {
     sessionId: input.turn.sessionId,
     turnId: input.turn.turnId,
     leaseId: input.turn.leaseId,
     outcome: input.outcome,
+    ...(failureReason ? { failureReason } : {}),
     ...(queuePauseCause ? { queuePauseCause } : {}),
   });
   if (settlement.error) return settlement.error;
@@ -419,6 +428,14 @@ async function settleRepository(
       return { error };
     }
   }
+}
+
+function turnFailureReason(error: unknown): string | undefined {
+  // AgentHost puts the originating error before any cleanup errors.
+  const primary = error instanceof AggregateError ? error.errors[0] : error;
+  return normalizeTurnFailureReason(
+    primary instanceof Error ? primary.message : typeof primary === 'string' ? primary : undefined,
+  );
 }
 
 function compactionTerminal(outcome: CompactionOutcome): TurnTerminalOutcome {

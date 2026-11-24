@@ -3820,6 +3820,42 @@ describe('MiniMax Code ACP agent', () => {
     });
   });
 
+  it('uses the same durable failure for a live prompt and a turn result lookup', async () => {
+    const { runtime } = createRuntime();
+    const turnId = '9483d033-c220-4d6c-b94f-160b552d4be6';
+    const reason = 'terminated: response length did not match Content-Length';
+    runtime.getTurnStatus = async (_sessionId, requestedTurnId) => ({
+      activeTurn: null,
+      latestActivity: requestedTurnId === turnId
+        ? {
+            turnId, acceptedAtMs: 10, completedAtMs: 20, activityAtMs: 20,
+            outcome: 'failed', failureReason: reason,
+          }
+        : null,
+    });
+    vi.mocked(runtime.sendMessage).mockImplementationOnce(async function* () {
+      yield { type: 'error', message: 'generic stream failure' };
+      yield { type: 'done' };
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3', createTurnId: () => turnId });
+    await acp.client({ name: 'test-client' }).connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(connection.request(acp.methods.agent.session.prompt, {
+        sessionId,
+        prompt: [{ type: 'text', text: 'Fail the turn' }],
+      })).rejects.toMatchObject({ data: { code: 'turn_failed', turnId, reason } });
+      await expect(connection.request('mcode/session/turn_result', { sessionId, turnId }))
+        .resolves.toEqual({ status: 'failed', reason });
+    });
+  });
+
   // The next-done shape of the same failure: the coordinator's sawTerminal net
   // (verdict §2.2б) reports TURN_DETACHED for a source that ended without its
   // terminal marker — the shim maps it identically.

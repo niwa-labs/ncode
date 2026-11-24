@@ -299,6 +299,7 @@ export interface AgentSessionStateMutation {
   readonly runtimeSeq?: number;
   readonly update: SessionUpdateFields & { readonly status: SessionStatus };
   readonly terminalOutcome?: AgentSessionTerminalOutcome;
+  readonly failureReason?: string;
 }
 
 export type AgentSessionStateWriteResult =

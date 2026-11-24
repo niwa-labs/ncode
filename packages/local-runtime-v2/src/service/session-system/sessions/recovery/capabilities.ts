@@ -77,6 +77,7 @@ export function createSessionStateWriter(
       repository.applyAgentState({
         ...input,
         terminalOutcome: input.outcome,
+        ...(input.errorMessage === undefined ? {} : { failureReason: input.errorMessage }),
         update: terminalStateUpdate(input),
       }),
   };
