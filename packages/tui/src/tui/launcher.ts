@@ -61,6 +61,7 @@ import { tuiErrorDiagnostic } from '../user-facing-failure.js';
 import {
   getConfig,
   isValidProfileName,
+  PROFILE_ENV_VAR,
   resetConfig,
   writeTuiStatusLineSetting,
   type MavisRegion,
@@ -353,6 +354,7 @@ export async function launchTui(
   let startupStatus: TuiStartupStatus | undefined;
   let firstFrameObservation: Promise<boolean> | undefined;
   let activeSessionId: string | undefined;
+  let resumeProfile = options.profile;
   let stoppedNormally = false;
   let runtimeInitialized = false;
   let tuiRunning = false;
@@ -628,7 +630,14 @@ export async function launchTui(
       app.stopped.then(() => true),
       processStopFailure.then(() => false),
     ]);
-    if (stoppedNormally) activeSessionId = app.controller?.snapshot().session?.sessionId;
+    if (stoppedNormally) {
+      const snapshot = app.controller?.snapshot();
+      activeSessionId = snapshot?.session?.sessionId;
+      if (resumeProfile === undefined) {
+        const profile = snapshot?.account?.profile;
+        resumeProfile = profile === undefined ? process.env[PROFILE_ENV_VAR]?.trim() : profile ?? undefined;
+      }
+    }
   } catch (error) {
     captureTuiIncidentBestEffort(incidentReporter, {
       eventType: tuiRunning ? 'cli_process_error' : 'cli_startup_error',
@@ -714,7 +723,7 @@ export async function launchTui(
   if (stoppedNormally && runtimeInitialized && !runtimeShutdownFailed) {
     try {
       (dependencies.writeExitMessage ?? ((message) => process.stdout.write(message)))(
-        formatTuiExitMessage(activeSessionId),
+        formatTuiExitMessage(activeSessionId, resumeProfile),
       );
     } catch {
       // A closed output stream must not turn a completed TUI shutdown into a failure.
@@ -991,15 +1000,17 @@ function isExistingFile(file: string): boolean {
   }
 }
 
-export function formatTuiExitMessage(sessionId?: string): string {
-  const sessionHint = sessionId ? formatTuiSessionHint(sessionId) : undefined;
+export function formatTuiExitMessage(sessionId?: string, profile?: string): string {
+  const sessionHint = sessionId ? formatTuiSessionHint(sessionId, profile) : undefined;
   return `${sessionHint ?? '\n'}${sessionHint ? '\n' : ''}${MINIMAX_CODE_EXIT_SLOGAN}\n`;
 }
 
-export function formatTuiSessionHint(sessionId: string): string | undefined {
+export function formatTuiSessionHint(sessionId: string, profile?: string): string | undefined {
   const normalized = sessionId.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(normalized)) return undefined;
-  return `\nContinue this session with:\n  mcode --session ${normalized}\n`;
+  if (profile && !isValidProfileName(profile)) return undefined;
+  const profileFlag = profile ? ` --profile ${profile}` : '';
+  return `\nContinue this session with:\n  ncode${profileFlag} --session ${normalized}\n`;
 }
 
 async function prepareInitialTuiState(
