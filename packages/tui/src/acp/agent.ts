@@ -1360,7 +1360,15 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
       const submittedModeIntent = active.pendingModeIntent;
       const previousMode =
         active.session.interactionMode === 'plan' ? ACP_MODE_PLAN : ACP_MODE_DEFAULT;
-      const turnId = createTurnId();
+      const requestedTurnId = context.params._meta?.['minimax-code/turnId'];
+      if (
+        requestedTurnId !== undefined &&
+        (typeof requestedTurnId !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedTurnId))
+      ) {
+        throw acp.RequestError.invalidParams(undefined, 'Invalid native Turn ID.');
+      }
+      const turnId = requestedTurnId ?? createTurnId();
       const promptController = new AbortController();
       const activePrompt: NonNullable<AcpSession['activePrompt']> = {
         controller: promptController,
@@ -1476,6 +1484,7 @@ export function createTuiAcpAgent(options: CreateTuiAcpAgentOptions): acp.AgentA
           {
             code: 'turn_detached',
             sessionId: context.params.sessionId,
+            turnId,
             resumable: true,
           },
           `MiniMax Code lost the turn window (turn may still be running): ${

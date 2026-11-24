@@ -39,8 +39,10 @@ export class TuiInteractionAccess {
     };
   }
 
-  async getTurnStatus(sessionId: string): Promise<TuiTurnStatusSnapshot> {
-    const status = await this.cliService.getTurnStatus(sessionId);
+  async getTurnStatus(sessionId: string, turnId?: string): Promise<TuiTurnStatusSnapshot> {
+    const status = await (turnId === undefined
+      ? this.cliService.getTurnStatus(sessionId)
+      : this.cliService.getTurnStatus(sessionId, turnId));
     return toTuiTurnStatus(status);
   }
 

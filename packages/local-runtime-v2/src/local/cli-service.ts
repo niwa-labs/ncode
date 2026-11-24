@@ -503,8 +503,8 @@ export class CliService {
     return this.options.conversation.getActiveTurn(sessionId);
   }
 
-  getTurnStatus(sessionId: string): Promise<TurnStatusSnapshot> {
-    return this.options.conversation.getTurnStatus(sessionId);
+  getTurnStatus(sessionId: string, turnId?: string): Promise<TurnStatusSnapshot> {
+    return this.options.conversation.getTurnStatus(sessionId, turnId);
   }
 
   watchEvents(signal?: AbortSignal) {

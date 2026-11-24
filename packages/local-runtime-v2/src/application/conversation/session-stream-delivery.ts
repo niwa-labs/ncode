@@ -24,22 +24,36 @@ export function mapV2TurnStreamResult(
     );
     return streamError(error);
   }
-  return { ok: true, source: mapV2SessionFrames(result.frames) };
+  return {
+    ok: true,
+    source: mapV2SessionFrames(result.frames, {
+      turnId: result.turnId,
+      ...(result.completion ? { confirm: async () => (await result.completion)?.status } : {}),
+    }),
+  };
+}
+
+interface TurnStreamBoundary {
+  readonly turnId: string;
+  readonly confirm?: () => Promise<string | undefined>;
 }
 
 export function openV2SessionStream(
   frames: AsyncIterable<SessionFrame>,
+  turn?: TurnStreamBoundary,
 ): ProcessLocalStreamResult<SessionStreamFrameView, SessionStreamErrorBody> {
-  return { ok: true, source: mapV2SessionFrames(frames) };
+  return { ok: true, source: mapV2SessionFrames(frames, turn) };
 }
 
 function mapV2SessionFrames(
   frames: AsyncIterable<SessionFrame>,
+  turn?: TurnStreamBoundary,
 ): AsyncIterableIterator<SessionStreamFrameView> {
   const upstream = frames[Symbol.asyncIterator]();
   const queued: SessionStreamFrameView[] = [{ dataJson: '{"type":10}' }];
   let closed = false;
   let reading = false;
+  let terminalStatus: string | undefined;
   let closePromise: Promise<IteratorResult<SessionStreamFrameView>> | undefined;
 
   const done = (): IteratorResult<SessionStreamFrameView> => ({
@@ -65,8 +79,26 @@ function mapV2SessionFrames(
       const result = await upstream.next();
       if (closed) return done();
       if (result.done) {
+        if (turn) {
+          // The stream is a reader. It can close while the daemon still holds the turn.
+          if (terminalStatus === undefined) {
+            closed = true;
+            return done();
+          }
+          const settled = turn.confirm ? await turn.confirm() : terminalStatus;
+          if (closed) return done();
+          if (settled !== terminalStatus) {
+            closed = true;
+            return done();
+          }
+        }
         closed = true;
         return { done: false, value: { dataJson: "[DONE]" } };
+      }
+      if (turn && result.value.turnId !== undefined && result.value.turnId !== turn.turnId) continue;
+      if (turn && result.value.kind === "turn-terminal") {
+        if (result.value.turnId !== turn.turnId) continue;
+        terminalStatus = recordString(result.value.data, "status");
       }
       const data = mapV2Frame(result.value);
       const mapped = data.map((value, index) =>

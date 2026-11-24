@@ -3786,6 +3786,40 @@ describe('MiniMax Code ACP agent', () => {
     });
   });
 
+  it('reads a confirmed final answer only for the requested native turn', async () => {
+    const { runtime } = createRuntime();
+    const turnId = '9483d033-c220-4d6c-b94f-160b552d4be6';
+    runtime.getTurnStatus = async (_sessionId, requestedTurnId) => ({
+      activeTurn: null,
+      latestActivity: requestedTurnId === turnId
+        ? { turnId, acceptedAtMs: 10, completedAtMs: 20, activityAtMs: 20, outcome: 'completed' }
+        : null,
+    });
+    runtime.listMessagePage = async () => ({
+      messages: [
+        { role: 'assistant', kind: 'final', turnId, content: 'Recovered answer' },
+        { role: 'assistant', kind: 'final', turnId: 'another-turn', content: 'Unrelated answer' },
+      ],
+      hasMore: false,
+    });
+    const agent = createTuiAcpAgent({ runtime, version: '1.2.3' });
+    const client = acp.client({ name: 'test-client' });
+    await client.connectWith(agent, async (connection) => {
+      await connection.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const { sessionId } = await connection.request(acp.methods.agent.session.new, {
+        cwd: '/workspace',
+        mcpServers: [],
+      });
+      await expect(connection.request('mcode/session/turn_result', { sessionId, turnId }))
+        .resolves.toEqual({ status: 'completed', answer: 'Recovered answer' });
+      await expect(connection.request('mcode/session/turn_result', { sessionId, turnId: 'different' }))
+        .resolves.toEqual({ status: 'missing' });
+    });
+  });
+
   // The next-done shape of the same failure: the coordinator's sawTerminal net
   // (verdict §2.2б) reports TURN_DETACHED for a source that ended without its
   // terminal marker — the shim maps it identically.

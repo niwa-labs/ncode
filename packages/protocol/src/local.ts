@@ -597,6 +597,7 @@ export interface SendMessageInput {
 
 export interface ResumeSessionInput {
   id: string;
+  turnId?: string;
   afterMsgId?: string;
   afterCursor?: string;
   drainQueued?: boolean;

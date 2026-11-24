@@ -136,11 +136,12 @@ export interface TurnStatusSnapshot {
     readonly busyReason: "turn" | "compaction";
     readonly locallyOwned: boolean;
   } | null;
-  /** Latest durable turn activity; `null` when no Turn was ever admitted. */
+  /** Durable activity for the requested turn, or the latest turn when no ID was supplied. */
   readonly latestActivity: {
     readonly turnId: string;
     readonly acceptedAtMs: number;
     readonly completedAtMs?: number;
+    readonly outcome?: 'completed' | 'failed' | 'aborted';
     readonly activityAtMs: number;
   } | null;
 }
@@ -161,11 +162,11 @@ export class ConversationApplication {
    * ingress ledger, in one read — the alternative being blind polling of
    * session history pages.
    */
-  async getTurnStatus(sessionId: string): Promise<TurnStatusSnapshot> {
+  async getTurnStatus(sessionId: string, turnId?: string): Promise<TurnStatusSnapshot> {
     const [activeTurn, latestActivity] = await Promise.all([
       this.options.turnInspection?.activeTurn(sessionId) ??
         Promise.resolve(undefined),
-      this.options.turnInspection?.latestTurnActivity?.(sessionId) ??
+      this.options.turnInspection?.latestTurnActivity?.(sessionId, turnId) ??
         Promise.resolve(undefined),
     ]);
     return {
@@ -330,14 +331,20 @@ export class ConversationApplication {
           `Session not found: ${req.id}`,
         );
       }
+      const turnId = req.turnId;
+      const activity = turnId === undefined
+        ? undefined
+        : (await this.getTurnStatus(req.id, turnId)).latestActivity;
+      if (turnId !== undefined && (activity?.turnId !== turnId || req.drainQueued || req.continuePausedQueue)) {
+        return streamOpenError(409, "local_turn_not_resumable", "The requested turn cannot be resumed");
+      }
       const frames = this.options.stream.resume({
         sessionId: req.id,
         ...(req.afterMsgId ? { afterMsgId: req.afterMsgId } : {}),
         ...(req.afterCursor ? { afterCursor: req.afterCursor } : {}),
-        waitForTerminal: shouldWaitForTerminal(
-          req.drainQueued === true || req.continuePausedQueue === true,
-          session.status,
-        ),
+        waitForTerminal: turnId === undefined
+          ? shouldWaitForTerminal(req.drainQueued === true || req.continuePausedQueue === true, session.status)
+          : activity?.outcome === undefined,
       });
       try {
         if (req.continuePausedQueue) {
@@ -351,7 +358,10 @@ export class ConversationApplication {
         await frames.return?.();
         throw error;
       }
-      return openV2SessionStream(frames);
+      return openV2SessionStream(frames, turnId === undefined ? undefined : {
+        turnId,
+        confirm: async () => (await this.getTurnStatus(req.id, turnId)).latestActivity?.outcome,
+      });
     });
   }
 

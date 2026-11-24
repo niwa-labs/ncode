@@ -821,11 +821,12 @@ export interface TurnSystemOwner {
         }
       | undefined
     >;
-    latestTurnActivity?(sessionId: string): Promise<
+    latestTurnActivity?(sessionId: string, turnId?: string): Promise<
       | {
           readonly turnId: string;
           readonly acceptedAtMs: number;
           readonly completedAtMs?: number;
+          readonly outcome?: 'completed' | 'failed' | 'aborted';
           readonly activityAtMs: number;
         }
       | undefined

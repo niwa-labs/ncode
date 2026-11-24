@@ -233,7 +233,7 @@ export async function initializeTurnSystem(
             }
           : undefined;
       },
-      latestTurnActivity: (sessionId) => repository.findLatestTurnActivity(sessionId),
+      latestTurnActivity: (sessionId, turnId) => repository.findLatestTurnActivity(sessionId, turnId),
     },
     maintenance,
     receipts: { findReceipt: (turnId) => repository.findReceipt(turnId) },

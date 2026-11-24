@@ -382,7 +382,7 @@ export class TuiRemoteCliService {
         ...(typeof req.turnId === 'string' ? { turnId: req.turnId } : {}),
         readyMs: this.reattachReadyMs,
         sleep: this.reattachSleep,
-        resume: (afterCursor, afterMsgId) => this.reopenTurnStream(sessionId, afterCursor, afterMsgId),
+        resume: (afterCursor, afterMsgId) => this.reopenTurnStream(sessionId, afterCursor, afterMsgId, req.turnId),
         waitForReady: (timeoutMs) => this.waitForClientReady(timeoutMs),
       }),
     };
@@ -401,9 +401,10 @@ export class TuiRemoteCliService {
       ok: true,
       source: abortAwareSource(opened.source, ctx?.signal, {
         sessionId: sessionId ?? '',
+        ...(req.turnId === undefined ? {} : { turnId: req.turnId }),
         readyMs: this.reattachReadyMs,
         sleep: this.reattachSleep,
-        resume: (afterCursor, afterMsgId) => this.reopenTurnStream(sessionId, afterCursor, afterMsgId),
+        resume: (afterCursor, afterMsgId) => this.reopenTurnStream(sessionId, afterCursor, afterMsgId, req.turnId),
         waitForReady: (timeoutMs) => this.waitForClientReady(timeoutMs),
       }),
     };
@@ -644,10 +645,12 @@ export class TuiRemoteCliService {
     sessionId: string | undefined,
     afterCursor: string | undefined,
     afterMsgId?: string,
+    turnId?: string,
   ): Promise<RemoteStream<SessionStreamFrameView>> {
     if (sessionId === undefined) throw new Error('cannot reattach a turn without a session id');
     const req: ResumeSessionReq = {
       id: sessionId,
+      ...(turnId !== undefined ? { turnId } : {}),
       ...(afterCursor !== undefined ? { afterCursor } : {}),
       ...(afterMsgId !== undefined ? { afterMsgId } : {}),
     };

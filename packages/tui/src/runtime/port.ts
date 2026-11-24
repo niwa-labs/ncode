@@ -356,7 +356,7 @@ export interface TuiInspectionPort {
    * that would otherwise poll session history pages. `undefined` when the
    * runtime predates the port.
    */
-  getTurnStatus?(sessionId: string): Promise<TuiTurnStatusSnapshot>;
+  getTurnStatus?(sessionId: string, turnId?: string): Promise<TuiTurnStatusSnapshot>;
   getSessionUsageSummary?(sessionId: string): Promise<TuiSessionUsageSummary>;
   /**
    * W10 `/session` warmer status: the one-line prompt-cache warming status
@@ -419,6 +419,7 @@ export interface TuiTurnStatusSnapshot {
     readonly turnId: string;
     readonly acceptedAtMs: number;
     readonly completedAtMs?: number;
+    readonly outcome?: 'completed' | 'failed' | 'aborted';
     readonly activityAtMs: number;
   } | null;
 }

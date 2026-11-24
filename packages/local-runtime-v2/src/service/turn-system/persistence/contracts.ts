@@ -167,11 +167,12 @@ export interface TurnRepository extends QueueClaimAcceptanceLookup, SessionMaint
     | undefined
   >;
   /** Latest durable Turn clock used to reject stale process-local idle decisions. */
-  findLatestTurnActivity(sessionId: string): Promise<
+  findLatestTurnActivity(sessionId: string, turnId?: string): Promise<
     | {
         readonly turnId: string;
         readonly acceptedAtMs: number;
         readonly completedAtMs?: number;
+        readonly outcome?: 'completed' | 'failed' | 'aborted';
         readonly activityAtMs: number;
       }
     | undefined

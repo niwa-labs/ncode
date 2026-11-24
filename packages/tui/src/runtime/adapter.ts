@@ -677,8 +677,8 @@ export class TuiRuntimeAdapter implements TuiRuntime {
   getQueueSnapshot(sessionId: string): Promise<TuiQueueSnapshot> {
     return this.interactionAccess.getQueueSnapshot(sessionId);
   }
-  getTurnStatus(sessionId: string): Promise<TuiTurnStatusSnapshot> {
-    return this.interactionAccess.getTurnStatus(sessionId);
+  getTurnStatus(sessionId: string, turnId?: string): Promise<TuiTurnStatusSnapshot> {
+    return this.interactionAccess.getTurnStatus(sessionId, turnId);
   }
   continueQueue(sessionId: string): Promise<void> {
     return this.interactionAccess.continueQueue(sessionId);

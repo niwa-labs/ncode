@@ -28,6 +28,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { closeLocalRuntimeDb } from '../../../local-runtime/src/persistence/db.js';
 import type { CliService, SessionStreamFrameView } from '../../src/local/cli-service.js';
+import { mapV2TurnStreamResult } from '../../src/application/conversation/session-stream-delivery.js';
 import { createLocalRuntimeHostV2ForTest } from '../../src/runtime.js';
 
 interface ScriptedTurnInput {
@@ -198,6 +199,21 @@ afterEach(async () => {
 });
 
 describe('[DONE] inventory: every naturally finished turn ends with the terminal marker', () => {
+  it.each([[[]], [['another-turn']]])('does not finish a detached stream with terminal frames %j', async (turnIds) => {
+    const frames = (async function* () {
+      for (const turnId of turnIds) {
+        yield {
+          sessionId: 'session-1', identity: 'terminal', turnId, createdAtMs: 1,
+          kind: 'turn-terminal' as const, data: { status: 'completed' },
+        };
+      }
+    })();
+    const opened = mapV2TurnStreamResult({ accepted: true, turnId: 'own-turn', frames });
+    if (!opened.ok) throw new Error('Expected open stream');
+    const projected = await drainStream(opened.source);
+    expect(projected.map(frame => frame.dataJson)).toEqual(['{"type":10}']);
+  });
+
   it.each([
     {
       name: 'a normal turn (assistant message)',
@@ -282,10 +298,17 @@ describe('[DONE] inventory: every naturally finished turn ends with the terminal
     });
     const sessionId = created.sessionId as string;
 
-    const opened = await cli.sendMessage({ id: sessionId, content: 'fail the turn' });
+    const turnId = '5a5ea813-311c-4854-aed3-eb72ade706f1';
+    const opened = await cli.sendMessage({ id: sessionId, turnId, content: 'fail the turn' });
     expect(opened.ok).toBe(true);
     const frames = await drainStream(opened.ok ? opened.source : []);
     expect(frames.at(-1)?.dataJson).toBe('[DONE]');
+    expect((await cli.getTurnStatus(sessionId, turnId)).latestActivity).toMatchObject({
+      turnId,
+      outcome: 'failed',
+      completedAtMs: expect.any(Number),
+    });
+    expect((await cli.getTurnStatus(sessionId, 'another-turn')).latestActivity).toBeNull();
     // The failure itself is in-band (an error projection), not a lost window:
     // the coordinator keeps the REAL error when `done` is present.
     expect(

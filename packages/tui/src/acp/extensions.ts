@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import * as acp from '@agentclientprotocol/sdk';
 
+import { pendingQuestionnaireForTurn } from '../application/pending-questionnaire.js';
 import type { TuiSession } from '../runtime/port.js';
 import type { TuiAcpRuntime } from './runtime.js';
 
@@ -25,6 +26,7 @@ export const TUI_ACP_EXTENSION_METHODS = [
   'mcode/session/queue/delete',
   'mcode/session/queue/steer',
   'mcode/session/turn_status',
+  'mcode/session/turn_result',
   ...TUI_ACP_GOAL_METHODS,
   'mcode/session/delegation/get',
   'mcode/session/delegation/stop',
@@ -259,6 +261,26 @@ export function registerTuiAcpExtensions(options: RegisterTuiAcpExtensionsOption
     };
   });
 
+  options.app.onRequest('mcode/session/turn_result', (value) => {
+    const record = requireRecord(value);
+    return {
+      sessionId: requireText(record.sessionId, 'sessionId'),
+      turnId: requireText(record.turnId, 'turnId'),
+    };
+  }, async ({ params }) => {
+    const session = await resolvePersisted(params.sessionId);
+    const status = await options.runtime.getTurnStatus?.(params.sessionId, params.turnId);
+    const activity = status?.latestActivity;
+    if (activity?.turnId !== params.turnId) return { status: 'missing' };
+    if (!activity.outcome) return { status: 'pending' };
+    if (activity.outcome !== 'completed') return { status: activity.outcome };
+    if (await pendingQuestionnaireForTurn(options.runtime, params.sessionId, params.turnId, session.agentName)) {
+      return { status: 'pending' };
+    }
+    const answer = await readCommittedTurnAnswer(options.runtime, params.sessionId, params.turnId);
+    return { status: 'completed', answer };
+  });
+
   options.app.onRequest('mcode/session/goal/get', parseSessionRequest, async ({ params }) => {
     requireGoalEnabled();
     resolve(params.sessionId);
@@ -338,6 +360,29 @@ export async function resolveRootSessionId(
     current = await runtime.getSession(current.parentSessionId);
   }
   return current.sessionId;
+}
+
+async function readCommittedTurnAnswer(
+  runtime: TuiAcpRuntime,
+  sessionId: string,
+  turnId: string,
+): Promise<string | null> {
+  let before: string | undefined;
+  for (;;) {
+    const page = await runtime.listMessagePage(sessionId, { limit: 100, ...(before ? { before } : {}) });
+    const lastAssistant = page.messages.findLast((message) =>
+      message.turnId === turnId && message.role === 'assistant' &&
+      (message.kind === undefined || message.kind === 'final' || message.kind === 'preamble'),
+    );
+    if (lastAssistant) {
+      const final = lastAssistant.kind === 'final' ||
+        ['stop', 'end_turn', 'stop_sequence'].includes(lastAssistant.finishReason ?? '');
+      if (!final || lastAssistant.kind === 'preamble' || lastAssistant.toolCalls?.length) return null;
+      return lastAssistant.content?.trim() ? lastAssistant.content : null;
+    }
+    if (!page.hasMore || !page.nextCursor || page.nextCursor === before) return null;
+    before = page.nextCursor;
+  }
 }
 
 function requireSession(

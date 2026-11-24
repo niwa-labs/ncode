@@ -225,7 +225,7 @@ export function createTurnRepository(options: TurnRepositoryOptions): TurnReposi
       findActiveTurn(options.db, sessionId, nowMs(), (ownerId) =>
         isOwnedByOtherLiveRuntime(ownerId, { isLeaseOwnerAlive, isLeaseOwnerCurrent }),
       ),
-    findLatestTurnActivity: async (sessionId) => findLatestTurnActivity(options.db, sessionId),
+    findLatestTurnActivity: async (sessionId, turnId) => findLatestTurnActivity(options.db, sessionId, turnId),
     ...pluginHookSessionPersistence,
     findSteeringReceipt: (input) => findSteeringReceipt(options, input),
     reserveSteeringReceipt: (input) => reserveSteeringReceipt(options, input),
@@ -297,22 +297,26 @@ async function admitRepositoryTurn(
 function findLatestTurnActivity(
   db: TurnRepositoryOptions['db'],
   sessionId: string,
+  turnId?: string,
 ): Awaited<ReturnType<TurnRepository['findLatestTurnActivity']>> {
   const latest = db
     .select({
       turnId: turnIngress.turnId,
       acceptedAtMs: turnIngress.acceptedAtMs,
       completedAtMs: turnIngress.completedAtMs,
+      outcome: turnIngress.status,
     })
     .from(turnIngress)
-    .where(eq(turnIngress.sessionId, sessionId))
+    .where(and(eq(turnIngress.sessionId, sessionId), turnId === undefined ? undefined : eq(turnIngress.turnId, turnId)))
     .orderBy(desc(turnIngress.acceptedSequence))
     .limit(1)
     .get();
   if (!latest) return undefined;
   const completedAtMs = latest.completedAtMs ?? undefined;
+  const { outcome } = latest;
   return {
     turnId: latest.turnId,
+    ...(completedAtMs !== undefined && (outcome === 'completed' || outcome === 'failed' || outcome === 'aborted') ? { outcome } : {}),
     acceptedAtMs: latest.acceptedAtMs,
     ...(completedAtMs !== undefined ? { completedAtMs } : {}),
     activityAtMs: Math.max(latest.acceptedAtMs, completedAtMs ?? latest.acceptedAtMs),
