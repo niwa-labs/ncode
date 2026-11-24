@@ -108,7 +108,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function chainDependencies(): LaunchTuiDependencies {
+function chainDependencies(writeExitMessage: (message: string) => void = () => undefined): LaunchTuiDependencies {
   const fakeApp = {
     ready: Promise.resolve(),
     firstFrame: Promise.resolve(),
@@ -116,6 +116,7 @@ function chainDependencies(): LaunchTuiDependencies {
     stop: () => Promise.resolve(),
     stopped: Promise.resolve(),
     submit: async () => undefined,
+    controller: { snapshot: () => ({ session: { sessionId: 'mvs_example' } }) },
   };
   return {
     captureStderr: (() => ({ logFile: undefined, restore: () => undefined })) as never,
@@ -138,7 +139,7 @@ function chainDependencies(): LaunchTuiDependencies {
     })) as never,
     readTelemetryEnabled: () => false,
     createApp: (() => fakeApp) as never,
-    writeExitMessage: () => undefined,
+    writeExitMessage,
   };
 }
 
@@ -179,6 +180,7 @@ describe('profile plumbing: launcher → lifecycle → remote-host → resolveDa
     // resolveDaemonTargets realpaths the data plane (/var → /private/var on macOS).
     const realDataDir = realpathSync(dataDir);
 
+    const writeExit = vi.fn();
     await launchTui(
       {
         version: 'test',
@@ -187,9 +189,12 @@ describe('profile plumbing: launcher → lifecycle → remote-host → resolveDa
         profile: 'cedar',
         terminal: new StubTerminal(),
       },
-      chainDependencies(),
+      chainDependencies(writeExit),
     );
 
+    expect(writeExit).toHaveBeenCalledWith(
+      expect.stringContaining('  ncode --profile cedar --session mvs_example\n'),
+    );
     expect(resolveTargetsSpy).toHaveBeenCalledOnce();
     const [options, targets] = resolveTargetsSpy.mock.calls[0] as [
       { profile?: string; dataDir: string; homeDir?: string; env?: NodeJS.ProcessEnv },
@@ -213,7 +218,11 @@ describe('profile plumbing: launcher → lifecycle → remote-host → resolveDa
     mkdirSync(dataDir, { recursive: true });
 
     const options = { version: 'test', dataDir, workspaceDir: home, terminal: new StubTerminal() };
-    await launchTui(options, chainDependencies());
+    const writeExit = vi.fn();
+    await launchTui(options, chainDependencies(writeExit));
+    expect(writeExit).toHaveBeenCalledWith(
+      expect.stringContaining('  ncode --session mvs_example\n'),
+    );
 
     expect(resolveTargetsSpy).toHaveBeenCalledOnce();
     const [targetsOptions, targets] = resolveTargetsSpy.mock.calls[0] as [
