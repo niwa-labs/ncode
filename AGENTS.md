@@ -1,9 +1,5 @@
 # Agent guide
 
-Use an English imperative subject of at most 72 characters. When the reason or
-compatibility impact needs explanation, add one or two short paragraphs capped
-at 100 words and wrap them at 72 columns.
-
 This Niwa Labs fork starts from the reviewed public MiniMax Code source
 projection. Register published paths in `release/public-source.json`. Preserve
 upstream Git ancestry when bringing in updates. The upstream
