@@ -109,12 +109,15 @@ afterEach(() => {
 });
 
 function chainDependencies(writeExitMessage: (message: string) => void = () => undefined): LaunchTuiDependencies {
+  let closeWindow!: () => void;
+  const stopped = new Promise<void>((resolve) => { closeWindow = resolve; });
   const fakeApp = {
     ready: Promise.resolve(),
     firstFrame: Promise.resolve(),
     start: () => undefined,
     stop: () => Promise.resolve(),
-    stopped: Promise.resolve(),
+    stopped,
+    runStartupCheckin: () => { closeWindow(); },
     submit: async () => undefined,
     controller: { snapshot: () => ({ session: { sessionId: 'mvs_example' } }) },
   };
