@@ -1,5 +1,5 @@
 import { createDecipheriv } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createDesktopErrorReporter, formatErrorLog } from '../../src/error-reporting/reporter.js';
 import { createLLMFailureReportHook } from '../../src/error-reporting/llm-integration.js';
@@ -41,6 +41,18 @@ function reporterFixture(readTelemetryEnabled: () => boolean | undefined = () =>
   return { reporter, requests };
 }
 
+/** Keep the developer's own telemetry opt-out from deciding these cases. */
+function resetTelemetryEnvironment(): void {
+  vi.unstubAllEnvs();
+  vi.stubEnv('MCODE_DISABLE_TELEMETRY', '');
+  vi.stubEnv('DO_NOT_TRACK', '');
+}
+
+beforeEach(resetTelemetryEnvironment);
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('automatic error upload privacy boundary', () => {
   it.each([undefined, false])('does not upload without an explicit diagnostics opt-in (%s)', async (enabled) => {
     const { reporter, requests } = reporterFixture(() => enabled);
@@ -57,7 +69,7 @@ describe('automatic error upload privacy boundary', () => {
       await reporter.flush();
       expect(requests).toEqual([]);
     } finally {
-      vi.unstubAllEnvs();
+      resetTelemetryEnvironment();
     }
   });
 
@@ -71,12 +83,12 @@ describe('automatic error upload privacy boundary', () => {
       await reporter.flush();
       expect(requests).toEqual([]);
       enabled = true;
-      vi.unstubAllEnvs();
+      resetTelemetryEnvironment();
       await reporter.flush();
       expect(requests).toEqual([]);
     } finally {
       await reporter.close();
-      vi.unstubAllEnvs();
+      resetTelemetryEnvironment();
     }
   });
 

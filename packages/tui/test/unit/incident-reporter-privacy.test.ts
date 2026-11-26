@@ -2,7 +2,7 @@ import { createDecipheriv, hkdfSync, randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createTuiIncidentReporter,
   resolveTuiIncidentDirectory,
@@ -115,6 +115,18 @@ function diskRecords(directory: string) {
     .map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')));
 }
 
+/** Keep the developer's own telemetry opt-out from deciding these cases. */
+function resetTelemetryEnvironment(): void {
+  vi.unstubAllEnvs();
+  vi.stubEnv('MCODE_DISABLE_TELEMETRY', '');
+  vi.stubEnv('DO_NOT_TRACK', '');
+}
+
+beforeEach(resetTelemetryEnvironment);
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('TUI automatic incident HTTP privacy boundary', () => {
   it.each([undefined, false])('keeps incidents local without an explicit diagnostics opt-in (%s)', async (enabled) => {
     const { reporter, requests, directory } = fixture(undefined, true, () => enabled);
@@ -134,7 +146,7 @@ describe('TUI automatic incident HTTP privacy boundary', () => {
       await reporter.drain();
       expect(requests).toEqual([]);
     } finally {
-      vi.unstubAllEnvs();
+      resetTelemetryEnvironment();
     }
   });
 
@@ -156,7 +168,7 @@ describe('TUI automatic incident HTTP privacy boundary', () => {
       await drain;
       expect(requests).toEqual([]);
     } finally {
-      vi.unstubAllEnvs();
+      resetTelemetryEnvironment();
     }
   });
 
