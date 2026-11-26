@@ -757,7 +757,7 @@ function reportStartupTimings(input: {
   readonly initialization: DatabaseInitializationResult;
   readonly outcome: "ready" | "failed";
 }): void {
-  const { backup, pendingVersions, timings } = input.initialization;
+  const { backup, pendingVersions, pendingNcodeMigrations, timings } = input.initialization;
   try {
     logger.info(
       {
@@ -774,6 +774,9 @@ function reportStartupTimings(input: {
         pending_migration_count: pendingVersions?.length ?? 0,
         ...(pendingVersions && pendingVersions.length > 0
           ? { pending_migration_versions: pendingVersions }
+          : {}),
+        ...(pendingNcodeMigrations && pendingNcodeMigrations.length > 0
+          ? { pending_ncode_migrations: pendingNcodeMigrations }
           : {}),
         backup_created: backup?.created === true,
         ...(backup?.created

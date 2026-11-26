@@ -8,6 +8,8 @@ import {
 } from '../../../../infra/db/client.js';
 import { runMigrations } from '../../../../infra/db/migrate.js';
 import { ALL_MIGRATIONS } from '../../../../infra/db/migrations.js';
+import { runNcodeMigrations } from '../../../../infra/db/ncode-migrate.js';
+import { NCODE_MIGRATIONS } from '../../../../infra/db/ncode-migrations.js';
 import {
   legacyMessages,
   messageRowMigrations,
@@ -34,6 +36,7 @@ function createDb(): AppDb {
   const Database = loadSqlite3Constructor();
   const sqlite = new Database(':memory:');
   runMigrations(sqlite as never, ALL_MIGRATIONS);
+  runNcodeMigrations(sqlite as never, NCODE_MIGRATIONS);
   return drizzle({ client: sqlite as never });
 }
 

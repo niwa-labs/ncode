@@ -9,7 +9,6 @@ import { migration as m0005 } from './migrations/plugin/migration-0005-adopt-plu
 import { migration as m0023 } from './migrations/miniapp/migration-0023-create-miniapp-state.js';
 import { migration as m0030 } from './migrations/miniapp/migration-0030-repair-liveboard-state-version-collision.js';
 import { migration as m0001 } from './migrations/runtime/migration-0001-runtime-v2-baseline.js';
-import { migration as m0037 } from './migrations/runtime/migration-0037-add-turn-failure-reason.js';
 import { migration as m0003 } from './migrations/runtime/migration-0003-add-scheduler-generation.js';
 import { migration as m0006 } from './migrations/session/migration-0006-create-session-storage.js';
 import { migration as m0007 } from './migrations/session/migration-0007-backfill-session-storage.js';
@@ -43,9 +42,10 @@ import { migration as m0035 } from './migrations/session/migration-0035-converge
  * existing Desktop databases already carry the m0019 marker, so re-registering it
  * would be silently skipped there (see the migration-0020 and migration-0023
  * headers; collisions from published builds are instead handled by new repair
- * versions such as 27–31). A fresh database therefore applies exactly these 36
- * migrations, versions 1–18 and 20–37: a missing number in
+ * versions such as 27–31). A fresh database therefore applies exactly these 35
+ * migrations, versions 1–18 and 20–36: a missing number in
  * pending_migration_versions (e.g. no 19) in logs is expected, not a lost migration.
+ * Ncode's own schema changes are not numbered here; see `NCODE_MIGRATIONS`.
  */
 export const ALL_MIGRATIONS: readonly MigrationEntry[] = [
   m0001,
@@ -83,5 +83,4 @@ export const ALL_MIGRATIONS: readonly MigrationEntry[] = [
   m0034,
   m0035,
   m0036,
-  m0037,
 ];

@@ -23,6 +23,18 @@ Output includes `report.json`, `candidates/`, and `.private-review`. Candidates 
 4. Regenerate the dependency license inventory if dependencies changed, then review and update the public source inventory. Run source, standalone, type, build, and explicitly selected affected tests.
 5. Scan complete history and current source before creating the public PR. Include public changes, validation results, and capability descriptions, never private review reports.
 
+### Database migrations
+
+Upstream owns the numbered versions in `local_runtime_v2_schema_migrations`.
+Published MCode builds have also recorded versions that the public source does
+not contain, so an existing database may already carry a number that a later
+upstream change uses for different work. Take upstream migrations unchanged and
+never add an Ncode migration to `ALL_MIGRATIONS`. Ncode schema changes belong in
+`NCODE_MIGRATIONS`, recorded by name in `ncode_schema_migrations`, and run after
+all upstream migrations. When ported upstream migrations rebuild a table that
+an Ncode migration changed, keep the Ncode columns in the rebuild; the fork
+migration test replays that order.
+
 After accepted public changes are ported back, subsequent three-way comparisons should show them as synchronized or cleanly mergeable while retaining standalone adaptations. Synchronization is not a blind overwrite: conflicts, missing source, and new files require maintainer judgment.
 
 ## Selective release updates

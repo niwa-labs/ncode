@@ -7,6 +7,8 @@ import {
 } from './backup.js';
 import { runMigrations } from './migrate.js';
 import { ALL_MIGRATIONS } from './migrations.js';
+import { readAppliedNcodeMigrations, runNcodeMigrations } from './ncode-migrate.js';
+import { NCODE_MIGRATIONS } from './ncode-migrations.js';
 import { migration as queryCollapseMigration } from './migrations/session/migration-0016-create-query-collapse-view-states.js';
 import { assertDatabaseSchemaConsistent } from './schema-consistency.js';
 import { disableLegacyCronsWithoutFutureRun } from './legacy-cron-recovery.js';
@@ -47,6 +49,8 @@ type DatabaseMigrationObservation = {
 
 export interface DatabaseInitializationResult {
   readonly pendingVersions: readonly number[];
+  /** Pending fork-owned migrations, recorded separately from upstream versions. */
+  readonly pendingNcodeMigrations: readonly string[];
   readonly backup: DatabaseBackupResult;
   readonly timings: DatabaseInitializationTimings;
   readonly pruneBackups?: () => Promise<DatabaseBackupRetentionResult>;
@@ -67,16 +71,21 @@ export async function initializeDatabase(options: {
   const pendingVersions = ALL_MIGRATIONS.filter((migration) => !applied.has(migration.version)).map(
     (migration) => migration.version,
   );
+  const appliedNcode = readAppliedNcodeMigrations(options.database.rawDb);
+  const pendingNcodeMigrations = NCODE_MIGRATIONS.filter(
+    (migration) => !appliedNcode.has(migration.id),
+  ).map((migration) => migration.id);
+  const pendingCount = pendingVersions.length + pendingNcodeMigrations.length;
   // Opening the connection / reading version metadata precedes this interval.
   // Measure backup, recovery, all pending migrations and final schema validation.
   const startedAtEpochMs = options.onMigration ? migrationEpochNow() : undefined;
-  reportDatabaseMigration(options.onMigration, 'started', startedAtEpochMs, pendingVersions.length);
+  reportDatabaseMigration(options.onMigration, 'started', startedAtEpochMs, pendingCount);
   try {
     const backupStartedAtMs = Date.now();
     const backup = await createDatabaseBackupIfPending({
       database: options.database,
       dataDir: options.dataDir,
-      pending: pendingVersions.length > 0,
+      pending: pendingCount > 0,
     });
     const backupMs = Math.max(0, Date.now() - backupStartedAtMs);
     const migrationsStartedAtMs = Date.now();
@@ -104,6 +113,7 @@ export async function initializeDatabase(options: {
       migration32Pending: pendingVersions.includes(32),
     });
     runMigrations(options.database.rawDb, ALL_MIGRATIONS);
+    runNcodeMigrations(options.database.rawDb, NCODE_MIGRATIONS);
     const migrationsMs = Math.max(0, Date.now() - migrationsStartedAtMs);
     const schemaCheckStartedAtMs = Date.now();
     assertDatabaseSchemaConsistent(options.database.rawDb);
@@ -112,10 +122,11 @@ export async function initializeDatabase(options: {
       options.onMigration,
       'completed',
       startedAtEpochMs,
-      pendingVersions.length,
+      pendingCount,
     );
     return {
       pendingVersions,
+      pendingNcodeMigrations,
       backup,
       timings: {
         totalMs: Math.max(0, Date.now() - startedAtMs),
@@ -140,7 +151,7 @@ export async function initializeDatabase(options: {
       options.onMigration,
       'failed',
       startedAtEpochMs,
-      pendingVersions.length,
+      pendingCount,
     );
     throw error;
   }
