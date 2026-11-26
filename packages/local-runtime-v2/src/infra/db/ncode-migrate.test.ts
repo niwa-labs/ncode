@@ -8,9 +8,12 @@ import { DatabaseClient } from './client.js';
 import { initializeDatabase } from './initialize.js';
 import { runMigrations } from './migrate.js';
 import { ALL_MIGRATIONS } from './migrations.js';
-import { NCODE_MIGRATION_TABLE, runNcodeMigrations } from './ncode-migrate.js';
+import {
+  NCODE_MIGRATION_TABLE,
+  runNcodeMigrations,
+  type NcodeMigrationEntry,
+} from './ncode-migrate.js';
 import { NCODE_MIGRATIONS } from './ncode-migrations.js';
-import { assertDatabaseSchemaConsistent } from './schema-consistency.js';
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -52,6 +55,51 @@ function hasFailureReason(database: DatabaseClient): boolean {
 async function backupCount(dataDir: string): Promise<number> {
   const entries = await readdir(join(dataDir, 'v2', 'sqlite', 'backups')).catch(() => []);
   return entries.filter((name) => name.endsWith('.sqlite')).length;
+}
+
+function tableColumns(database: DatabaseClient): Map<string, string> {
+  const tables = database.rawDb
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .all()
+    .map((row) => (row as { name: string }).name);
+  return new Map(
+    tables.map((table) => [
+      table,
+      database.rawDb
+        .prepare('SELECT name FROM pragma_table_info(?) ORDER BY name')
+        .all(table)
+        .map((row) => (row as { name: string }).name)
+        .join(','),
+    ]),
+  );
+}
+
+/**
+ * Compare a fresh database with the order an existing database sees: upstream
+ * up to each fork change's base, the fork change, then later upstream changes.
+ */
+async function replayChangedTables(
+  forkMigrations: readonly NcodeMigrationEntry[],
+): Promise<string[]> {
+  const { database: fresh } = await openDatabase();
+  runMigrations(fresh.rawDb, ALL_MIGRATIONS);
+  runNcodeMigrations(fresh.rawDb, forkMigrations);
+  const expected = tableColumns(fresh);
+  const changed = new Set<string>();
+  for (const [index, forkMigration] of forkMigrations.entries()) {
+    const { database } = await openDatabase();
+    runMigrations(
+      database.rawDb,
+      ALL_MIGRATIONS.filter((migration) => migration.version <= forkMigration.baseUpstreamVersion),
+    );
+    runNcodeMigrations(database.rawDb, forkMigrations.slice(0, index + 1));
+    runMigrations(database.rawDb, ALL_MIGRATIONS);
+    runNcodeMigrations(database.rawDb, forkMigrations);
+    for (const [table, columns] of tableColumns(database)) {
+      if (expected.get(table) !== columns) changed.add(table);
+    }
+  }
+  return [...changed].sort();
 }
 
 describe('Ncode fork migrations', () => {
@@ -111,20 +159,21 @@ describe('Ncode fork migrations', () => {
   });
 
   it('keeps fork columns when later upstream migrations run after them', async () => {
-    for (const [index, forkMigration] of NCODE_MIGRATIONS.entries()) {
-      const { database } = await openDatabase();
-      runMigrations(
-        database.rawDb,
-        ALL_MIGRATIONS.filter(
-          (migration) => migration.version <= forkMigration.baseUpstreamVersion,
-        ),
-      );
-      runNcodeMigrations(database.rawDb, NCODE_MIGRATIONS.slice(0, index + 1));
-      runMigrations(database.rawDb, ALL_MIGRATIONS);
-      runNcodeMigrations(database.rawDb, NCODE_MIGRATIONS);
+    expect(await replayChangedTables(NCODE_MIGRATIONS)).toEqual([]);
+  });
 
-      expect(() => assertDatabaseSchemaConsistent(database.rawDb)).not.toThrow();
-    }
+  it('detects an upstream rebuild that drops a fork column', async () => {
+    // Upstream m26 rebuilds local_runtime_v2_cron_runs; a fork column added
+    // against an earlier upstream base does not survive that rebuild.
+    const probe: NcodeMigrationEntry = {
+      id: '0001_probe_cron_run_column',
+      baseUpstreamVersion: 25,
+      up(db) {
+        db.exec('ALTER TABLE local_runtime_v2_cron_runs ADD COLUMN ncode_probe TEXT');
+      },
+    };
+
+    expect(await replayChangedTables([probe])).toEqual(['local_runtime_v2_cron_runs']);
   });
 
   it('rolls back a failed fork migration without recording it', async () => {

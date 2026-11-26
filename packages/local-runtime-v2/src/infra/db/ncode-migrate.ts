@@ -73,7 +73,11 @@ export function runNcodeMigrations(
       database.exec('COMMIT');
       applied.add(migration.id);
     } catch (error) {
-      database.exec('ROLLBACK');
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // SQLite may already have rolled back; keep the migration error.
+      }
       throw error;
     }
   }
