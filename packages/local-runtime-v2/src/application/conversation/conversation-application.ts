@@ -129,6 +129,9 @@ export interface ConversationApplicationOptions {
  * from a stalled stream — integrators had no cheap read for "is a Turn
  * running and when did it last move").
  */
+const TURN_SETTLEMENT_WAIT_MS = 30_000;
+const TURN_SETTLEMENT_POLL_MS = 25;
+
 export interface TurnStatusSnapshot {
   /** The admitted active Turn, `null` when the Session is idle. */
   readonly activeTurn: {
@@ -174,6 +177,28 @@ export class ConversationApplication {
       activeTurn: activeTurn ?? null,
       latestActivity: latestActivity ?? null,
     };
+  }
+
+  /**
+   * The terminal frame is published before the repository settlement that
+   * records the outcome and releases the turn lease. A resumed reader that
+   * sees the frame first waits for that settlement instead of treating the
+   * still-unsettled turn as lost.
+   */
+  private async waitForTurnSettlement(
+    sessionId: string,
+    turnId: string,
+  ): Promise<string | undefined> {
+    const deadline = Date.now() + TURN_SETTLEMENT_WAIT_MS;
+    for (;;) {
+      const status = await this.getTurnStatus(sessionId, turnId);
+      const outcome = status.latestActivity?.turnId === turnId ? status.latestActivity.outcome : undefined;
+      if (outcome !== undefined) return outcome;
+      if (status.activeTurn?.turnId !== turnId || Date.now() >= deadline) return undefined;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, TURN_SETTLEMENT_POLL_MS);
+      });
+    }
   }
 
   steer(input: ConversationSteerInput): Promise<ConversationSteerResult> {
@@ -361,7 +386,7 @@ export class ConversationApplication {
       }
       return openV2SessionStream(frames, turnId === undefined ? undefined : {
         turnId,
-        confirm: async () => (await this.getTurnStatus(req.id, turnId)).latestActivity?.outcome,
+        confirm: () => this.waitForTurnSettlement(req.id, turnId),
       });
     });
   }
