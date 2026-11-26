@@ -134,6 +134,82 @@ describe('createDaemonAutoSpawnHook (§4.6.2 п.2)', () => {
     expect(spawnSpy).not.toHaveBeenCalled();
   });
 
+  it('waits for a live booting daemon instead of spawning over its writer lock', async () => {
+    const controlRoot = mkdtempSync(join(tmpdir(), 'w4-spawn-booting-'));
+    writeFileSync(
+      join(controlRoot, 'daemon.json'),
+      JSON.stringify({ pid: process.pid, dataDir: controlRoot, state: 'starting' }),
+    );
+    writeFileSync(join(controlRoot, 'mcoded.lock'), JSON.stringify({ pid: process.pid }));
+    const spawnSpy = vi.fn(() => ({ unref: () => undefined }));
+    let probes = 0;
+    const hook = createDaemonAutoSpawnHook({
+      targets: { controlRoot, dataDir: controlRoot, profile: undefined },
+      seams: {
+        daemonAlive: async () => ++probes > 3,
+        spawnDaemon: spawnSpy,
+        sleep: async () => undefined,
+      },
+    });
+    await expect(hook()).resolves.toBe(false);
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(probes).toBe(4);
+  });
+
+  it('spawns over a stale starting manifest whose pid does not hold the writer lock', async () => {
+    const controlRoot = mkdtempSync(join(tmpdir(), 'w4-spawn-stale-start-'));
+    // A daemon killed mid-boot left `starting`; its pid now names another process.
+    writeFileSync(
+      join(controlRoot, 'daemon.json'),
+      JSON.stringify({ pid: process.pid, dataDir: controlRoot, state: 'starting' }),
+    );
+    let alive = false;
+    const spawnSpy = vi.fn(() => {
+      alive = true;
+      return { unref: () => undefined };
+    });
+    const hook = createDaemonAutoSpawnHook({
+      targets: { controlRoot, dataDir: controlRoot, profile: undefined },
+      seams: { daemonAlive: async () => alive, spawnDaemon: spawnSpy, sleep: async () => undefined },
+    });
+    await expect(hook()).resolves.toBe(true);
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a spawned daemon still booting past the ready window as booting, not a crash', async () => {
+    const controlRoot = mkdtempSync(join(tmpdir(), 'w4-spawn-slow-boot-'));
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      let spawned = false;
+      let booting = true;
+      const seams = {
+        daemonAlive: async () => false,
+        daemonBooting: () => spawned && booting,
+        spawnDaemon: () => {
+          spawned = true;
+          return { unref: () => undefined };
+        },
+        sleep: async () => {
+          clock += 10_000;
+        },
+      };
+      const hook = createDaemonAutoSpawnHook({
+        targets: { controlRoot, dataDir: controlRoot, profile: undefined },
+        seams,
+      });
+      await expect(hook()).resolves.toBe('booting');
+      // The next round watches the same boot without spawning again.
+      await expect(hook()).resolves.toBe('booting');
+      // A boot that dies is the crash candidate again.
+      booting = false;
+      spawned = false;
+      await expect(hook()).resolves.toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('pins the data-plane env of the child and the auto gate', async () => {
     const controlRoot = mkdtempSync(join(tmpdir(), 'w4-spawn-env-'));
     const spawns: Array<{ argv: readonly string[]; env: NodeJS.ProcessEnv }> = [];

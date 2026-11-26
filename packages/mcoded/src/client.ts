@@ -85,6 +85,13 @@ import type { SessionToolEnv } from './session-tool-env.js';
 /** Module-level logger for the `mcode:rpc` namespace (spec §9.3). */
 const log = createLogger('mcode:rpc');
 
+/**
+ * Total time a connect may spend on hook rounds that watched a live daemon
+ * boot. The first start of a new build can migrate a large data directory
+ * for minutes; past this bound the connect fails like any other.
+ */
+export const DAEMON_BOOT_WAIT_MS = 30 * 60_000;
+
 /** Handshake payload the client sends on every (re)connect. */
 export interface McodedClientHandshake {
 	readonly token?: string;
@@ -117,8 +124,11 @@ export interface McodedClientOptions {
 	 * W5: the hook MAY report whether it actually STARTED a child (`true`) —
 	 * a no-op round (daemon alive, sibling window spawning) reports `false`,
 	 * which is what the crash-loop watchdog counts on (§4.6.4).
+	 * `'booting'` reports a live daemon still starting (a long first-start
+	 * migration): neither a crash nor connect time, bounded by
+	 * {@link DAEMON_BOOT_WAIT_MS} in total.
 	 */
-	readonly spawn?: () => Promise<void | boolean>;
+	readonly spawn?: () => Promise<void | boolean | 'booting'>;
 	/**
 	 * W5 (§4.6.4): the crash-loop watchdog. When set, a spawn round that
 	 * started a child and STILL failed to connect records a daemon death;
@@ -285,7 +295,7 @@ export class McodedClient {
 	private readonly socketPath: string;
 	private readonly handshakePayload: McodedClientHandshake;
 	private readonly connectOverride: (() => Promise<LineTransport>) | undefined;
-	private readonly spawnHook: (() => Promise<void | boolean>) | undefined;
+	private readonly spawnHook: (() => Promise<void | boolean | 'booting'>) | undefined;
 	private readonly crashLoop: CrashLoopWatchdog | undefined;
 	private readonly readyTimeoutMs: number;
 	private readonly backoffMinMs: number;
@@ -403,7 +413,10 @@ export class McodedClient {
 		// own decision (3 × 20 s spawn waits) was still pending, and the raw
 		// ENOENT masked the real state; without the cap an alive-probe lie
 		// would loop forever.
-		const hardDeadline = Date.now() + this.readyTimeoutMs * 4;
+		let hardDeadline = Date.now() + this.readyTimeoutMs * 4;
+		// Hook rounds that watched a live daemon boot extend the hard
+		// deadline by their duration, up to this total.
+		let bootExtensionLeft = DAEMON_BOOT_WAIT_MS;
 		let deadline = Date.now() + this.readyTimeoutMs;
 		// The last spawn-hook failure, if the hook THREW (lock permission,
 		// unwritable control root, no entry script...). Surfaced instead of the
@@ -422,13 +435,21 @@ export class McodedClient {
 					// gets the honest crash-loop failure, not another dead child.
 					this.crashLoop?.requireSpawn();
 					let spawnedChild = false;
+					const hookStartedAt = Date.now();
 					try {
-						spawnedChild = (await this.spawnHook()) === true;
+						const outcome = await this.spawnHook();
+						spawnedChild = outcome === true;
 						lastSpawnFailure = undefined;
+						if (outcome === 'booting') {
+							const extension = Math.min(Date.now() - hookStartedAt, bootExtensionLeft);
+							bootExtensionLeft -= extension;
+							hardDeadline += extension;
+						}
 					} catch (spawnError) {
 						log.warn('client-spawn-failed', { err: spawnError });
 						lastSpawnFailure = spawnError;
 					}
+					if (this.userClosed) throw new McodedConnectionError('client closed during connect');
 					// The client-side image of a daemon death (§4.6.4): the hook
 					// started a life and the connect STILL failed. A no-op round
 					// (daemon alive / sibling spawning) is not a crash.

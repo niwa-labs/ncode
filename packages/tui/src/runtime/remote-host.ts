@@ -65,8 +65,10 @@ import {
   helloDaemon,
   openDaemonLogFd,
   isPidAlive,
+  MCODED_LOCK_BASENAME,
   readDaemonManifest,
   readDaemonToken,
+  readLockHolderPid,
   resolveDaemonTargets,
   SPAWN_LOCK_BASENAME,
 } from '@mavis/mcoded';
@@ -109,6 +111,11 @@ export interface DaemonSpawnSeams {
   };
   /** Live probe; defaults to "the daemon manifest answers hello" shape. */
   readonly daemonAlive?: () => Promise<boolean>;
+  /**
+   * Whether a live daemon is still booting; defaults to "the manifest says
+   * `starting`, its pid holds `mcoded.lock` and is alive".
+   */
+  readonly daemonBooting?: () => boolean;
   /** Sleep between probe rounds. */
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -169,8 +176,16 @@ const SPAWN_PROBE_INTERVAL_MS = 200;
  * (`true`) — a no-op round (daemon alive, sibling window spawning) reports
  * `false`, which is the crash-loop watchdog's crash signal; a no-op round
  * must never count as a daemon death.
+ *
+ * A round that ends with a live daemon still booting (the manifest says
+ * `starting` and its pid holds the writer lock) reports `'booting'`: the
+ * first start of a new build can migrate a large data directory for
+ * minutes, and a second spawn would only lose the lock and read as a crash.
+ * Each round waits at most one ready window; the client bounds the total.
  */
-export function createDaemonAutoSpawnHook(options: DaemonAutoSpawnOptions): () => Promise<boolean> {
+export function createDaemonAutoSpawnHook(
+  options: DaemonAutoSpawnOptions,
+): () => Promise<boolean | 'booting'> {
   const env = options.environment ?? process.env;
   const seams = options.seams ?? {};
   const sleep =
@@ -211,7 +226,28 @@ export function createDaemonAutoSpawnHook(options: DaemonAutoSpawnOptions): () =
       });
       return probe.ok;
     });
+  const daemonBooting =
+    seams.daemonBooting ??
+    (() => {
+      const manifest = readDaemonManifest(options.targets.controlRoot);
+      if (manifest?.state !== 'starting') return false;
+      // The lock holder check rejects a stale `starting` manifest whose pid
+      // was reused by an unrelated process after the daemon died.
+      const holder = readLockHolderPid(path.join(options.targets.controlRoot, MCODED_LOCK_BASENAME));
+      return holder === manifest.pid && isPidAlive(manifest.pid);
+    });
   return async () => {
+    // A booting daemon already holds the writer lock: wait one ready window
+    // for it to serve instead of starting a child that can only lose that lock.
+    if (daemonBooting()) {
+      const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
+      while (!(await daemonAlive())) {
+        if (!daemonBooting()) return false;
+        if (Date.now() > deadline) return 'booting';
+        await sleep(SPAWN_PROBE_INTERVAL_MS);
+      }
+      return false;
+    }
     let lock;
     try {
       lock = acquireFileLock(path.join(options.targets.controlRoot, SPAWN_LOCK_BASENAME));
@@ -284,7 +320,11 @@ export function createDaemonAutoSpawnHook(options: DaemonAutoSpawnOptions): () =
       // attempt finds a serving socket instead of re-entering the hook.
       const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
       while (!(await daemonAlive())) {
-        if (Date.now() > deadline) return true; // started, but never got ready — a crash candidate
+        if (Date.now() > deadline) {
+          // Still booting (a long first-start migration) is not a crash;
+          // otherwise started, but never got ready — a crash candidate.
+          return daemonBooting() ? 'booting' : true;
+        }
         await sleep(SPAWN_PROBE_INTERVAL_MS);
       }
       return true;

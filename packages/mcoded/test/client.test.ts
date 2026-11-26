@@ -287,6 +287,46 @@ describe('McodedClient connect failure paths (auto-spawn honesty)', () => {
 		expect(noopRounds).toBe(3);
 		client.close();
 	});
+
+	it('booting rounds past the hard deadline neither count as crashes nor expire the connect', async () => {
+		let rounds = 0;
+		const client = new McodedClient({
+			socketPath: 'memory://booting',
+			handshake: { clientInstanceId: 'c-booting' },
+			// The daemon serves only after six booting rounds of a long migration.
+			connect: deadSocketConnect((attempt) => attempt >= 7),
+			spawn: async () => {
+				rounds += 1;
+				// Each round watches the boot for longer than the whole hard deadline.
+				await new Promise((resolve) => setTimeout(resolve, 120));
+				return 'booting';
+			},
+			crashLoop: new CrashLoopWatchdog({ windowMs: 60_000, maxCrashes: 3 }),
+			readyTimeoutMs: 25,
+			backoffMinMs: 1,
+			backoffMaxMs: 2,
+		});
+		await expect(client.connect()).resolves.toBeTruthy();
+		expect(rounds).toBe(6);
+		client.close();
+	});
+
+	it('stops a connect closed during a booting round', async () => {
+		let client: McodedClient | undefined;
+		client = new McodedClient({
+			socketPath: 'memory://closed-booting',
+			handshake: { clientInstanceId: 'c-closed-booting' },
+			connect: deadSocketConnect((attempt) => attempt >= 2),
+			spawn: async () => {
+				client?.close();
+				return 'booting';
+			},
+			readyTimeoutMs: 25,
+			backoffMinMs: 1,
+			backoffMaxMs: 2,
+		});
+		await expect(client.connect()).rejects.toThrow(/client closed during connect/);
+	});
 });
 
 /**
