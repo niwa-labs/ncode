@@ -978,10 +978,10 @@ describe('abortAwareSource reattach (verdict §2.2а)', () => {
     expect(client.opens).toHaveLength(1); // no reopen before ready
     client.setState('ready');
     await vi.waitFor(() => expect(client.opens).toHaveLength(2));
-    // ...and reopen resumeSession with the LAST DELIVERED cursor.
+    // ...and reopen resumeSession for the same Turn with the LAST DELIVERED cursor.
     expect(client.opens[1]).toEqual({
       method: 'resumeSession',
-      params: [{ id: 'sess-r1', afterCursor: '10' }],
+      params: [{ id: 'sess-r1', turnId: 'turn-1', afterCursor: '10' }],
     });
     // The replay re-delivers cursor 10 (already seen) plus the fresh tail.
     const second = client.streams[1]!;
