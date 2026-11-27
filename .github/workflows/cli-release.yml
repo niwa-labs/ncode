@@ -1,5 +1,7 @@
 name: Ncode package verification
 on:
+  push:
+    tags: ['v*.*.*']
   pull_request:
     paths:
       - '.github/workflows/cli-release.yml'
@@ -45,9 +47,9 @@ jobs:
         id: release
         shell: bash
         run: |
-          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$REF_TYPE" = tag ]; then
+          if [ "$REF_TYPE" = tag ] && { [ "$EVENT_NAME" = push ] || [ "$EVENT_NAME" = workflow_dispatch ]; }; then
             if [ -n "$REQUESTED_TAG" ] && [ "$REQUESTED_TAG" != "$REF_NAME" ]; then
-              echo "The verification input must match the dispatched release tag." >&2
+              echo "The verification input must match the release tag." >&2
               exit 1
             fi
             export REQUESTED_TAG="$REF_NAME"
@@ -128,8 +130,9 @@ jobs:
           retention-days: 14
   publish:
     needs: [build, install]
-    # Publish only from a dispatch selecting the release tag validated by build.
-    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'
+    # Publish only for a release tag validated by build: a pushed tag, or a
+    # dispatch run on one.
+    if: github.ref_type == 'tag' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Minimal OIDC grant for npm trusted publishing. The npm trusted publisher

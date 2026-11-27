@@ -437,7 +437,7 @@ test('npm release manifests require native SQLite and pin installed external dep
 test('Ncode package verification builds, installs and publishes the same archive', t => {
   const workflow = parseYaml(readFileSync(new URL('../.github/workflows/cli-release.yml', import.meta.url), 'utf8'));
   assert.equal(workflow.name, 'Ncode package verification');
-  assert.equal(workflow.on.push, undefined);
+  assert.deepEqual(workflow.on.push, { tags: ['v*.*.*'] });
   assert.equal(workflow.on.workflow_dispatch.inputs.tag.required, false);
   assert.equal(workflow.on.pull_request_target, undefined);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
@@ -498,21 +498,27 @@ test('Ncode package verification builds, installs and publishes the same archive
     f.git('add', ...manifests, 'scripts/lib/cli-release.mjs');
     f.git('-c', 'core.hooksPath=', 'commit', '-m', 'Prepare fixture release');
     const head = f.git('rev-parse', 'HEAD');
-    const runDispatch = (requestedTag = '') => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', metadata.run], {
+    const runRelease = (event, requestedTag = '') => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', metadata.run], {
       cwd: f.source, encoding: 'utf8', env: {
-        ...env, EVENT_NAME: 'workflow_dispatch', REF_TYPE: 'tag', REF_NAME: tag, REQUESTED_TAG: requestedTag,
+        ...env, EVENT_NAME: event, REF_TYPE: 'tag', REF_NAME: tag, REQUESTED_TAG: requestedTag,
       },
     });
+    const runDispatch = (requestedTag = '') => runRelease('workflow_dispatch', requestedTag);
+    const runPush = () => runRelease('push');
     assert.equal(runDispatch().status, 1, 'Reject a tag pointing to a different commit');
+    assert.equal(runPush().status, 1, 'Reject a pushed tag pointing to a different commit');
     f.git('tag', '-f', tag, head);
     f.git('update-ref', 'refs/remotes/origin/main', 'HEAD^');
     assert.equal(runDispatch().status, 1, 'Reject a tagged commit outside main');
+    assert.equal(runPush().status, 1, 'Reject a pushed tag on a commit outside main');
     f.git('update-ref', 'refs/remotes/origin/main', head);
     const conflictingInput = runDispatch('v999999.0.0');
     assert.equal(conflictingInput.status, 1);
-    assert.match(conflictingInput.stderr, /input must match the dispatched release tag/);
+    assert.match(conflictingInput.stderr, /input must match the release tag/);
     const dispatch = runDispatch();
     assert.equal(dispatch.status, 0, dispatch.stderr);
+    const push = runPush();
+    assert.equal(push.status, 0, push.stderr);
   }
 
   for (const [jobName, job] of Object.entries(workflow.jobs)) {
@@ -530,7 +536,7 @@ test('Ncode package verification builds, installs and publishes the same archive
 
   const publish = workflow.jobs.publish;
   assert.deepEqual(publish.needs, ['build', 'install']);
-  assert.equal(publish.if, "github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'");
+  assert.equal(publish.if, "github.ref_type == 'tag' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')");
   assert.deepEqual(publish.permissions, { 'id-token': 'write' });
   assert.ok(publish.steps.every(step => !step.uses?.startsWith('actions/checkout@')));
   const publishDownload = publish.steps.find(step => step.uses?.startsWith('actions/download-artifact@'));

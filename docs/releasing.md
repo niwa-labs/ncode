@@ -15,18 +15,19 @@ npm 11.5.1 or later.
 
 Prepare a reviewed commit on `main` with matching versions in the root and TUI
 package manifests and entries in both TUI changelogs. Push a protected release
-tag matching that version, such as `v0.4.13` or `v0.4.13-rc.1`. Dispatch
-`cli-release.yml` with the release tag as the workflow ref. The workflow checks
-the tag, version, and ancestry on `main`, builds the archive, and tests isolated
-installations across the Linux and macOS matrix.
+tag matching that version, such as `v0.4.13` or `v0.4.13-rc.1`. The tag push
+starts `cli-release.yml`. The workflow checks the tag, version, and ancestry on
+`main`, builds the archive, and tests isolated installations across the Linux
+and macOS matrix.
 After every installation check passes, the publish job downloads the same
 `cli-package` artifact from the run, checks the archive name and SHA-256, and
 publishes that archive with provenance and public access. Stable versions use
 the `latest` dist-tag and prereleases use `next`.
 
 Pull requests and workflow dispatches on branches perform build and
-installation verification. Pushing the tag alone starts no release run. After a
-tagged run succeeds, check the registry with
+installation verification only. A dispatch with a release tag as the workflow
+ref repeats a failed release run. After a tagged run succeeds, check the
+registry with
 `npm view @niwa-labs/ncode@latest version bin` or use `@next` for a prerelease.
 The package installs one command, `ncode`.
 
