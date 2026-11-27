@@ -1103,4 +1103,22 @@ describe('program registration', () => {
     expect(error).toBeUndefined();
     expect(runDaemon).toHaveBeenCalledOnce();
   });
+
+  it('passes the nearest explicit --profile to the runner wherever it is written', async () => {
+    const runDaemon = vi.fn(async () => undefined);
+    const program = createTuiProgram({
+      version: 'test',
+      launchTui: async () => undefined,
+      runExec: async () => undefined,
+      runDaemon,
+    });
+    await parse(program, ['node', 'mcode', 'daemon', 'status', '--profile', 'default']);
+    expect(runDaemon).toHaveBeenLastCalledWith({ action: 'status', profile: 'default' });
+
+    await parse(program, ['node', 'mcode', '--profile', 'work', 'daemon', 'restart']);
+    expect(runDaemon).toHaveBeenLastCalledWith({ action: 'restart', profile: 'work' });
+
+    await parse(program, ['node', 'mcode', 'daemon', '--profile', 'work', 'recover']);
+    expect(runDaemon).toHaveBeenLastCalledWith({ action: 'recover', profile: 'work' });
+  });
 });

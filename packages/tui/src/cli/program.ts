@@ -479,8 +479,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .description('Run the mcoded daemon in the foreground; refused while MCODE_SERVER_MODE=off')
     .option('--data-dir <dir>', 'serve this data directory instead of the profile default')
     .allowExcessArguments(false)
-    .action((commandOptions: { dataDir?: string }) =>
-      runDaemon({ action: 'run', dataDir: commandOptions.dataDir, profile: profileOf(daemon) }),
+    .action((commandOptions: { dataDir?: string }, command: Command) =>
+      runDaemon({ action: 'run', dataDir: commandOptions.dataDir, profile: profileOf(command) }),
     );
 
   daemon
@@ -488,8 +488,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .description('Show the daemon state for this profile/data directory')
     .option('--json', 'print a JSON document')
     .allowExcessArguments(false)
-    .action((commandOptions: { json?: boolean }) =>
-      runDaemon({ action: 'status', json: commandOptions.json, profile: profileOf(daemon) }),
+    .action((commandOptions: { json?: boolean }, command: Command) =>
+      runDaemon({ action: 'status', json: commandOptions.json, profile: profileOf(command) }),
     );
 
   daemon
@@ -497,8 +497,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .description('Gracefully stop the daemon for this profile/data directory')
     .option('--force', 'stop even with active runs (they are killed)')
     .allowExcessArguments(false)
-    .action((commandOptions: { force?: boolean }) =>
-      runDaemon({ action: 'stop', force: commandOptions.force, profile: profileOf(daemon) }),
+    .action((commandOptions: { force?: boolean }, command: Command) =>
+      runDaemon({ action: 'stop', force: commandOptions.force, profile: profileOf(command) }),
     );
 
   daemon
@@ -506,8 +506,8 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
     .description('Restart the daemon for this profile/data directory')
     .option('--force', 'restart even with active runs (they are killed)')
     .allowExcessArguments(false)
-    .action((commandOptions: { force?: boolean }) =>
-      runDaemon({ action: 'restart', force: commandOptions.force, profile: profileOf(daemon) }),
+    .action((commandOptions: { force?: boolean }, command: Command) =>
+      runDaemon({ action: 'restart', force: commandOptions.force, profile: profileOf(command) }),
     );
 
   daemon
@@ -516,7 +516,9 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
       'Remove the stale mcoded.lock / socket debris of a crashed daemon (a live holder is never touched)',
     )
     .allowExcessArguments(false)
-    .action(() => runDaemon({ action: 'recover', profile: profileOf(daemon) }));
+    .action((_options: unknown, command: Command) =>
+      runDaemon({ action: 'recover', profile: profileOf(command) }),
+    );
 
   const contributionRegistry = new TuiContributionRegistry<TuiCliCommandContribution>();
   contributionRegistry.registerAll(options.commandContributions ?? []);
@@ -542,8 +544,19 @@ export function createTuiProgram(options: CreateTuiProgramOptions): Command {
  * commands too. The root already carries the option from
  * `applyInteractiveCliContract`, hence the guard.
  */
+/**
+ * The nearest `--profile` on the command chain: the subcommand's own flag,
+ * then its groups', then the root's. `--profile` is declared on every command,
+ * so `mcode --profile default daemon status` and `mcode daemon status
+ * --profile default` land on different commands; reading only the group lost
+ * both, and `MINIMAX_PROFILE` won over an explicit flag.
+ */
 function profileOf(command: Command): string | undefined {
-  return command.opts<{ profile?: string }>().profile;
+  for (let current: Command | null = command; current; current = current.parent) {
+    const profile = current.opts<{ profile?: string }>().profile;
+    if (profile !== undefined) return profile;
+  }
+  return undefined;
 }
 
 function applyProfileOptionToEveryCommand(command: Command): void {
