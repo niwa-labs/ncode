@@ -13,6 +13,7 @@ import {
   resolveMcodedSocketPath,
 } from '@mavis/config';
 import {
+  DAEMON_BOOT_WAIT_MS,
   MCODED_LOCK_BASENAME,
   MCODED_LOG_DIR_BASENAME,
   helloDaemon,
@@ -584,13 +585,15 @@ async function restart(
   // declare `MCODED_LOG_FILE` so the daemon's own copytruncate (М2) knows
   // fd 2 is this exact file.
   const logTarget = openDaemonLogFd(targets.controlRoot, childEnv);
+  // Whole seconds: the manifest's ISO timestamp is compared against it.
+  const spawnedAtMs = Math.floor(Date.now() / 1000) * 1000;
   try {
     spawnDaemon({ argv, env: logTarget.childEnv, logFd: logTarget.fd });
   } finally {
     fs.closeSync(logTarget.fd);
   }
 
-  const ready = await waitForReadiness(targets, options);
+  const ready = await waitForReadiness(targets, options, spawnedAtMs);
   if (!ready.ok) {
     throw new Error(
       `mcoded did not become ready within ${options.request.waitTimeoutMs ?? DEFAULT_RESTART_WAIT_TIMEOUT_MS} ms: ` +
@@ -628,9 +631,13 @@ async function waitForSocketGone(
 async function waitForReadiness(
   targets: DaemonTargets,
   options: RunMcodeDaemonCommandOptions,
+  spawnedAtMs?: number,
 ): Promise<{ ok: true; socketPath: string } | { ok: false; error: string }> {
   const sleep = options.sleep ?? defaultSleep;
   const deadline = Date.now() + (options.request.waitTimeoutMs ?? DEFAULT_RESTART_WAIT_TIMEOUT_MS);
+  // A daemon still booting (a long first-start migration) holds the writer
+  // lock under a `starting` manifest; wait for it up to the boot bound.
+  const bootDeadline = Date.now() + DAEMON_BOOT_WAIT_MS;
   let lastError = 'socket never appeared';
   for (;;) {
     const manifest = readDaemonManifest(targets.controlRoot);
@@ -647,9 +654,31 @@ async function waitForReadiness(
       if (probe.ok) return { ok: true, socketPath: manifest.socketPath };
       lastError = probe.error;
     }
-    if (Date.now() > deadline) return { ok: false, error: lastError };
+    const now = Date.now();
+    if (
+      now > deadline &&
+      (now > bootDeadline || !daemonBooting(targets.controlRoot, manifest, spawnedAtMs))
+    ) {
+      return { ok: false, error: lastError };
+    }
     await sleep(READINESS_POLL_INTERVAL_MS);
   }
+}
+
+/**
+ * Whether the manifest names a live daemon that holds the writer lock and is
+ * still starting — and, after a spawn, that daemon started no earlier than
+ * the spawn, so a previous life still booting is never mistaken for it.
+ */
+function daemonBooting(
+  controlRoot: string,
+  manifest: DaemonManifest | undefined,
+  spawnedAtMs?: number,
+): boolean {
+  if (manifest?.state !== 'starting') return false;
+  if (spawnedAtMs !== undefined && !(Date.parse(manifest.startedAt) >= spawnedAtMs)) return false;
+  const holder = readLockHolderPid(path.join(controlRoot, MCODED_LOCK_BASENAME));
+  return holder === manifest.pid && isPidAlive(manifest.pid);
 }
 
 /**

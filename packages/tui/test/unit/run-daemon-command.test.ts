@@ -277,6 +277,72 @@ describe('mcode daemon restart (spawn shape + readiness wait)', () => {
     ).rejects.toThrow(/did not become ready within 1500 ms/);
   }, 30_000);
 
+  it('keeps waiting past the readiness window while the spawned daemon is still booting', async () => {
+    const home = tempHomes.at(-1) as string;
+    const controlRoot = resolveDurableRoot(null, home);
+    const manifestPath = path.join(controlRoot, 'daemon.json');
+    const manifest = (state: string) =>
+      JSON.stringify({
+        pid: process.pid,
+        dataDir: path.join(home, '.minimax'),
+        state,
+        startedAt: new Date().toISOString(),
+        socketPath: path.join(controlRoot, 'mcoded.sock'),
+      });
+    let sleeps = 0;
+    const startedAt = Date.now();
+    await expect(
+      runMcodeDaemonCommand({
+        request: { action: 'restart', waitTimeoutMs: 50 },
+        ...commandOptions(home),
+        spawnDaemon: () => {
+          // The child took the writer lock and is migrating.
+          fs.writeFileSync(path.join(controlRoot, 'mcoded.lock'), JSON.stringify({ pid: process.pid }));
+          fs.writeFileSync(manifestPath, manifest('starting'));
+          return { unref: () => undefined, pid: process.pid };
+        },
+        sleep: async () => {
+          sleeps += 1;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          // The boot ends well past the 50 ms window.
+          if (Date.now() - startedAt > 400) fs.writeFileSync(manifestPath, manifest('failed:migration'));
+        },
+      }),
+    ).rejects.toThrow(/daemon start failed \(failed:migration\)/);
+    expect(Date.now() - startedAt).toBeGreaterThan(400);
+    expect(sleeps).toBeGreaterThan(10);
+  }, 30_000);
+
+  it('does not wait on a previous daemon life that is still booting', async () => {
+    const home = tempHomes.at(-1) as string;
+    const controlRoot = resolveDurableRoot(null, home);
+    fs.mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
+    const startedAt = Date.now();
+    await expect(
+      runMcodeDaemonCommand({
+        request: { action: 'restart', waitTimeoutMs: 50 },
+        ...commandOptions(home),
+        spawnDaemon: () => {
+          // The new child lost the lock to an older life still migrating.
+          fs.writeFileSync(path.join(controlRoot, 'mcoded.lock'), JSON.stringify({ pid: process.pid }));
+          fs.writeFileSync(
+            path.join(controlRoot, 'daemon.json'),
+            JSON.stringify({
+              pid: process.pid,
+              dataDir: path.join(home, '.minimax'),
+              state: 'starting',
+              startedAt: new Date(startedAt - 60_000).toISOString(),
+              socketPath: path.join(controlRoot, 'mcoded.sock'),
+            }),
+          );
+          return { unref: () => undefined, pid: 4712 };
+        },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      }),
+    ).rejects.toThrow(/did not become ready within 50 ms/);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  }, 30_000);
+
   // Design 15 (ДИЗАЙН 2): the restart spawn opens the log through
   // `openDaemonLogFd` — the child env carries the MCODED_LOG_FILE
   // declaration (the daemon-side copytruncate key) and an over-ceiling log

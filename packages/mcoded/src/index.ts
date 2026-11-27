@@ -94,6 +94,7 @@ export type { MuxSink, MuxSource, StreamMuxOptions } from './stream-mux.js';
 /** v2 client side (arch §5): McodedClient + RemoteCliService (W4 consumes). */
 export {
 	McodedClient,
+	DAEMON_BOOT_WAIT_MS,
 	McodedConnectionError,
 	McodedRemoteError,
 	RemoteCliService,
