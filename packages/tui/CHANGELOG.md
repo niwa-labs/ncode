@@ -1,8 +1,22 @@
 # Ncode changelog
 
+## 0.1.4 · 2026-11-27
+
+- ACP clients can limit a session to the built-in tools they name. Pass the list when creating, loading or resuming a session. It stays with the session across restarts and can only be narrowed. A tool outside the list is refused before it runs, and a name Ncode does not know is rejected up front. A session with a list reaches only the MCP servers its client supplied. A new ACP method reports the list and the tools the session keeps.
+- Add a TypeScript SDK to the repository. It starts, streams and resumes headless conversations from Node.js code. Build it from a checkout; installation steps are in its README.
+- A turn counts as finished only after its outcome is saved. After a disconnect, ACP clients can fetch the final answer and result of a turn by its ID.
+- Each turn keeps its main failure reason. The live error and the later result show the same reason, and an explicit failure is no longer replaced by a generic one when the response stream ends.
+- Reconnecting to a running turn waits for its result instead of reporting the turn as lost.
+- The first start of a new build can take minutes while a large data folder is upgraded. Ncode now waits for that daemon, for up to 30 minutes, instead of starting duplicates or giving up. `ncode daemon restart` waits the same way.
+- `--profile` is honored on every daemon command, in either position. Restarting the default profile's daemon brings it back under the right identity instead of leaving none running.
+- Session resume hints name the profile you are using.
+- Data folders already opened by published MCode builds no longer fail the startup check after an upgrade.
+- Based on MCode 0.7.2 with Pi 1.6.0.
+
 ## 0.1.3 · 2026-11-23
 
-- Start session-scoped stdio MCP servers in the session working directory.
+- Session-scoped stdio MCP servers start in the session's working directory.
+- Releases are published to npm only after the package installs and runs on Linux and macOS.
 - Based on MCode 0.7.2 with Pi 1.6.0.
 
 ## 0.1.2 · 2026-11-22
@@ -12,18 +26,28 @@
 
 ## 0.1.1 · 2026-11-22
 
-- Disable built-in tools for ACP or exec with `--no-builtin-tools`. ACP clients can also pass `--session-mcp-only` to limit discovery to servers supplied on session creation or load.
+- Run ACP or exec without any built-in tools using `--no-builtin-tools`, or set `MCODE_NO_BUILTIN_TOOLS`. The model then sees only the tools your MCP servers provide, including servers passed when an ACP session is created. The flag is not available for `exec review`.
+- ACP clients can also pass `--session-mcp-only`. Only the MCP servers supplied on session creation or load are discovered and callable. Servers declared in the data folder or workspace never start.
+- Both options run the session in the launching process instead of a shared daemon, so a daemon started without them cannot ignore the request.
+- Add guides for using Ncode as an ACP backend for Niwa workflows.
 - Based on MCode 0.7.2 with Pi 1.6.0.
 
 ## 0.1.0 · 2026-11-22
 
-- Ncode is based on MCode 0.7.2 and runs Pi 1.6.0. `ncode --version` lists all three versions. HTTP requests identify the fork as `ncode/0.1.0`.
-- Open the terminal while signed in to claim the daily MiniMax check-in once per profile. Each profile keeps its own login, settings and sessions.
-- Close the terminal and reconnect to the same turn. You can steer it immediately or queue your next message while a subagent works.
-- ACP clients can page through messages, tool results and summaries, and inspect the active turn and queue without attaching.
+- First release of Ncode, a fork of MCode by Niwa Labs. It has its own version sequence, installs one command named `ncode`, and is published to npm as `@niwa-labs/ncode`. `ncode --version` lists the Ncode, MCode and Pi versions. HTTP requests identify the client as `ncode/0.1.0`.
+- A local daemon runs sessions for the terminal, headless runs and ACP. Close the terminal and the turn keeps going; reconnect to the same turn, steer it at once, or queue your next message while a subagent works.
+- Each session keeps its own saved history. Existing MiniMax Code history is read and imported under its original session ID, so old sessions can be resumed.
+- Named profiles keep separate logins, settings and sessions, so two accounts can be open at once. Signing in or out refreshes the running daemon. Permissions can be set per session.
+- Open the terminal while signed in to claim the daily MiniMax check-in once per profile. The check-in is recorded after confirmation and after a session is restored.
+- ACP clients can page through messages, tool results and summaries without attaching to a session, and can inspect the active turn and queue.
 - Long sessions prepare summaries in the background, keep recent input in context and retain the original history for scrolling.
-- Images sent with a message or tool result count toward the context byte limit alongside text.
-- Pi Durable stores background work in SQLite and delivers completed results to the parent after a daemon restart.
+- Images sent with a message or tool result count toward the context size limit alongside text.
+- Pi Durable stores background work in SQLite and delivers completed results to the parent after a daemon restart. Background notifications no longer mix with queued user input.
+- Pi is updated to 1.6.0.
+- Restored sessions no longer repeat text that was already streamed. Managed MiniMax model responses are compressed with gzip by default.
+- Builds from source stay on the Niwa Labs update path and are never replaced by the MiniMax package from the registry.
+- Background shell errors explain when the sandbox executor is missing. Code-mode workers load the bundled QuickJS module. The obsolete deep research skill is removed.
+- Based on MCode 0.7.2 with Pi 1.6.0.
 
 # MCode TUI Changelog
 

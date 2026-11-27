@@ -2,310 +2,132 @@
 
 Ncode is a terminal coding agent from Niwa Labs, built as an independent fork of MiniMax Code (MCode) on Pi. Use MiniMax models or connect your own provider.
 
-## What Ncode adds to MCode
+**English** · [简体中文](README_ZH.md)
 
-- **Receive the complete answer over ACP.** If the client has received only reasoning, Ncode sends the full answer. If part of the answer has streamed, Ncode sends just the remaining text.
-- **Automatic daily check-in.** Open `ncode` in your terminal while signed in to MiniMax to claim the day’s available credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it too.
-- **Close the terminal, keep the task.** Ncode’s local daemon owns the turn. Reopen the workspace with `ncode --continue` to see what happened. If a subagent is still working, press Enter to steer the parent now or Alt+Enter to queue your next request.
-- **Scroll back from your editor.** MCode can already resume an ACP session. Ncode adds `session/history`: a compatible client can page through earlier messages, tool calls, results and compaction summaries without attaching to the session. It can also check whether a turn is active and how much input is queued.
-- **Long sessions start summarizing early.** Ncode prepares a summary in the background while you keep working. If the next model call needs room, it can use that work and keep the latest messages, including input that arrived during summarization. The original conversation stays available to read.
-- **Background work survives a restart.** MCode uses Pi to stream replies and run tools. Ncode also uses Pi Durable to schedule work and saves its progress in SQLite. If a child finishes just before the daemon restarts, Ncode picks up the saved result and delivers it to the parent.
-- **Keep two accounts open at once.** Run `ncode --profile work` in one terminal and `ncode` in another. Each profile has its own login, sessions and settings, so switching projects doesn’t mean signing out.
+[Get started](#quick-start) · [Documentation](docs/README.md) · [Examples](docs/examples.md) · [Changelog](packages/tui/CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
-[Changelog](packages/tui/CHANGELOG.md) · [Sessions, ACP history and context](docs/architecture.md) · [Run two accounts](#run-two-accounts)
-
-<p align="center">
-  <a href="#quick-start">Get started</a> ·
-  <a href="docs/README.md">Documentation</a> ·
-  <a href="docs/examples.md">Examples</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
-</p>
-<p align="center"><strong>English</strong> · <a href="README_ZH.md">简体中文</a></p>
-<p align="center">
-  <img src="docs/assets/source-preview.svg" alt="Source preview">
-  <img src="docs/assets/node.svg" alt="Compatibility: Node.js 22.19+, 24.2+, 25, and 26">
-  <a href="LICENSE-STATUS.md"><img src="docs/assets/license.svg" alt="First-party default license: MIT"></a>
-</p>
+![Source preview](docs/assets/source-preview.svg) ![Compatibility: Node.js 22.19+, 24.2+, 25, and 26](docs/assets/node.svg) [![First-party default license: MIT](docs/assets/license.svg)](LICENSE-STATUS.md)
 
 ![Ncode terminal showing the local server online and the sign-in prompt in the pocket-pet workspace](docs/assets/ncode-terminal.png)
 
+## What Ncode adds to MCode
+
+- **A local daemon owns your turns.** The terminal, headless runs and ACP clients share one daemon per profile. Close the terminal and the task keeps running. Reopen the workspace with the continue option to see what happened. While a subagent works, Enter steers the parent now and Alt+Enter queues your next request.
+- **Daemon startup that waits.** The first start of a new build can spend minutes upgrading a large data folder. Ncode waits for that daemon, up to 30 minutes, instead of starting duplicates or giving up. Restarting a daemon waits the same way and brings it back under its own profile.
+- **Two accounts at once.** Each profile has its own login, sessions and settings. Run one profile in one terminal and another in a second terminal. Daemon commands honor the profile you name, wherever you put it.
+- **Per-session tool policy for ACP.** A client names the built-in tools a session may use. The list is stored with the session, survives a restart and can only shrink. A tool outside it is refused before it runs, through any route. Sessions with a list reach only the MCP servers their client supplied.
+- **Complete answers over ACP.** If the client has received only reasoning, Ncode sends the full answer. If part of the answer has streamed, Ncode sends only the remaining text. A client that detaches can fetch a turn's final answer, result and failure reason by turn ID after the outcome is saved.
+- **Scroll back from your editor.** An ACP client can page through earlier messages, tool calls, results and compaction summaries without attaching to the session. It can also check whether a turn is active and how much input is queued.
+- **Long sessions summarize early.** Ncode prepares a summary in the background while you keep working. When the next model call needs room, it uses that summary and keeps the latest messages, including input that arrived meanwhile. The original conversation stays readable.
+- **Background work survives a restart.** Pi streams replies and runs tools. Pi Durable schedules background work and saves progress in SQLite. If a child finishes shortly before the daemon restarts, the parent still gets the result.
+- **Daily check-in.** Open Ncode in a terminal while signed in to MiniMax to claim the day's credits. Once confirmed, that profile skips check-in for the rest of the day. ACP and headless runs skip it.
+- **A TypeScript SDK.** The repository includes an SDK that starts, streams and resumes headless conversations from Node.js code.
+
+[Sessions, ACP history and context](docs/architecture.md) · [Run two accounts](#run-two-accounts)
+
 ## Niwa and Ncode
 
-Niwa coordinates workflows across coding agents. Choose Ncode as its ACP backend when a workflow needs to control exactly which tools a session can call. Ncode extends the MCode 0.7.2 adapter with client-only tool lists, paged history that a client can read without taking over the session, and a way to check the active turn and queue depth after reconnecting.
+Niwa coordinates workflows across coding agents. Choose Ncode as its ACP backend when a workflow must control exactly which tools a session can call. Ncode extends the MCode 0.7.2 adapter with client-only tool lists, per-session built-in tool policy, paged history that a client reads without taking over the session, and a way to check the active turn and queue depth after reconnecting.
 
-- **Choose tools per session.** In Niwa’s `niwa-only` mode, a workflow can grant `task.list` so the agent can inspect its assigned work. Built-in tools and MCP servers from the user profile or workspace stay out of the model’s tool list.
-- **Pick up where you left off.** After a restart, Niwa restores the same session and resends its tool list. Niwa can read past messages, tool calls and results from Ncode’s local history. ACP clients can use `session/history` to pair earlier tool calls with their results and `mcode/session/turn_status` to see whether work is still running.
-- **Keep a person in control of tool use.** Niwa can select the permission mode when opening or loading a session, show individual tool decisions and ask the operator to allow a call once or deny it. For requests that support saved decisions, Ncode also offers ACP clients an **Always deny** option.
-- **Ask questions in either direction.** When the agent needs a decision, Niwa presents its questionnaire to the operator and sends the answers back. When a workflow needs a structured answer from the agent, `session.ask` validates the JSON returned over ACP.
+- **Choose tools per session.** In Niwa's niwa-only mode, a workflow can grant the task list tool so the agent can inspect its assigned work. Built-in tools and MCP servers from the user profile or workspace stay out of the model's tool list. To keep a few built-in tools instead, the workflow sends an allow list when it opens the session. A separate ACP method reports what the session keeps.
+- **Pick up where you left off.** After a restart, Niwa restores the same session and resends its tool list. It can read past messages, tool calls and results from Ncode's local history, pair earlier calls with their results, and see whether work is still running.
+- **Keep a person in control of tool use.** Niwa can select the permission mode when opening or loading a session, show individual tool decisions and ask the operator to allow a call once or deny it. For requests that support saved decisions, Ncode also offers ACP clients an Always deny option.
+- **Ask questions in either direction.** When the agent needs a decision, Niwa shows its questionnaire to the operator and sends the answers back. When a workflow needs a structured answer from the agent, Niwa validates the JSON the agent returns over ACP.
 
-For session-only tools, configure the adapter to launch `ncode acp --no-builtin-tools --session-mcp-only`. [Niwa workflow example](https://github.com/niwa-labs/niwa#niwa-and-ncode)
+To expose only session-supplied tools, start the ACP adapter with the two flags that turn off built-in tools and restrict MCP discovery to the session's own servers. The [architecture guide](docs/architecture.md) lists the exact flags and the policy details. [Niwa workflow example](https://github.com/niwa-labs/niwa#niwa-and-ncode)
 
 ## Quick start
 
 ### 1. Install Ncode
 
-```sh
-npm install --global @niwa-labs/ncode
-ncode --version
-```
+Install the npm package @niwa-labs/ncode globally, then ask the ncode command for its version. Installing the same package again updates it.
 
-#### Build from source
-
-From your checkout, run the following with a supported Node.js version and pnpm 9.12.0.
-
-```sh
-node scripts/check-windows-source-location.mjs
-pnpm install --frozen-lockfile
-pnpm build
-pnpm ncode --version
-```
-
-Run `pnpm ncode` from the checkout, or run its built `dist/cli.js` with Node.js
-from another directory. The examples below use `ncode` as shorthand for that
-built CLI.
-The official MiniMax installers, registry packages and update channel
-belong to [upstream](https://github.com/MiniMax-AI/minimax-code). Update this source
-build by rebuilding a newer checkout.
+To build from source, you need Git, Node.js 22.19+ (22.x), 24.2+ (24.x), 25 or 26, and pnpm 9.12.0. On Windows, keep the checkout on a local NTFS volume outside cloud-synced folders. The [installation guide](docs/installation.md) has the exact steps. Update a source build by checking out a newer revision and rebuilding. The official MiniMax installers, registry packages and update channel belong to [upstream](https://github.com/MiniMax-AI/minimax-code).
 
 ### 2. Sign in or bring your own API key
 
-For a mainland China account:
+Sign in from the terminal with the login command and finish in your browser. Use its region option to choose a Global account; without it Ncode signs you in to a mainland China account. Then open Ncode, check your account on the status screen and pick a model on the provider screen. The logout command signs you out.
 
-```bash
-ncode login
-```
-
-For a Global account:
-
-```bash
-ncode login --region global
-```
-
-Complete sign-in in your browser, then open `ncode` and use `/status` to check your account and `/provider` to choose a model. Run `ncode logout` to sign out.
-
-Token Plan requires an account with available credits. Builds from this repository and the published npm CLI `@minimax-ai/code@0.6.9` default to `~/.minimax` for user data (or `~/.minimax-<profile>` when a profile is selected). `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can override the data directory. The installer's `~/.minimax-code` installation directory is separate from this choice. See [Run two accounts](#run-two-accounts) to keep two accounts side by side, and [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
+Token Plan needs an account with available credits. Ncode keeps user data in a folder named .minimax in your home directory, or named .minimax- followed by the profile name when a profile is selected. Two environment variables can override the folder. The installer's own folder is separate from this choice. Read [Accounts and data](docs/installation.md#accounts-and-data) before locating or removing configuration and sessions.
 
 #### Run two accounts
 
-A named profile owns a separate data directory, so its tokens, sessions, `config.yaml`, MCP configuration, plugins, and skills stay out of your other account. With no selector, `ncode` uses the `default` profile.
+A named profile owns a separate data folder, so its tokens, sessions, settings, MCP configuration, plugins and skills stay out of your other account. With no selector, Ncode uses the default profile.
 
-```bash
-ncode login                      # personal account -> ~/.minimax
-ncode login --profile work       # work account     -> ~/.minimax-work
-ncode                            # personal
-ncode --profile work             # work
-ncode profile list               # see both
-ncode profile remove work --yes  # forget the work profile
-```
+Sign in to each account with the login command and the profile option. Start the one you want by naming it with the same option, or by setting the profile environment variable for a whole shell. The option wins over the variable. The profile command lists your profiles and removes one.
 
-`--profile` is accepted on the root command and on every subcommand, so `ncode --profile work exec` and `ncode login --profile work` select the same profile. `MINIMAX_PROFILE=work` selects a profile for a whole shell or process tree and loses to the flag. Profile names are 1-64 characters of letters, numbers, dots, underscores, and hyphens, starting and ending with a letter or number; any other name is refused with an error rather than corrected. `default` is reserved and means the same as omitting the flag. See [Profiles](docs/installation.md#profiles) for the naming rules, the isolated state, and every `ncode profile` subcommand.
+Names are 1 to 64 characters: letters, numbers, dots, underscores and hyphens, beginning and ending with a letter or number. Ncode refuses any other name instead of correcting it. The name default is reserved and means the same as leaving the option out. [Profiles](docs/installation.md#profiles) covers the naming rules, the isolated state and every profile subcommand.
 
-<details>
-<summary>Use your own API key (BYOK)</summary>
+#### Use your own API key
 
-BYOK does not require a MiniMax login. Set `MCODE_PROVIDER_API_KEY` in your current shell, then add a provider. Replace the example URL and model name with your provider's values:
+Bring-your-own-key needs no MiniMax login. Put the key in an environment variable, then add the provider with the provider add command: give it a name, the base URL, the API format, the model and the variable that holds the key. The use option tests the first listed model and, if the test passes, saves the provider and selects it. A failed test saves nothing. Leave the option out to save without testing.
 
-```bash
-ncode provider add --name my-provider --base-url https://example.com/v1 \
-  --api-format openai-completions --model my-model \
-  --api-key-env MCODE_PROVIDER_API_KEY --use
-ncode
-```
+Three API formats are supported: OpenAI completions, OpenAI responses and Anthropic messages. For custom or local models, set the context and output limits to your server's real values; each must be a positive integer and applies to every model you list. Without them, Ncode keeps its default limits.
 
-`--use` tests the first listed model before saving and selecting it. A failed connection test saves nothing. Omit `--use` to save without testing or changing the default model. For custom/local models, add `--context-limit 32768 --output-limit 4096` (use your server's actual limits). Each value must be a positive safe integer and applies to every repeated `--model`. Inspect configured limits with `ncode provider list --json`. Omitting these flags preserves the existing model-limit defaults.
-
-Supported API formats: `openai-completions`, `openai-responses`, and `anthropic-messages`. See the [model examples](docs/examples.md#2-choose-your-own-model) for environment variable setup, connection checks, and model overrides for a single run.
-
-Providers added this way are stored under `custom_provider` in the active profile's `config.yaml`; this is the supported path for third-party or self-hosted endpoints, while `minimax_api` stays reserved for the official MiniMax API. Relays that require `Authorization: Bearer` on an Anthropic-compatible endpoint can set custom headers in `config.yaml`; see [Third-party relays and custom auth headers](docs/examples.md#third-party-relays-and-custom-auth-headers).
-
-</details>
+Providers added this way are stored in the active profile's settings file under the custom provider section. This is the supported path for third-party and self-hosted endpoints. The minimax API section is reserved for the official MiniMax API. Relays that need a bearer authorization header on an Anthropic-compatible endpoint can set custom headers in the same file. The [model examples](docs/examples.md#2-choose-your-own-model) show the commands, connection checks and one-run model overrides, and [Third-party relays and custom auth headers](docs/examples.md#third-party-relays-and-custom-auth-headers) covers the headers.
 
 ### 3. Build the pocket pet
 
-Give a blinking pocket pet a focus timer. Then ask: “Make pause a long press, and celebrate when the timer ends.” Watch a request become something you can actually use.
+Give a blinking pocket pet a focus timer. Then ask for a long press to pause and a celebration when the timer ends. You watch a request turn into something you can use.
 
 [![Pocket Pet: from a blinking face to a working focus companion](docs/assets/pocket-pet-demo.png)](docs/demo.md)
 
-<p align="center"><a href="docs/demo.md">Watch the build story and browser demo →</a> · <a href="examples/pocket-pet">Build it yourself →</a></p>
+[Watch the build story and browser demo](docs/demo.md) · [Build it yourself](examples/pocket-pet)
 
-**No hardware required.** The example runs locally in your browser, with no frontend dependencies. Asking the CLI to edit code requires a MiniMax account with available credits or your own compatible model API; model calls may incur charges. The finished example runs without a model account.
-
-Clone this repository and copy the starter into a separate directory:
-
-```bash
-node examples/pocket-pet/setup.mjs ../my-pocket-pet
-cd ../my-pocket-pet
-node serve.mjs
-```
-
-Open `http://127.0.0.1:4173`. In a second terminal, open `ncode` in `my-pocket-pet` and paste [the first prompt](examples/pocket-pet/README.md#first-request), then [the follow-up](examples/pocket-pet/README.md#change-the-requirement). Refresh the browser after each change.
-
-Prefer to try the result first? From the repository root, run `node examples/pocket-pet/serve.mjs finished` and open the same URL. Add `?demo=1` for the visibly labeled 10-second mode.
-
-[Full walkthrough and requirements](examples/pocket-pet) · [Small code-repair example](examples/clamp) · [Models, search, and tools](docs/examples.md)
-
+No hardware is required. The example runs in your browser with no frontend dependencies, and the finished version needs no model account. Asking Ncode to edit the code needs a MiniMax account with available credits or your own compatible model API, and model calls may incur charges. The [walkthrough](examples/pocket-pet) has the setup and serve steps, the two prompts to paste and the finished demo mode. See also the [small code-repair example](examples/clamp) and [models, search and tools](docs/examples.md).
 
 ### Work in your own project
 
-Open the project you want to work on:
+Open a terminal in your project and start Ncode. Describe the task in the terminal, or pass it as the first argument when you launch. The init command writes project guidance to AGENTS.md; say what result you expect, what may change and how to verify it.
 
-```bash
-cd /path/to/your/project
-ncode
-```
-
-Describe your task in the TUI, or submit it directly when you launch Ncode:
-
-```bash
-ncode "Find a failing test, fix the implementation, and run the relevant tests."
-```
-
-Use `ncode init .` to generate or update project guidance in `AGENTS.md`. Describe the expected result, allowed changes, and how to verify the task.
-
-| Entry point | Command | Use it for |
-| --- | --- | --- |
-| Interactive TUI | `ncode [prompt]` | Explore code, continue a conversation, and review changes or permissions. |
-| Headless | `ncode exec [prompt]` | Shell scripts, CI, batch work, and evaluations. |
-| ACP | `ncode acp` | Editors and clients supporting Agent Client Protocol. |
-| TypeScript SDK | [`@niwa-labs/ncode-sdk`](packages/code-sdk/README.md) | Drive `ncode exec` from Node.js code: start, stream and resume conversations. |
+| Entry point | Use it for |
+| --- | --- |
+| Interactive terminal | Explore code, continue a conversation, review changes and permissions. |
+| Headless exec command | Shell scripts, CI, batch work and evaluations. |
+| ACP adapter | Editors and clients that support Agent Client Protocol. |
+| [TypeScript SDK](packages/code-sdk/README.md) | Start, stream and resume headless conversations from Node.js code. Build it from a checkout. |
 
 ### Lightweight conversations
 
-For simple conversation or general knowledge questions, start a new Session with
-`--mode lightweight`:
+For a plain question or general knowledge, start a new session in lightweight mode with the mode option. Lightweight mode sends a small conversational prompt and no tool schemas. It leaves out workspace instructions, skills, memory blocks, MCP schemas and the full environment block, so it cannot read or change local files. Standard mode is the default and is the one to use for coding.
 
-```bash
-ncode --mode lightweight "Explain how DNS caching works."
-ncode exec --mode lightweight "Summarize the CAP theorem."
-```
-
-Lightweight mode sends a small conversational system prompt and no tool schemas. It omits workspace
-instructions, Skills, memory blocks, MCP schemas, and the full environment block from provider
-context, so it cannot inspect or change local files. Start a new standard Session for coding or tool use with
-`ncode --mode standard` or `ncode exec --mode standard`; omitting `--mode` is identical to standard
-mode.
-
-The mode is fixed when a root Session is created. `--mode lightweight` therefore cannot be combined
-with `--session` or `--continue`. Child/sub-agent Sessions do not inherit it, `/compact` continues to
-use the standard compaction context, and ACP and desktop Sessions remain standard. Reopening a
-lightweight Session keeps its mode and shows `Lightweight` in the TUI status line; opening a standard
-Session from a lightweight launch remains standard and shows no indicator.
+The mode is fixed when a root session is created, so lightweight mode cannot be combined with the session or continue options. Subagent sessions do not inherit it. Compaction keeps the standard context. ACP and desktop sessions stay standard. A reopened lightweight session keeps its mode and shows Lightweight in the status line.
 
 ### Continue your work
 
-```bash
-# Resume the latest session in the current workspace
-ncode --continue
-
-# Open the session picker
-ncode --session
-```
-
-The terminal, headless CLI, and ACP share a local daemon for the selected
-profile. See [daemon commands](docs/installation.md#local-daemon). Inside the
-TUI, use `/sessions` to find previous sessions and `/help` for commands and shortcuts.
+The continue option resumes the latest session in the current workspace. The session option opens the session picker. Inside the terminal, /sessions finds earlier sessions and /help lists commands and shortcuts. See the [daemon commands](docs/installation.md#local-daemon) for inspecting and stopping the daemon.
 
 | Action | Shortcut |
 | --- | --- |
-| Send a message or steer the running task | `Enter` |
-| Queue a follow-up while a task is running | `Alt+Enter` |
-| Insert a newline | `Shift+Enter` |
-| Reference a workspace file or directory | `@` |
-| Toggle Plan Mode | `Shift+Tab` |
-| Switch permission modes | `Alt+M` |
-| Close a panel or interrupt a running task; interrupting before the model replies returns the message to the composer | `Esc` |
+| Send a message or steer the running task | Enter |
+| Queue a follow-up while a task is running | Alt+Enter |
+| Insert a newline | Shift+Enter |
+| Reference a workspace file or directory | @ |
+| Toggle Plan Mode | Shift+Tab |
+| Switch permission modes | Alt+M |
+| Close a panel or interrupt a running task; interrupting before the model replies returns the message to the composer | Esc |
 
 ## Uninstall
 
-For the Ncode npm package, run `npm uninstall --global @niwa-labs/ncode`. Your conversation history stays on disk.
-
-<details>
-<summary>Removing an official MiniMax Code installation</summary>
-
-Close running MCode sessions, including editor integrations, before uninstalling. First locate the command with `command -v mcode` (macOS / Linux / WSL) or `Get-Command mcode -All` (PowerShell), then follow the matching installation method below. The current official install scripts do **not** provide an uninstall flag.
-
-### Installed with the script
-
-The commands below remove the default installation directory, including both launchers, downloaded releases, and any installer-managed Node.js runtime. If you used `MCODE_INSTALL_DIR`, substitute the actual installation directory. Inspect it first: earlier source builds used `~/.minimax-code` for user data, and a custom data directory can overlap the installation. Back up any configuration or sessions you want to keep before deleting it.
-
-**macOS / Linux / WSL**
-
-```bash
-rm -rf -- "$HOME/.minimax-code"
-```
-
-Remove the `# MiniMax Code CLI` comment and its following PATH line from the shell file the installer updated: `~/.zshrc` for zsh; the first existing file among `~/.bashrc`, `~/.bash_profile`, and `~/.profile` for bash (or a newly created `~/.bashrc`); `~/.config/fish/config.fish` for fish; or `~/.profile` for other shells. The line is `export PATH="/absolute/install/path/bin:$PATH"`, or `fish_add_path -g "/absolute/install/path/bin"` for fish. Remove only the MCode entry, preserving other PATH settings. The installer skips this edit when `MCODE_NO_MODIFY_PATH` is set or the path is already present.
-
-**Windows (PowerShell)**
-
-```powershell
-Remove-Item -LiteralPath "$env:USERPROFILE\.minimax-code" -Recurse -Force
-```
-
-Open **Edit environment variables for your account**, edit the user **Path**, and remove only the installation directory entry (by default `%USERPROFILE%\.minimax-code`, which may appear as an expanded absolute path). The Windows installer updates the user Path, not the PowerShell profile; `MCODE_NO_MODIFY_PATH` skips that persistent update.
-
-### Installed with npm or from source
-
-For a global npm installation, use the same npm installation/prefix you used to install MCode:
-
-```bash
-npm uninstall -g @minimax-ai/code
-```
-
-For a source build, save any work and remove only the checkout you created; see [Update or remove](docs/installation.md#update-or-remove).
-
-After uninstalling, reopen your terminal (fully restart the editor for integrated terminals) and run `command -v mcode` or `Get-Command mcode -All` again. No result means the command is no longer on PATH. If another copy appears, identify its installation method before removing it.
-
-</details>
-
-### Optional: delete user data
-
-Removing the program leaves separately stored user data in place. To also delete local login state, provider configuration, caches, and sessions, first confirm the selected directory using [Accounts and data](docs/installation.md#accounts-and-data) and back up anything you need. Other MCode installations can share this directory. For the default `~/.minimax` directory only:
-
-```bash
-# macOS / Linux / WSL — permanently deletes the default user data
-rm -rf -- "$HOME/.minimax"
-```
-
-```powershell
-# Windows — permanently deletes the default user data
-Remove-Item -LiteralPath "$env:USERPROFILE\.minimax" -Recurse -Force
-```
-
-A profile uses `~/.minimax-<profile>`; `MINIMAX_DATA_DIR` or `MAVIS_DATA_DIR` can select a different location. Remove only the specific directories you intend to discard, without wildcard deletion. Remove any MCode-specific environment variable assignments you added to shell profiles or user environment settings if you no longer need them.
+Remove the npm package with npm's global uninstall. Your conversation history stays on disk. Removing an official MiniMax Code installation, cleaning up the shell PATH and deleting user data are covered in [Update or remove](docs/installation.md#update-or-remove). Back up anything you need first: deleting user data removes login state, provider configuration, caches and sessions for good.
 
 ## What you can do
 
 | Task | Capabilities |
 | --- | --- |
 | **Edit and verify code** | Read files, inspect diffs, run shell commands and tests, and control tool execution with permissions and sandboxing. |
-| **Choose your model** | Use a MiniMax account / Token Plan, or custom providers with OpenAI- or Anthropic-compatible API formats. |
-| **Search and work with media** | Use built-in search, `mcode-tools` media tools, MCP, and managed connectors, subject to account access and service credits. |
-| **Keep work moving** | Resume sessions, plan tasks, use subagents, and extend the agent with official, local, or GitHub plugins and built-in skills. |
-| **Connect your workflow** | Run scripted tasks with the headless CLI, or connect compatible editors and clients through ACP. |
+| **Choose your model** | Use a MiniMax account or Token Plan, or custom providers with OpenAI- or Anthropic-compatible API formats. |
+| **Search and work with media** | Use built-in search, the mcode-tools media tools, MCP and managed connectors, subject to account access and service credits. |
+| **Keep work moving** | Resume sessions, plan tasks, use subagents, and extend the agent with official, local or GitHub plugins and built-in skills. |
+| **Connect your workflow** | Run scripted tasks with the headless CLI, drive it from Node.js with the SDK, or connect editors and clients through ACP. |
 
-Account features, updates, feedback, and diagnostics are also included. Managed tools require network access and the relevant authorization. See [capabilities and service boundaries](docs/tui-capabilities.md) for details.
-
+Account features, updates, feedback and diagnostics are also included. Managed tools need network access and the relevant authorization. [Capabilities and service boundaries](docs/tui-capabilities.md) has the details.
 
 ## Build from source
 
-To develop Ncode or run this source checkout, you need Git, **Node.js 22.19+ (22.x), 24.2+ (24.x), 25, or 26**, and **pnpm 9.12.0**. On Windows, keep the checkout on a local NTFS volume and outside cloud-synced folders; the preflight command below checks the volume before pnpm creates workspace links.
-```bash
-node scripts/check-windows-source-location.mjs
-pnpm install --frozen-lockfile
-pnpm build
-pnpm ncode
-```
+To develop Ncode or run this checkout, you need Git, Node.js 22.19+ (22.x), 24.2+ (24.x), 25 or 26, and pnpm 9.12.0. On Windows, run the source-location check before pnpm creates workspace links. The first build needs an internet connection: dependencies and the integrity-checked mcode-tools bundle come from public npm. The [installation guide](docs/installation.md) covers pnpm setup, system dependencies, running the built CLI from another directory and updates.
 
-The first build requires an internet connection. Dependencies and the integrity-checked `mcode-tools` bundle come from public npm. See the [source installation guide](docs/installation.md) for pnpm setup, system dependencies, and updates.
-
-From the source directory, use `pnpm ncode` in place of `ncode` in the examples above. To work on your own project, open its directory and launch the built CLI:
-
-```bash
-node /absolute/path/to/minimax-code/dist/cli.js
-```
-
-This checkout builds the **Niwa Labs Ncode 0.1.2** source fork. See the [source status](docs/open-source-status.md#version-and-evidence-baseline) for its upstream base and embedded tools.
+This checkout builds the **Niwa Labs Ncode 0.1.4** source fork. The [source status](docs/open-source-status.md#version-and-evidence-baseline) lists its upstream base and embedded tools.
 
 ## Documentation and contributing
 
@@ -313,9 +135,8 @@ This checkout builds the **Niwa Labs Ncode 0.1.2** source fork. See the [source 
 - [Architecture](docs/architecture.md)
 - [Contributing](CONTRIBUTING.md), [security reporting](SECURITY.md) and [third-party notices](THIRD_PARTY_NOTICES.md)
 
-Use the Niwa Labs fork’s issues for fork behavior. For MiniMax accounts,
-official installers or the desktop app, see [upstream MiniMax Code](https://github.com/MiniMax-AI/minimax-code).
+Use the Niwa Labs fork's issues for fork behavior. For MiniMax accounts, official installers or the desktop app, see [upstream MiniMax Code](https://github.com/MiniMax-AI/minimax-code).
 
 ## License
 
-First-party code defaults to [MIT](LICENSE). Existing file-level and package-level licenses remain in place. See [third-party notices](THIRD_PARTY_NOTICES.md) and [license status](LICENSE-STATUS.md) for dependencies, assets, and `mcode-tools`.
+First-party code defaults to [MIT](LICENSE). Existing file-level and package-level licenses remain in place. See [third-party notices](THIRD_PARTY_NOTICES.md) and [license status](LICENSE-STATUS.md) for dependencies, assets and mcode-tools.
