@@ -229,7 +229,14 @@ describe('mcode daemon restart (spawn shape + readiness wait)', () => {
     expect(spawned).toHaveLength(1);
     const { argv, env } = spawned[0] as { argv: readonly string[]; env: NodeJS.ProcessEnv };
     // §4.6.2 п.2 start shape: this CLI relaunches itself as `daemon run`.
-    expect(argv.slice(-4)).toEqual(['daemon', 'run', '--data-dir', path.join(home, '.minimax')]);
+    expect(argv.slice(-6)).toEqual([
+      'daemon',
+      'run',
+      '--data-dir',
+      path.join(home, '.minimax'),
+      '--profile',
+      'default',
+    ]);
     // The env is explicitly fixed for the child (region/buildEnv trap, R6).
     expect(env['MINIMAX_DATA_DIR']).toBe(path.join(home, '.minimax'));
     expect(env['MAVIS_REGION']).toBe('en');
@@ -311,6 +318,29 @@ describe('mcode daemon restart (spawn shape + readiness wait)', () => {
     ).rejects.toThrow(/daemon start failed \(failed:migration\)/);
     expect(Date.now() - startedAt).toBeGreaterThan(400);
     expect(sleeps).toBeGreaterThan(10);
+  }, 30_000);
+
+  it('hands a default-profile restart child the default identity, not the inherited profile env', async () => {
+    const home = tempHomes.at(-1) as string;
+    const seen: Array<{ argv: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+    await expect(
+      runMcodeDaemonCommand({
+        request: { action: 'restart', profile: 'default', waitTimeoutMs: 50 },
+        homeDir: home,
+        environment: {
+          ...commandOptions(home).environment,
+          MINIMAX_PROFILE: 'astrum',
+        } as NodeJS.ProcessEnv,
+        spawnDaemon: (options) => {
+          seen.push({ argv: options.argv, env: { ...options.env } });
+          return { unref: () => undefined, pid: 4713 };
+        },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5))),
+      }),
+    ).rejects.toThrow(/did not become ready/);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.argv.slice(-2)).toEqual(['--profile', 'default']);
+    expect(seen[0]?.env['MINIMAX_PROFILE']).toBeUndefined();
   }, 30_000);
 
   it('does not wait on a previous daemon life that is still booting', async () => {

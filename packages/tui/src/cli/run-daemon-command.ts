@@ -5,7 +5,10 @@ import process from 'node:process';
 import { spawn } from 'node:child_process';
 
 import {
+  DEFAULT_PROFILE_NAME,
+  LEGACY_PROFILE_ENV_VAR,
   MCODE_SERVER_MODE_ENV,
+  PROFILE_ENV_VAR,
   getRuntimeBuildEnv,
   ensureControlRootLayout,
   getRuntimeRegion,
@@ -532,8 +535,17 @@ async function restart(
     // the previous life was stopped under its own manifest identity above.
     MAVIS_REGION: getRuntimeRegion(),
     MAVIS_BUILD_ENV: getRuntimeBuildEnv(),
-    ...(targets.profile ? { MINIMAX_PROFILE: targets.profile } : {}),
+    ...(targets.profile ? { [PROFILE_ENV_VAR]: targets.profile } : {}),
   };
+  // The child inherits the RESOLVED identity, never the caller's env: a
+  // default-profile restart under the launcher's MINIMAX_PROFILE would
+  // otherwise pair that profile with the default data directory and refuse
+  // to start. The argv names the profile (`default` for the implicit one)
+  // and both env selectors are dropped for it — the auto-spawn rule.
+  if (!targets.profile) {
+    delete childEnv[PROFILE_ENV_VAR];
+    delete childEnv[LEGACY_PROFILE_ENV_VAR];
+  }
   // A restart is an explicit daemon request: the child `daemon run` must
   // pass the §4.8 gate, so an absent or `off` switch is fixed to `auto` for
   // the child only (the caller's own environment is untouched). A live
@@ -549,7 +561,8 @@ async function restart(
     'run',
     '--data-dir',
     targets.dataDir,
-    ...(targets.profile ? ['--profile', targets.profile] : []),
+    '--profile',
+    targets.profile || DEFAULT_PROFILE_NAME,
   ];
   // §4.6.1/R11: the control root must come into existence at 0700 BEFORE the
   // restarter writes anything under it. In a COLD restart this parent is the
